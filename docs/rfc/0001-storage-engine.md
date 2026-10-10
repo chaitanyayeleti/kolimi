@@ -1,7 +1,7 @@
 # RFC 0001 — Storage Engine
 
-- **Status:** Draft
-- **Milestone:** M2 (primitives scaffolded in M0 as `kolimi-chunk`)
+- **Status:** Implemented (M2); deviations noted inline
+- **Milestone:** M2
 - **Related:** RFC 0002 (Sync Protocol), `docs/threat-model.md`
 
 ## Summary

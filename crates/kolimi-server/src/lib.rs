@@ -5,7 +5,9 @@
 
 pub mod api;
 pub mod api_passkey;
+pub mod api_sync;
 pub mod auth;
+pub mod janitor;
 
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -108,6 +110,24 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             "/api/passkeys/register/finish",
             post(api_passkey::register_finish),
+        )
+        .route("/api/sync/changes", get(api_sync::changes))
+        .route("/api/sync/tree", get(api_sync::tree))
+        .route("/api/sync/events", get(api_sync::events))
+        .route("/api/manifests/{content_id}", get(api_sync::manifest_by_id))
+        .route("/api/files/manifest", get(api_sync::file_manifest))
+        .route("/api/files", axum::routing::put(api_sync::commit_file))
+        .route(
+            "/api/chunks/{hash}",
+            get(api_sync::get_chunk).put(api_sync::put_chunk),
+        )
+        .route("/api/trash", get(api_sync::list_trash))
+        .route("/api/trash/{id}", delete(api_sync::delete_trash))
+        .route("/api/trash/{id}/restore", post(api_sync::restore_trash))
+        .route("/api/versions", get(api_sync::list_versions))
+        .route(
+            "/api/versions/{id}/restore",
+            post(api_sync::restore_version),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),

@@ -1,9 +1,9 @@
-use std::fmt::Display;
+use std::{collections::HashSet, fmt::Display, time::Duration};
 
 use futures_util::Stream;
 use kolimi_chunk::Hash;
 use kolimi_db::{Db, Node as DbNode};
-use kolimi_store::BlobStore;
+use kolimi_store::{BlobStore, SweepStats};
 
 use crate::{error::VfsError, path};
 
@@ -27,7 +27,7 @@ pub struct Node {
     pub name: String,
     /// Directory or file.
     pub kind: NodeKind,
-    /// Content hash for files.
+    /// Content manifest identity for files.
     pub content_id: Option<Hash>,
     /// Content size in bytes.
     pub size: u64,
@@ -35,6 +35,10 @@ pub struct Node {
     pub created_at: i64,
     /// Last modification time in Unix milliseconds.
     pub modified_at: i64,
+    /// Whether the node is in the trash.
+    pub trashed: bool,
+    /// Path at trash time.
+    pub original_path: Option<String>,
 }
 
 impl Node {
@@ -75,6 +79,8 @@ impl Node {
             size: node.size.max(0) as u64,
             created_at: node.created_at,
             modified_at: node.modified_at,
+            trashed: node.trashed_at.is_some(),
+            original_path: node.original_path,
         })
     }
 }
@@ -108,6 +114,15 @@ impl Vfs {
         Ok(node)
     }
 
+    /// Like [`Vfs::resolve`], but returns `None` instead of `NotFound`.
+    pub async fn stat(&self, user_id: i64, raw: &str) -> Result<Option<Node>, VfsError> {
+        match self.resolve(user_id, raw).await {
+            Ok(node) => Ok(Some(node)),
+            Err(VfsError::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Lists the dead (user-defined) properties of a path.
     pub async fn dead_props(
         &self,
@@ -132,15 +147,6 @@ impl Vfs {
         Ok(())
     }
 
-    /// Like [`Vfs::resolve`], but returns `None` instead of `NotFound`.
-    pub async fn stat(&self, user_id: i64, raw: &str) -> Result<Option<Node>, VfsError> {
-        match self.resolve(user_id, raw).await {
-            Ok(node) => Ok(Some(node)),
-            Err(VfsError::NotFound) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
     /// Lists the children of a directory.
     pub async fn list(&self, user_id: i64, raw: &str) -> Result<Vec<Node>, VfsError> {
         let node = self.resolve(user_id, raw).await?;
@@ -162,17 +168,13 @@ impl Vfs {
         {
             return Err(VfsError::AlreadyExists);
         }
+        let now = kolimi_db::now_millis();
         let node = self
             .db
-            .insert_node(
-                user_id,
-                Some(parent.id),
-                &name,
-                "dir",
-                None,
-                0,
-                kolimi_db::now_millis(),
-            )
+            .insert_node(user_id, Some(parent.id), &name, "dir", None, 0, now)
+            .await?;
+        self.db
+            .record_change(user_id, raw, "upsert", None, 0, now, None)
             .await?;
         Node::from_db(node)
     }
@@ -184,8 +186,8 @@ impl Vfs {
         if existing.as_ref().is_some_and(|n| n.kind != "file") {
             return Err(VfsError::IsCollection);
         }
-        let hash = self.store.put_bytes(user_id, data).await?;
-        self.upsert(user_id, parent.id, &name, existing, hash, data.len() as u64)
+        let manifest = self.store.ingest_bytes(user_id, data).await?;
+        self.finalize_put(user_id, raw, parent.id, &name, existing, &manifest)
             .await
     }
 
@@ -206,9 +208,64 @@ impl Vfs {
         if existing.as_ref().is_some_and(|n| n.kind != "file") {
             return Err(VfsError::IsCollection);
         }
-        let (hash, size) = self.store.put_stream(user_id, stream, max_bytes).await?;
-        self.upsert(user_id, parent.id, &name, existing, hash, size)
+        let (manifest, _size) = self.store.ingest_stream(user_id, stream, max_bytes).await?;
+        self.finalize_put(user_id, raw, parent.id, &name, existing, &manifest)
             .await
+    }
+
+    async fn finalize_put(
+        &self,
+        user_id: i64,
+        raw: &str,
+        parent_id: i64,
+        name: &str,
+        existing: Option<DbNode>,
+        manifest: &kolimi_chunk::Manifest,
+    ) -> Result<Node, VfsError> {
+        let now = kolimi_db::now_millis();
+        let content_id = manifest.content_id();
+        let node = match existing {
+            Some(node) => {
+                self.db
+                    .update_file_versioned(
+                        user_id,
+                        &node,
+                        content_id.as_bytes(),
+                        manifest.size as i64,
+                        now,
+                    )
+                    .await?;
+                self.db
+                    .node_by_id(user_id, node.id)
+                    .await?
+                    .ok_or(VfsError::NotFound)?
+            }
+            None => {
+                self.db
+                    .insert_node(
+                        user_id,
+                        Some(parent_id),
+                        name,
+                        "file",
+                        Some(content_id.as_bytes()),
+                        manifest.size as i64,
+                        now,
+                    )
+                    .await?
+            }
+        };
+        self.db
+            .record_change(
+                user_id,
+                raw,
+                "upsert",
+                Some(content_id.as_bytes()),
+                manifest.size as i64,
+                now,
+                None,
+            )
+            .await?;
+        Node::from_db(node)
     }
 
     /// Reads a file's content.
@@ -217,18 +274,100 @@ impl Vfs {
         if node.is_dir() {
             return Err(VfsError::IsCollection);
         }
-        let hash = node.content_id.ok_or(VfsError::NotFound)?;
-        let data = self.store.get(user_id, &hash).await?;
+        let content_id = node.content_id.ok_or(VfsError::NotFound)?;
+        let manifest = self.store.get_manifest(user_id, &content_id).await?;
+        let data = self.store.read_content(user_id, &manifest).await?;
         Ok((node, data))
     }
 
-    /// Deletes a file or directory (recursively for directories).
+    /// Returns the manifest of a file (for delta download).
+    pub async fn manifest_of(
+        &self,
+        user_id: i64,
+        raw: &str,
+    ) -> Result<kolimi_chunk::Manifest, VfsError> {
+        let node = self.resolve(user_id, raw).await?;
+        if node.is_dir() {
+            return Err(VfsError::IsCollection);
+        }
+        let content_id = node.content_id.ok_or(VfsError::NotFound)?;
+        Ok(self.store.get_manifest(user_id, &content_id).await?)
+    }
+
+    /// Returns a manifest by content id (for delta download).
+    pub async fn manifest(
+        &self,
+        user_id: i64,
+        content_id: &Hash,
+    ) -> Result<kolimi_chunk::Manifest, VfsError> {
+        Ok(self.store.get_manifest(user_id, content_id).await?)
+    }
+
+    /// Reads a chunk by hash (for delta download).
+    pub async fn read_chunk(&self, user_id: i64, hash: &Hash) -> Result<Vec<u8>, VfsError> {
+        Ok(self.store.get_chunk(user_id, hash).await?)
+    }
+
+    /// Stores a chunk uploaded via the sync API.
+    pub async fn write_chunk(
+        &self,
+        user_id: i64,
+        hash: &Hash,
+        data: &[u8],
+    ) -> Result<(), VfsError> {
+        Ok(self.store.put_chunk(user_id, hash, data).await?)
+    }
+
+    /// Commits a client-built manifest as a file's new content.
+    ///
+    /// Every referenced chunk must already exist; the manifest itself is
+    /// stored server-side. `expected` is the caller's view of the current
+    /// content id (`None` = file must not exist), for conflict detection.
+    pub async fn commit_manifest(
+        &self,
+        user_id: i64,
+        raw: &str,
+        manifest: &kolimi_chunk::Manifest,
+        expected: Option<&str>,
+    ) -> Result<Option<Node>, VfsError> {
+        let current = self.stat(user_id, raw).await?;
+        let current_id = current
+            .as_ref()
+            .and_then(|node| node.content_id)
+            .map(|hash| hash.to_hex());
+        if current_id.as_deref() != expected {
+            return Ok(None);
+        }
+        for chunk in &manifest.chunks {
+            if !self.store.has_chunk(user_id, &chunk.hash).await? {
+                return Err(VfsError::MissingChunk(chunk.hash));
+            }
+        }
+        // The manifest itself must be persisted server-side before the
+        // node can reference it.
+        self.store.put_manifest(user_id, manifest).await?;
+        let (parent, name) = self.resolve_parent(user_id, raw).await?;
+        let existing = match &current {
+            Some(_) => self.db.find_child(user_id, parent.id, &name).await?,
+            None => None,
+        };
+        let node = self
+            .finalize_put(user_id, raw, parent.id, &name, existing, manifest)
+            .await?;
+        Ok(Some(node))
+    }
+
+    /// Deletes a file or directory by moving it to the trash.
     pub async fn delete(&self, user_id: i64, raw: &str) -> Result<(), VfsError> {
         let node = self.resolve(user_id, raw).await?;
         if node.parent_id.is_none() {
             return Err(VfsError::Root);
         }
-        self.db.delete_node(user_id, node.id).await?;
+        let now = kolimi_db::now_millis();
+        self.db.trash_node(user_id, node.id, raw, now).await?;
+        self.db
+            .record_change(user_id, raw, "delete", None, 0, now, None)
+            .await?;
         Ok(())
     }
 
@@ -290,7 +429,9 @@ impl Vfs {
             if !overwrite {
                 return Err(VfsError::AlreadyExists);
             }
-            self.db.delete_node(user_id, existing.id).await?;
+            // Overwritten targets are recoverable: they go to the trash.
+            let now = kolimi_db::now_millis();
+            self.db.trash_node(user_id, existing.id, to, now).await?;
         }
 
         let now = kolimi_db::now_millis();
@@ -298,49 +439,246 @@ impl Vfs {
             self.db
                 .copy_subtree(user_id, &to_db(&src), dst_parent.id, &dst_name, now)
                 .await?;
+            self.db
+                .record_change(user_id, to, "upsert", None, 0, now, None)
+                .await?;
         } else {
             self.db
                 .move_node(user_id, src.id, dst_parent.id, &dst_name, now)
+                .await?;
+            self.db
+                .record_change(user_id, to, "move", None, 0, now, Some(from))
                 .await?;
         }
         Ok(existing.is_none())
     }
 
-    async fn upsert(
+    // ---- versions ------------------------------------------------------
+
+    /// Lists a file's version history (newest first).
+    pub async fn versions(
         &self,
         user_id: i64,
-        parent_id: i64,
-        name: &str,
-        existing: Option<DbNode>,
-        hash: Hash,
-        size: u64,
+        raw: &str,
+    ) -> Result<Vec<kolimi_db::VersionRow>, VfsError> {
+        let node = self.resolve(user_id, raw).await?;
+        if node.is_dir() {
+            return Err(VfsError::IsCollection);
+        }
+        Ok(self.db.list_versions(user_id, node.id).await?)
+    }
+
+    /// Restores a version as the file's current content (pushing the
+    /// current content into the history).
+    pub async fn restore_version(
+        &self,
+        user_id: i64,
+        raw: &str,
+        version_id: i64,
     ) -> Result<Node, VfsError> {
+        let node = self.resolve(user_id, raw).await?;
+        if node.is_dir() {
+            return Err(VfsError::IsCollection);
+        }
+        let version = self
+            .db
+            .version_by_id(user_id, version_id)
+            .await?
+            .filter(|version| version.node_id == node.id)
+            .ok_or(VfsError::NotFound)?;
+        let arr: [u8; 32] = version
+            .content_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| VfsError::Conflict("stored content id has wrong length".into()))?;
+        let content_id = Hash::from_bytes(arr);
+        let manifest = self.store.get_manifest(user_id, &content_id).await?;
+        let db_node = self
+            .db
+            .node_by_id(user_id, node.id)
+            .await?
+            .ok_or(VfsError::NotFound)?;
         let now = kolimi_db::now_millis();
-        let node = match existing {
-            Some(node) => {
-                self.db
-                    .update_file(user_id, node.id, hash.as_bytes(), size as i64, now)
-                    .await?;
-                self.db
-                    .node_by_id(user_id, node.id)
-                    .await?
-                    .ok_or(VfsError::NotFound)?
-            }
-            None => {
-                self.db
-                    .insert_node(
-                        user_id,
-                        Some(parent_id),
-                        name,
-                        "file",
-                        Some(hash.as_bytes()),
-                        size as i64,
-                        now,
-                    )
-                    .await?
-            }
-        };
+        self.db
+            .update_file_versioned(
+                user_id,
+                &db_node,
+                content_id.as_bytes(),
+                manifest.size as i64,
+                now,
+            )
+            .await?;
+        self.db
+            .record_change(
+                user_id,
+                raw,
+                "upsert",
+                Some(content_id.as_bytes()),
+                manifest.size as i64,
+                now,
+                None,
+            )
+            .await?;
+        let node = self
+            .db
+            .node_by_id(user_id, node.id)
+            .await?
+            .ok_or(VfsError::NotFound)?;
         Node::from_db(node)
+    }
+
+    // ---- trash ---------------------------------------------------------
+
+    /// Lists trashed nodes (recoverable deletions).
+    pub async fn trash(&self, user_id: i64) -> Result<Vec<Node>, VfsError> {
+        let rows = self.db.list_trash(user_id).await?;
+        rows.into_iter().map(Node::from_db).collect()
+    }
+
+    /// Restores a trashed node to its original location (or the root when
+    /// that location is gone), renaming on name conflicts.
+    pub async fn restore_from_trash(&self, user_id: i64, node_id: i64) -> Result<Node, VfsError> {
+        let node = self
+            .db
+            .node_by_id(user_id, node_id)
+            .await?
+            .filter(|node| node.trashed_at.is_some())
+            .ok_or(VfsError::NotFound)?;
+
+        let dest_parent = match node.parent_id {
+            Some(parent_id) => match self.db.node_by_id(user_id, parent_id).await? {
+                Some(parent) if parent.trashed_at.is_none() => parent,
+                _ => self.db.root_node(user_id).await?,
+            },
+            None => self.db.root_node(user_id).await?,
+        };
+
+        let now = kolimi_db::now_millis();
+        let name = if self
+            .db
+            .find_child(user_id, dest_parent.id, &node.name)
+            .await?
+            .is_some()
+        {
+            let mut candidate = String::new();
+            let mut found = false;
+            for attempt in 1..=100 {
+                candidate = if attempt == 1 {
+                    format!("{} (restored)", node.name)
+                } else {
+                    format!("{} (restored {attempt})", node.name)
+                };
+                if self
+                    .db
+                    .find_child(user_id, dest_parent.id, &candidate)
+                    .await?
+                    .is_none()
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(VfsError::Conflict("too many name conflicts".into()));
+            }
+            candidate
+        } else {
+            node.name.clone()
+        };
+
+        if node.parent_id != Some(dest_parent.id) || name != node.name {
+            self.db
+                .move_node(user_id, node_id, dest_parent.id, &name, now)
+                .await?;
+        }
+        self.db.restore_node(user_id, node_id).await?;
+
+        let restored = self
+            .db
+            .node_by_id(user_id, node_id)
+            .await?
+            .ok_or(VfsError::NotFound)?;
+        let path = self
+            .db
+            .node_path(user_id, node_id)
+            .await?
+            .unwrap_or_default();
+        self.db
+            .record_change(user_id, &path, "upsert", None, 0, now, None)
+            .await?;
+        Node::from_db(restored)
+    }
+
+    /// Permanently deletes a trashed node.
+    pub async fn purge_from_trash(&self, user_id: i64, node_id: i64) -> Result<(), VfsError> {
+        let node = self
+            .db
+            .node_by_id(user_id, node_id)
+            .await?
+            .filter(|node| node.trashed_at.is_some())
+            .ok_or(VfsError::NotFound)?;
+        let now = kolimi_db::now_millis();
+        self.db.delete_node(user_id, node_id).await?;
+        self.db
+            .record_change(
+                user_id,
+                node.original_path.as_deref().unwrap_or(&node.name),
+                "delete",
+                None,
+                0,
+                now,
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    // ---- maintenance ---------------------------------------------------
+
+    /// Removes blobs no longer referenced by any node or version.
+    pub async fn collect_garbage(
+        &self,
+        user_id: i64,
+        grace: Duration,
+    ) -> Result<SweepStats, VfsError> {
+        let content_ids = self.db.referenced_content_ids(user_id).await?;
+        let mut keep_manifests: HashSet<Hash> = HashSet::new();
+        let mut keep_chunks: HashSet<Hash> = HashSet::new();
+        for bytes in content_ids {
+            let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+                continue;
+            };
+            let content_id = Hash::from_bytes(arr);
+            keep_manifests.insert(content_id);
+            if let Ok(manifest) = self.store.get_manifest(user_id, &content_id).await {
+                for chunk in &manifest.chunks {
+                    keep_chunks.insert(chunk.hash);
+                }
+            }
+            // Corrupt or missing manifests keep their content id pinned but
+            // expose no chunks; under-deletion is the safe failure mode.
+        }
+        Ok(self
+            .store
+            .sweep(user_id, &keep_manifests, &keep_chunks, grace)
+            .await?)
+    }
+
+    /// Verifies all manifests referenced by a user's files and versions.
+    pub async fn verify_all(&self, user_id: i64) -> Result<(u64, u64), VfsError> {
+        let content_ids = self.db.referenced_content_ids(user_id).await?;
+        let mut checked = 0;
+        let mut bytes = 0;
+        for raw in content_ids {
+            let Ok(arr) = <[u8; 32]>::try_from(raw.as_slice()) else {
+                continue;
+            };
+            let content_id = Hash::from_bytes(arr);
+            let stats = self.store.verify_manifest(user_id, &content_id).await?;
+            checked += stats.chunks_checked;
+            bytes += stats.bytes;
+        }
+        Ok((checked, bytes))
     }
 
     async fn resolve_parent(&self, user_id: i64, raw: &str) -> Result<(Node, String), VfsError> {
@@ -374,6 +712,8 @@ fn to_db(node: &Node) -> DbNode {
         size: node.size as i64,
         created_at: node.created_at,
         modified_at: node.modified_at,
+        trashed_at: None,
+        original_path: None,
     }
 }
 
@@ -408,12 +748,237 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overwriting_changes_content_id() {
+    async fn multi_chunk_roundtrip() {
         let (_dir, vfs, user) = setup().await;
-        let first = vfs.put_bytes(user, "/a.txt", b"one").await.unwrap();
-        let second = vfs.put_bytes(user, "/a.txt", b"two").await.unwrap();
-        assert_ne!(first.etag(), second.etag());
-        assert_eq!(vfs.read(user, "/a.txt").await.unwrap().1, b"two");
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let data: Vec<u8> = (0..6 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect();
+        vfs.put_bytes(user, "/big.bin", &data).await.unwrap();
+        let manifest = vfs.manifest_of(user, "/big.bin").await.unwrap();
+        assert!(manifest.chunks.len() > 1);
+        let (_, read) = vfs.read(user, "/big.bin").await.unwrap();
+        assert_eq!(read, data);
+    }
+
+    #[tokio::test]
+    async fn overwriting_pushes_versions() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.put_bytes(user, "/a.txt", b"one").await.unwrap();
+        vfs.put_bytes(user, "/a.txt", b"two").await.unwrap();
+        vfs.put_bytes(user, "/a.txt", b"three").await.unwrap();
+
+        let versions = vfs.versions(user, "/a.txt").await.unwrap();
+        assert_eq!(versions.len(), 2);
+
+        // Identical content does not create a version.
+        vfs.put_bytes(user, "/a.txt", b"three").await.unwrap();
+        assert_eq!(vfs.versions(user, "/a.txt").await.unwrap().len(), 2);
+
+        // Restore the oldest version.
+        let oldest = versions.last().unwrap().id;
+        let restored = vfs.restore_version(user, "/a.txt", oldest).await.unwrap();
+        assert_eq!(restored.size, 3);
+        assert_eq!(vfs.read(user, "/a.txt").await.unwrap().1, b"one");
+        assert_eq!(vfs.versions(user, "/a.txt").await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn version_retention_keeps_ten() {
+        let (_dir, vfs, user) = setup().await;
+        for i in 0..15 {
+            vfs.put_bytes(user, "/a.txt", format!("v{i}").as_bytes())
+                .await
+                .unwrap();
+        }
+        assert_eq!(vfs.versions(user, "/a.txt").await.unwrap().len(), 10);
+    }
+
+    #[tokio::test]
+    async fn delete_moves_to_trash_and_restores() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.mkdir(user, "/docs").await.unwrap();
+        vfs.put_bytes(user, "/docs/a.txt", b"content")
+            .await
+            .unwrap();
+
+        vfs.delete(user, "/docs/a.txt").await.unwrap();
+        assert!(vfs.stat(user, "/docs/a.txt").await.unwrap().is_none());
+        assert_eq!(vfs.list(user, "/docs").await.unwrap().len(), 0);
+
+        let trash = vfs.trash(user).await.unwrap();
+        assert_eq!(trash.len(), 1);
+        assert_eq!(trash[0].original_path.as_deref(), Some("/docs/a.txt"));
+
+        let restored = vfs.restore_from_trash(user, trash[0].id).await.unwrap();
+        assert_eq!(restored.name, "a.txt");
+        assert_eq!(vfs.read(user, "/docs/a.txt").await.unwrap().1, b"content");
+        assert!(vfs.trash(user).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_renames_on_conflict() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.put_bytes(user, "/a.txt", b"old").await.unwrap();
+        vfs.delete(user, "/a.txt").await.unwrap();
+        vfs.put_bytes(user, "/a.txt", b"new").await.unwrap();
+
+        let trash = vfs.trash(user).await.unwrap();
+        let restored = vfs.restore_from_trash(user, trash[0].id).await.unwrap();
+        assert_eq!(restored.name, "a.txt (restored)");
+        assert_eq!(vfs.read(user, "/a.txt").await.unwrap().1, b"new");
+        assert_eq!(vfs.read(user, "/a.txt (restored)").await.unwrap().1, b"old");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_directory_trashes_the_subtree() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.mkdir(user, "/docs").await.unwrap();
+        vfs.put_bytes(user, "/docs/a.txt", b"a").await.unwrap();
+        vfs.delete(user, "/docs").await.unwrap();
+
+        assert!(vfs.stat(user, "/docs").await.unwrap().is_none());
+        assert_eq!(vfs.trash(user).await.unwrap().len(), 1);
+
+        let trash = vfs.trash(user).await.unwrap();
+        vfs.restore_from_trash(user, trash[0].id).await.unwrap();
+        assert_eq!(vfs.read(user, "/docs/a.txt").await.unwrap().1, b"a");
+    }
+
+    #[tokio::test]
+    async fn purge_removes_trashed_nodes_permanently() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.put_bytes(user, "/a.txt", b"gone").await.unwrap();
+        vfs.delete(user, "/a.txt").await.unwrap();
+        let trash = vfs.trash(user).await.unwrap();
+        vfs.purge_from_trash(user, trash[0].id).await.unwrap();
+        assert!(vfs.trash(user).await.unwrap().is_empty());
+        assert!(matches!(
+            vfs.purge_from_trash(user, trash[0].id).await,
+            Err(VfsError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn overwrite_replaces_target_into_trash() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.put_bytes(user, "/a.txt", b"old").await.unwrap();
+        vfs.put_bytes(user, "/b.txt", b"new").await.unwrap();
+        vfs.move_node(user, "/b.txt", "/a.txt", true).await.unwrap();
+        assert_eq!(vfs.read(user, "/a.txt").await.unwrap().1, b"new");
+        let trash = vfs.trash(user).await.unwrap();
+        assert_eq!(trash.len(), 1);
+        assert_eq!(trash[0].name, "a.txt");
+    }
+
+    #[tokio::test]
+    async fn changes_feed_records_lifecycle() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.mkdir(user, "/docs").await.unwrap();
+        vfs.put_bytes(user, "/docs/a.txt", b"one").await.unwrap();
+        vfs.move_node(user, "/docs/a.txt", "/docs/b.txt", false)
+            .await
+            .unwrap();
+        vfs.delete(user, "/docs/b.txt").await.unwrap();
+
+        let changes = vfs.db.changes_since(user, 0, 100).await.unwrap();
+        let ops: Vec<&str> = changes.iter().map(|c| c.op.as_str()).collect();
+        assert_eq!(ops, vec!["upsert", "upsert", "move", "delete"]);
+        assert_eq!(changes[2].from_path.as_deref(), Some("/docs/a.txt"));
+        assert_eq!(changes[2].path, "/docs/b.txt");
+
+        let since = changes[1].seq;
+        let later = vfs.db.changes_since(user, since, 100).await.unwrap();
+        assert_eq!(later.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn commit_manifest_detects_conflicts_and_missing_chunks() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.put_bytes(user, "/a.txt", b"one").await.unwrap();
+        let node = vfs.resolve(user, "/a.txt").await.unwrap();
+        let current = node.content_id.unwrap().to_hex();
+
+        // Wrong expected content id: conflict.
+        let manifest = vfs.manifest_of(user, "/a.txt").await.unwrap();
+        assert!(
+            vfs.commit_manifest(user, "/a.txt", &manifest, Some("bogus"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Correct expected id: accepted (idempotent).
+        assert!(
+            vfs.commit_manifest(user, "/a.txt", &manifest, Some(&current))
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Manifest with a chunk that was never uploaded: rejected.
+        let missing = kolimi_chunk::Manifest {
+            version: 1,
+            size: 4,
+            chunks: vec![kolimi_chunk::ChunkRef {
+                hash: Hash::of(b"nope"),
+                len: 4,
+            }],
+        };
+        assert!(matches!(
+            vfs.commit_manifest(user, "/a.txt", &missing, Some(&current))
+                .await,
+            Err(VfsError::MissingChunk(_))
+        ));
+
+        // Commit genuinely different content with all chunks present.
+        let edited = b"one plus more";
+        let stored = vfs.store.ingest_bytes(user, edited).await.unwrap();
+        let node = vfs
+            .commit_manifest(user, "/a.txt", &stored, Some(&current))
+            .await
+            .unwrap()
+            .expect("commit with fresh chunks must succeed");
+        assert_eq!(vfs.read(user, "/a.txt").await.unwrap().1, edited);
+        assert_eq!(node.size, edited.len() as u64);
+        assert_eq!(vfs.versions(user, "/a.txt").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn garbage_collection_reclaims_only_unreferenced() {
+        let (_dir, vfs, user) = setup().await;
+        let kept = vfs.put_bytes(user, "/keep.txt", b"keep").await.unwrap();
+        let old_content = vfs.put_bytes(user, "/tmp.txt", b"old").await.unwrap();
+        vfs.put_bytes(user, "/tmp.txt", b"new").await.unwrap();
+        vfs.delete(user, "/tmp.txt").await.unwrap();
+
+        // Old content is still referenced by the version history and trash.
+        let stats = vfs.collect_garbage(user, Duration::ZERO).await.unwrap();
+        assert_eq!(stats.chunks_deleted, 0);
+        assert_eq!(stats.manifests_deleted, 0);
+        assert!(
+            vfs.store
+                .has_manifest(user, &old_content.content_id.unwrap())
+                .await
+                .unwrap()
+        );
+
+        // Purging the trash and the version makes the old manifest garbage.
+        let trash = vfs.trash(user).await.unwrap();
+        vfs.purge_from_trash(user, trash[0].id).await.unwrap();
+        let versions = vfs.versions(user, "/keep.txt").await.unwrap();
+        assert!(versions.is_empty());
+        assert!(
+            vfs.store
+                .has_manifest(user, &kept.content_id.unwrap())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

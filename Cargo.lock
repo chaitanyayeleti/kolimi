@@ -1279,8 +1279,10 @@ dependencies = [
  "axum-server",
  "base64 0.23.1",
  "clap",
+ "futures-util",
  "http-body-util",
  "kolimi-auth",
+ "kolimi-chunk",
  "kolimi-db",
  "kolimi-store",
  "kolimi-vfs",
@@ -1304,10 +1306,12 @@ name = "kolimi-store"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "fastcdc",
  "futures-util",
  "getrandom 0.4.3",
  "hex",
  "kolimi-chunk",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

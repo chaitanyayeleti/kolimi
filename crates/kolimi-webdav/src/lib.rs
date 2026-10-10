@@ -407,14 +407,18 @@ fn vfs_error(e: VfsError) -> Response {
         VfsError::IsCollection => StatusCode::METHOD_NOT_ALLOWED,
         VfsError::InvalidPath(_) => StatusCode::BAD_REQUEST,
         VfsError::Root => StatusCode::FORBIDDEN,
+        VfsError::MissingChunk(_) => StatusCode::CONFLICT,
         VfsError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
         VfsError::Store(store) => match store {
             StoreError::NotFound(_) => StatusCode::NOT_FOUND,
             StoreError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            StoreError::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            StoreError::Io(_) | StoreError::Stream(_) | StoreError::Random(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            StoreError::Mismatch { .. } => StatusCode::BAD_REQUEST,
+            StoreError::Corrupt(_)
+            | StoreError::Io(_)
+            | StoreError::Stream(_)
+            | StoreError::Chunking(_)
+            | StoreError::Random(_)
+            | StoreError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         },
     };
     status.into_response()

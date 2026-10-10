@@ -29,6 +29,21 @@ enum Command {
         #[command(subcommand)]
         command: UserCommand,
     },
+    /// Back up the database snapshot and blob store.
+    Backup {
+        /// Data directory to back up.
+        #[arg(long, env = "KOLIMI_DATA", default_value = "./kolimi-data")]
+        data: PathBuf,
+        /// Destination directory (created if needed).
+        #[arg(long)]
+        to: PathBuf,
+    },
+    /// Verify the integrity of every stored file and version.
+    Verify {
+        /// Data directory to verify.
+        #[arg(long, env = "KOLIMI_DATA", default_value = "./kolimi-data")]
+        data: PathBuf,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -94,11 +109,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         None => serve(cli.serve).await,
         Some(Command::Serve(args)) => serve(args).await,
         Some(Command::User { command }) => user_command(command).await,
+        Some(Command::Backup { data, to }) => backup(data, to).await,
+        Some(Command::Verify { data }) => verify(data).await,
     }
 }
 
 async fn serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let state = AppState::init(&args.data, args.secure_cookies, &args.origin).await?;
+    tokio::spawn(kolimi_server::janitor::run(state.clone()));
     let app = build_app(state);
 
     match (args.tls_cert, args.tls_key) {
@@ -179,6 +197,52 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    Ok(())
+}
+
+async fn backup(data: PathBuf, to: PathBuf) -> Result<(), Box<dyn Error>> {
+    tokio::fs::create_dir_all(&to).await?;
+    let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
+    let db_target = to.join("kolimi.db");
+    if tokio::fs::try_exists(&db_target).await? {
+        tokio::fs::remove_file(&db_target).await?;
+    }
+    db.backup_to(&db_target).await?;
+
+    let store = kolimi_store::BlobStore::open(data.join("blobs")).await?;
+    let blobs = store.copy_tree_to(&to.join("blobs")).await?;
+    println!(
+        "backup complete: database snapshot + {blobs} blobs written to {}",
+        to.display()
+    );
+    Ok(())
+}
+
+async fn verify(data: PathBuf) -> Result<(), Box<dyn Error>> {
+    let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
+    let store = kolimi_store::BlobStore::open(data.join("blobs")).await?;
+    let vfs = kolimi_vfs::Vfs::new(db.clone(), store);
+
+    let mut failures = 0u64;
+    let users = db.list_users().await?;
+    if users.is_empty() {
+        println!("no users to verify");
+    }
+    for user in users {
+        match vfs.verify_all(user.id).await {
+            Ok((chunks, bytes)) => {
+                println!("{}: {chunks} chunks, {bytes} bytes verified", user.username);
+            }
+            Err(error) => {
+                failures += 1;
+                eprintln!("{}: FAILED: {error}", user.username);
+            }
+        }
+    }
+    if failures > 0 {
+        return Err(format!("{failures} user(s) failed verification").into());
+    }
+    println!("all content verified");
     Ok(())
 }
 

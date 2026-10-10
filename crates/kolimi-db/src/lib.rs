@@ -93,6 +93,47 @@ pub struct Node {
     pub created_at: i64,
     /// Last modification time in Unix milliseconds.
     pub modified_at: i64,
+    /// When the node was moved to the trash (`None` = live).
+    pub trashed_at: Option<i64>,
+    /// Path the node had when it was trashed (for the trash view).
+    pub original_path: Option<String>,
+}
+
+/// A historical version of a file.
+#[derive(Debug, Clone, FromRow)]
+pub struct VersionRow {
+    /// Primary key.
+    pub id: i64,
+    /// Owning user.
+    pub user_id: i64,
+    /// The file this version belongs to.
+    pub node_id: i64,
+    /// BLAKE3 manifest identity of this version.
+    pub content_id: Vec<u8>,
+    /// Size in bytes.
+    pub size: i64,
+    /// When this version was superseded.
+    pub created_at: i64,
+}
+
+/// One entry of a user's change feed.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct ChangeRow {
+    /// Monotonic per-user sequence number.
+    pub seq: i64,
+    /// Affected path.
+    pub path: String,
+    /// Previous path for moves.
+    pub from_path: Option<String>,
+    /// `upsert`, `delete`, or `move`.
+    pub op: String,
+    /// Content identity for files.
+    #[serde(skip_serializing)]
+    pub content_id: Option<Vec<u8>>,
+    /// Size in bytes.
+    pub size: i64,
+    /// Event time in Unix milliseconds.
+    pub modified_at: i64,
 }
 
 /// A registered passkey (WebAuthn credential).
@@ -499,7 +540,7 @@ impl Db {
             .ok_or_else(|| DbError::NotFound("root node".to_string()))
     }
 
-    /// Finds a direct child by name.
+    /// Finds a direct child by name (excluding trashed nodes).
     pub async fn find_child(
         &self,
         user_id: i64,
@@ -507,7 +548,8 @@ impl Db {
         name: &str,
     ) -> Result<Option<Node>, DbError> {
         Ok(sqlx::query_as::<_, Node>(
-            "SELECT * FROM nodes WHERE user_id = ? AND parent_id = ? AND name = ?",
+            "SELECT * FROM nodes
+             WHERE user_id = ? AND parent_id = ? AND name = ? AND trashed_at IS NULL",
         )
         .bind(user_id)
         .bind(parent_id)
@@ -527,15 +569,319 @@ impl Db {
         )
     }
 
-    /// Lists the children of a directory, ordered by name.
+    /// Lists the children of a directory, ordered by name (excluding trashed).
     pub async fn children(&self, user_id: i64, parent_id: i64) -> Result<Vec<Node>, DbError> {
         Ok(sqlx::query_as::<_, Node>(
-            "SELECT * FROM nodes WHERE user_id = ? AND parent_id = ? ORDER BY name",
+            "SELECT * FROM nodes
+             WHERE user_id = ? AND parent_id = ? AND trashed_at IS NULL
+             ORDER BY name",
         )
         .bind(user_id)
         .bind(parent_id)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// Updates a file's content, pushing the old content into the version
+    /// history first. Touching identical content only bumps `modified_at`.
+    pub async fn update_file_versioned(
+        &self,
+        user_id: i64,
+        node: &Node,
+        content_id: &[u8],
+        size: i64,
+        now: i64,
+    ) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        let changed = node.content_id.as_deref() != Some(content_id);
+        if changed {
+            if let Some(old) = &node.content_id {
+                sqlx::query(
+                    "INSERT INTO versions (user_id, node_id, content_id, size, created_at)
+                     VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(user_id)
+                .bind(node.id)
+                .bind(old.as_slice())
+                .bind(node.size)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "DELETE FROM versions WHERE node_id = ?1 AND id NOT IN (
+                         SELECT id FROM versions WHERE node_id = ?1
+                         ORDER BY created_at DESC, id DESC LIMIT 10
+                     )",
+                )
+                .bind(node.id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            sqlx::query(
+                "UPDATE nodes SET content_id = ?, size = ?, modified_at = ?
+                 WHERE user_id = ? AND id = ?",
+            )
+            .bind(content_id)
+            .bind(size)
+            .bind(now)
+            .bind(user_id)
+            .bind(node.id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query("UPDATE nodes SET modified_at = ? WHERE user_id = ? AND id = ?")
+                .bind(now)
+                .bind(user_id)
+                .bind(node.id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Lists a file's versions, newest first.
+    pub async fn list_versions(
+        &self,
+        user_id: i64,
+        node_id: i64,
+    ) -> Result<Vec<VersionRow>, DbError> {
+        Ok(sqlx::query_as::<_, VersionRow>(
+            "SELECT * FROM versions WHERE user_id = ? AND node_id = ?
+             ORDER BY created_at DESC, id DESC",
+        )
+        .bind(user_id)
+        .bind(node_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Fetches one version by id.
+    pub async fn version_by_id(
+        &self,
+        user_id: i64,
+        version_id: i64,
+    ) -> Result<Option<VersionRow>, DbError> {
+        Ok(
+            sqlx::query_as::<_, VersionRow>("SELECT * FROM versions WHERE user_id = ? AND id = ?")
+                .bind(user_id)
+                .bind(version_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Deletes versions older than `cutoff`.
+    pub async fn prune_versions(&self, user_id: i64, cutoff: i64) -> Result<u64, DbError> {
+        let result = sqlx::query("DELETE FROM versions WHERE user_id = ? AND created_at < ?")
+            .bind(user_id)
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Moves a node to the trash.
+    pub async fn trash_node(
+        &self,
+        user_id: i64,
+        node_id: i64,
+        original_path: &str,
+        now: i64,
+    ) -> Result<(), DbError> {
+        let result = sqlx::query(
+            "UPDATE nodes SET trashed_at = ?, original_path = ?
+             WHERE user_id = ? AND id = ? AND trashed_at IS NULL",
+        )
+        .bind(now)
+        .bind(original_path)
+        .bind(user_id)
+        .bind(node_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("node {node_id}")));
+        }
+        Ok(())
+    }
+
+    /// Lists trashed nodes, newest first.
+    pub async fn list_trash(&self, user_id: i64) -> Result<Vec<Node>, DbError> {
+        Ok(sqlx::query_as::<_, Node>(
+            "SELECT * FROM nodes WHERE user_id = ? AND trashed_at IS NOT NULL
+             ORDER BY trashed_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Clears the trash flag on a node (caller resolves name conflicts first).
+    pub async fn restore_node(&self, user_id: i64, node_id: i64) -> Result<(), DbError> {
+        let result = sqlx::query(
+            "UPDATE nodes SET trashed_at = NULL, original_path = NULL
+             WHERE user_id = ? AND id = ? AND trashed_at IS NOT NULL",
+        )
+        .bind(user_id)
+        .bind(node_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx(e, "a node with that name already exists"))?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("trashed node {node_id}")));
+        }
+        Ok(())
+    }
+
+    /// Permanently deletes trashed nodes older than `cutoff`.
+    pub async fn purge_trash(&self, user_id: i64, cutoff: i64) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "DELETE FROM nodes WHERE user_id = ? AND trashed_at IS NOT NULL AND trashed_at < ?",
+        )
+        .bind(user_id)
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Records a change-feed event.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_change(
+        &self,
+        user_id: i64,
+        path: &str,
+        op: &str,
+        content_id: Option<&[u8]>,
+        size: i64,
+        modified_at: i64,
+        from_path: Option<&str>,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO changes (user_id, path, from_path, op, content_id, size, modified_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(path)
+        .bind(from_path)
+        .bind(op)
+        .bind(content_id)
+        .bind(size)
+        .bind(modified_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Returns change-feed events after `since`, oldest first.
+    pub async fn changes_since(
+        &self,
+        user_id: i64,
+        since: i64,
+        limit: i64,
+    ) -> Result<Vec<ChangeRow>, DbError> {
+        Ok(sqlx::query_as::<_, ChangeRow>(
+            "SELECT * FROM changes WHERE user_id = ? AND seq > ?
+             ORDER BY seq LIMIT ?",
+        )
+        .bind(user_id)
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Latest change sequence for a user (0 if the feed is empty).
+    pub async fn latest_change_seq(&self, user_id: i64) -> Result<i64, DbError> {
+        let (seq,): (i64,) =
+            sqlx::query_as("SELECT COALESCE(MAX(seq), 0) FROM changes WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(seq)
+    }
+
+    /// Computes the full path of a node by walking its ancestors.
+    pub async fn node_path(&self, user_id: i64, node_id: i64) -> Result<Option<String>, DbError> {
+        let names: Vec<(String,)> = sqlx::query_as(
+            "WITH RECURSIVE ancestors(id, parent_id, name, lvl) AS (
+                 SELECT id, parent_id, name, 0 FROM nodes WHERE user_id = ? AND id = ?
+                 UNION ALL
+                 SELECT n.id, n.parent_id, n.name, a.lvl + 1
+                 FROM nodes n JOIN ancestors a ON n.id = a.parent_id
+             )
+             SELECT name FROM ancestors ORDER BY lvl DESC",
+        )
+        .bind(user_id)
+        .bind(node_id)
+        .fetch_all(&self.pool)
+        .await?;
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let mut path = String::from("/");
+        let parts: Vec<&str> = names
+            .iter()
+            .map(|(name,)| name.as_str())
+            .filter(|name| !name.is_empty())
+            .collect();
+        path.push_str(&parts.join("/"));
+        Ok(Some(path))
+    }
+
+    /// Lists live nodes by ascending id after `after_id` (sync snapshot).
+    pub async fn tree_nodes(
+        &self,
+        user_id: i64,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Node>, DbError> {
+        Ok(sqlx::query_as::<_, Node>(
+            "SELECT * FROM nodes WHERE user_id = ? AND trashed_at IS NULL AND id > ?
+             ORDER BY id LIMIT ?",
+        )
+        .bind(user_id)
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Lists every live node of a user (used to build sync tree paths).
+    pub async fn all_live_nodes(&self, user_id: i64) -> Result<Vec<Node>, DbError> {
+        Ok(sqlx::query_as::<_, Node>(
+            "SELECT * FROM nodes WHERE user_id = ? AND trashed_at IS NULL ORDER BY id",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// All content ids referenced by live nodes or their versions.
+    pub async fn referenced_content_ids(&self, user_id: i64) -> Result<Vec<Vec<u8>>, DbError> {
+        let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT content_id FROM nodes WHERE user_id = ? AND content_id IS NOT NULL
+             UNION
+             SELECT content_id FROM versions WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(content_id,)| content_id).collect())
+    }
+
+    /// Writes a consistent snapshot of the database to `path` (`VACUUM INTO`).
+    ///
+    /// `VACUUM INTO` takes a string literal rather than a bind parameter, so
+    /// the single-quoted literal is escaped here and audited for injection.
+    pub async fn backup_to(&self, path: &Path) -> Result<(), DbError> {
+        let escaped = path.to_string_lossy().replace('\'', "''");
+        let statement = format!("VACUUM INTO '{escaped}'");
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Inserts a new node.

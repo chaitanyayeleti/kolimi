@@ -29,6 +29,9 @@ pub enum VfsError {
     /// Blob store failure.
     #[error("storage error: {0}")]
     Store(#[from] kolimi_store::StoreError),
+    /// A manifest referenced a chunk that has not been uploaded.
+    #[error("missing chunk {0}")]
+    MissingChunk(kolimi_chunk::Hash),
 }
 
 /// Errors from path parsing.

@@ -49,6 +49,7 @@
 | **M1** (6 wk) | Single binary: users, passkeys + sessions, WebDAV core (GET/PUT/PROPFIND/MOVE/COPY/DELETE), TLS | rclone + davfs + `litmus` test suite pass |
 | ↳ *core landed* | password/session auth, passkeys (WebAuthn, passwordless login, SSO-free), WebDAV (OPTIONS/GET/HEAD/PUT/DELETE/MKCOL/PROPFIND/COPY/MOVE), per-user blob store, TLS, lockout, CSRF, 115 tests | rclone validated (byte-identical upload/download, MOVE, DELETE); litmus run pending |
 | **M2** (6 wk) | CAS engine, resumable chunked upload, versions, trash, delta sync, SSE notify, scrub, backup/restore CLI | `kill -9` mid-upload leaves zero corruption; restore drill passes |
+| ↳ *landed* | chunked CAS (FastCDC + BLAKE3 manifests), chunk-level delta upload/download API, version history (10/file + 30d), recoverable trash (30d) with restore/purge, change feed + tree snapshot + SSE pings, janitor (retention + grace-period GC), `backup`/`verify` CLI | crash drill passed (no partial visibility, verify clean), backup→verify round-trip passed, rclone byte-identical |
 | **M3** (6 wk) | Sharing (users/groups, public links with password + expiry by default), Leptos web UI MVP | share links work end-to-end, ACL tests exhaustive |
 | **M4** (8 wk) | CalDAV/CardDAV + sync-collection REPORT, reminders | Thunderbird + iOS/macOS native clients sync cleanly |
 | **M5** (6 wk) | tantivy search, sandboxed preview workers (landlock/seccomp), desktop client alpha, mobile background upload | a preview crash cannot kill the server; memory fuzz clean |
