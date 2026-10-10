@@ -29,6 +29,11 @@ enum Command {
         #[command(subcommand)]
         command: UserCommand,
     },
+    /// Manage groups.
+    Group {
+        #[command(subcommand)]
+        command: GroupCommand,
+    },
     /// Back up the database snapshot and blob store.
     Backup {
         /// Data directory to back up.
@@ -96,6 +101,20 @@ enum UserCommand {
     List,
 }
 
+#[derive(Subcommand)]
+enum GroupCommand {
+    /// Create a group.
+    Add { name: String },
+    /// List groups and their members.
+    List,
+    /// Add a user to a group.
+    AddMember { group: String, username: String },
+    /// Remove a user from a group.
+    RemoveMember { group: String, username: String },
+    /// Delete a group (its shares are revoked).
+    Delete { name: String },
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
@@ -109,6 +128,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         None => serve(cli.serve).await,
         Some(Command::Serve(args)) => serve(args).await,
         Some(Command::User { command }) => user_command(command).await,
+        Some(Command::Group { command }) => group_command(command).await,
         Some(Command::Backup { data, to }) => backup(data, to).await,
         Some(Command::Verify { data }) => verify(data).await,
     }
@@ -195,6 +215,68 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
                     user.id, user.username, user.is_admin, user.disabled
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+async fn group_command(command: GroupCommand) -> Result<(), Box<dyn Error>> {
+    let data: PathBuf =
+        std::env::var("KOLIMI_DATA").map_or_else(|_| PathBuf::from("./kolimi-data"), PathBuf::from);
+    tokio::fs::create_dir_all(&data).await?;
+    let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
+
+    match command {
+        GroupCommand::Add { name } => {
+            let group = db.create_group(&name).await?;
+            println!("created group {} (id {})", group.name, group.id);
+        }
+        GroupCommand::List => {
+            for group in db.list_groups().await? {
+                let members = db.group_members(group.id).await?;
+                let names: Vec<&str> = members.iter().map(|m| m.username.as_str()).collect();
+                println!(
+                    "{}\t{}\tmembers: {}",
+                    group.id,
+                    group.name,
+                    names.join(", ")
+                );
+            }
+        }
+        GroupCommand::AddMember { group, username } => {
+            let group = db
+                .group_by_name(&group)
+                .await?
+                .ok_or_else(|| format!("no such group: {group}"))?;
+            let user = db
+                .find_user(&username)
+                .await?
+                .ok_or_else(|| format!("no such user: {username}"))?;
+            db.add_group_member(group.id, user.id).await?;
+            println!("added {} to {}", user.username, group.name);
+        }
+        GroupCommand::RemoveMember { group, username } => {
+            let group = db
+                .group_by_name(&group)
+                .await?
+                .ok_or_else(|| format!("no such group: {group}"))?;
+            let user = db
+                .find_user(&username)
+                .await?
+                .ok_or_else(|| format!("no such user: {username}"))?;
+            if db.remove_group_member(group.id, user.id).await? {
+                println!("removed {} from {}", user.username, group.name);
+            } else {
+                println!("{} was not a member of {}", user.username, group.name);
+            }
+        }
+        GroupCommand::Delete { name } => {
+            let group = db
+                .group_by_name(&name)
+                .await?
+                .ok_or_else(|| format!("no such group: {name}"))?;
+            db.delete_group(group.id).await?;
+            println!("deleted group {}", group.name);
         }
     }
     Ok(())

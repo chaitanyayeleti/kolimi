@@ -23,7 +23,7 @@ use axum::{
 };
 use kolimi_auth::CurrentUser;
 use kolimi_store::StoreError;
-use kolimi_vfs::{Vfs, VfsError};
+use kolimi_vfs::{Node, NodeKind, SHARED_MOUNT, Vfs, VfsError};
 
 const ALLOW: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, MKCOL";
 const MAX_PROPFIND_BODY: usize = 1024 * 1024;
@@ -98,11 +98,12 @@ fn method_not_allowed() -> Response {
 }
 
 async fn get(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, head: bool) -> Response {
-    let (node, data) = match vfs.read(user_id, path).await {
+    let (access, data) = match vfs.read_access(user_id, path).await {
         Ok(result) => result,
-        Err(VfsError::IsCollection) => return method_not_allowed(),
+        Err(VfsError::IsCollection | VfsError::SharedRoot) => return method_not_allowed(),
         Err(e) => return vfs_error(e),
     };
+    let node = access.node;
 
     let etag = node.etag();
     if let Some(value) = header_str(headers, header::IF_NONE_MATCH)
@@ -142,8 +143,8 @@ async fn get(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, head: boo
 }
 
 async fn put(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, body: Body) -> Response {
-    let existing = match vfs.stat(user_id, path).await {
-        Ok(existing) => existing,
+    let existing = match vfs.stat_access(user_id, path).await {
+        Ok(existing) => existing.map(|access| access.node),
         Err(e) => return vfs_error(e),
     };
 
@@ -166,7 +167,7 @@ async fn put(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, body: Bod
 
     let stream = Box::pin(body.into_data_stream());
     match vfs
-        .put_stream(user_id, path, stream, MAX_UPLOAD_BYTES)
+        .put_stream_access(user_id, path, stream, MAX_UPLOAD_BYTES)
         .await
     {
         Ok(node) => {
@@ -186,7 +187,7 @@ async fn put(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, body: Bod
 }
 
 async fn delete(vfs: &Vfs, user_id: i64, path: &str) -> Response {
-    match vfs.delete(user_id, path).await {
+    match vfs.delete_access(user_id, path).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(VfsError::Root) => StatusCode::FORBIDDEN.into_response(),
         Err(e) => vfs_error(e),
@@ -198,7 +199,7 @@ async fn mkcol(vfs: &Vfs, user_id: i64, path: &str, body: Body) -> Response {
         Ok(bytes) if bytes.is_empty() => {}
         _ => return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
     }
-    match vfs.mkdir(user_id, path).await {
+    match vfs.mkdir_access(user_id, path).await {
         Ok(_) => StatusCode::CREATED.into_response(),
         Err(VfsError::AlreadyExists) => StatusCode::METHOD_NOT_ALLOWED.into_response(),
         Err(e) => vfs_error(e),
@@ -233,30 +234,45 @@ async fn propfind(
         Err(()) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    let node = match vfs.resolve(user_id, path).await {
-        Ok(node) => node,
-        Err(e) => return vfs_error(e),
-    };
-
-    let mut entries = vec![xml::PropEntry::new(segments, &node)];
-    if let Ok(dead) = vfs.dead_props(user_id, path).await
-        && let Some(first) = entries.first_mut()
-    {
-        first.dead_props = dead
-            .into_iter()
-            .map(|p| (p.namespace, p.name, p.value))
-            .collect();
-    }
-    if node.is_dir() && depth == "1" {
-        match vfs.list(user_id, path).await {
-            Ok(children) => {
-                for child in children {
-                    let mut child_segments = segments.to_vec();
-                    child_segments.push(child.name.clone());
-                    entries.push(xml::PropEntry::new(&child_segments, &child));
-                }
+    let mut entries = Vec::new();
+    if segments.first().map(String::as_str) == Some(SHARED_MOUNT) && segments.len() == 1 {
+        // The virtual root of received shares.
+        entries.push(xml::PropEntry::new(segments, &shared_root_node()));
+        if depth == "1"
+            && let Ok(mounts) = vfs.received_mounts(user_id).await
+        {
+            for mount in mounts {
+                let mut child_segments = segments.to_vec();
+                child_segments.push(mount.name.clone());
+                entries.push(xml::PropEntry::new(&child_segments, &mount.to_node()));
             }
+        }
+    } else {
+        let access = match vfs.resolve_access(user_id, path).await {
+            Ok(access) => access,
             Err(e) => return vfs_error(e),
+        };
+        let node = access.node;
+        entries.push(xml::PropEntry::new(segments, &node));
+        if let Ok(dead) = vfs.dead_props_access(user_id, path).await
+            && let Some(first) = entries.first_mut()
+        {
+            first.dead_props = dead
+                .into_iter()
+                .map(|p| (p.namespace, p.name, p.value))
+                .collect();
+        }
+        if node.is_dir() && depth == "1" {
+            match vfs.list_access(user_id, path).await {
+                Ok((_, children)) => {
+                    for child in children {
+                        let mut child_segments = segments.to_vec();
+                        child_segments.push(child.name.clone());
+                        entries.push(xml::PropEntry::new(&child_segments, &child));
+                    }
+                }
+                Err(e) => return vfs_error(e),
+            }
         }
     }
 
@@ -289,7 +305,7 @@ async fn proppatch(
         Ok(ops) if !ops.is_empty() => ops,
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
-    if let Err(e) = vfs.resolve(user_id, path).await {
+    if let Err(e) = vfs.resolve_access(user_id, path).await {
         return vfs_error(e);
     }
 
@@ -329,7 +345,7 @@ async fn proppatch(
     }
 
     if !db_ops.is_empty()
-        && let Err(e) = vfs.apply_proppatch(user_id, path, &db_ops).await
+        && let Err(e) = vfs.apply_proppatch_access(user_id, path, &db_ops).await
     {
         return vfs_error(e);
     }
@@ -374,10 +390,10 @@ async fn copy_move(
     };
 
     let result = if is_move {
-        vfs.move_node(user_id, source, &destination, overwrite)
+        vfs.transfer_access(user_id, source, &destination, overwrite, false)
             .await
     } else {
-        vfs.copy_node(user_id, source, &destination, overwrite)
+        vfs.transfer_access(user_id, source, &destination, overwrite, true)
             .await
     };
 
@@ -398,15 +414,30 @@ fn header_str(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) 
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
+fn shared_root_node() -> Node {
+    Node {
+        id: -1,
+        parent_id: None,
+        name: SHARED_MOUNT.to_string(),
+        kind: NodeKind::Dir,
+        content_id: None,
+        size: 0,
+        created_at: 0,
+        modified_at: 0,
+        trashed: false,
+        original_path: None,
+    }
+}
+
 fn vfs_error(e: VfsError) -> Response {
     let status = match &e {
         VfsError::NotFound => StatusCode::NOT_FOUND,
         VfsError::AlreadyExists | VfsError::ParentNotCollection | VfsError::Conflict(_) => {
             StatusCode::CONFLICT
         }
-        VfsError::IsCollection => StatusCode::METHOD_NOT_ALLOWED,
+        VfsError::IsCollection | VfsError::SharedRoot => StatusCode::METHOD_NOT_ALLOWED,
         VfsError::InvalidPath(_) => StatusCode::BAD_REQUEST,
-        VfsError::Root => StatusCode::FORBIDDEN,
+        VfsError::Root | VfsError::Forbidden => StatusCode::FORBIDDEN,
         VfsError::MissingChunk(_) => StatusCode::CONFLICT,
         VfsError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
         VfsError::Store(store) => match store {

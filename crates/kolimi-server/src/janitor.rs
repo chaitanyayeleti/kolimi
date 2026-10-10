@@ -28,6 +28,8 @@ pub struct Report {
     pub chunks_deleted: u64,
     /// Manifest blobs reclaimed.
     pub manifests_deleted: u64,
+    /// Expired public-link unlock sessions removed.
+    pub expired_link_sessions: u64,
 }
 
 /// Errors during a janitor pass.
@@ -58,6 +60,7 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
         report.chunks_deleted += swept.chunks_deleted;
         report.manifests_deleted += swept.manifests_deleted;
     }
+    report.expired_link_sessions = state.db.delete_expired_link_sessions(now).await?;
     Ok(report)
 }
 
@@ -74,6 +77,7 @@ pub async fn run(state: AppState) {
                     pruned_versions = report.pruned_versions,
                     chunks_deleted = report.chunks_deleted,
                     manifests_deleted = report.manifests_deleted,
+                    expired_link_sessions = report.expired_link_sessions,
                     "janitor pass complete"
                 );
             }

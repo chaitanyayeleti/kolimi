@@ -23,6 +23,12 @@ pub enum VfsError {
     /// The root collection cannot be modified.
     #[error("cannot modify the root collection")]
     Root,
+    /// The caller lacks the required permission.
+    #[error("forbidden")]
+    Forbidden,
+    /// The virtual `/Shared with me` root itself was addressed.
+    #[error("the shared root is a virtual collection")]
+    SharedRoot,
     /// Database failure.
     #[error("database error: {0}")]
     Db(#[from] kolimi_db::DbError),

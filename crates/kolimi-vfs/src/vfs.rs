@@ -55,7 +55,7 @@ impl Node {
         }
     }
 
-    fn from_db(node: DbNode) -> Result<Self, VfsError> {
+    pub(crate) fn from_db(node: DbNode) -> Result<Self, VfsError> {
         let kind = match node.kind.as_str() {
             "dir" => NodeKind::Dir,
             _ => NodeKind::File,
@@ -88,8 +88,8 @@ impl Node {
 /// The virtual filesystem: a per-user tree over the database and blob store.
 #[derive(Debug, Clone)]
 pub struct Vfs {
-    db: Db,
-    store: BlobStore,
+    pub(crate) db: Db,
+    pub(crate) store: BlobStore,
 }
 
 impl Vfs {
@@ -160,9 +160,18 @@ impl Vfs {
     /// Creates a directory.
     pub async fn mkdir(&self, user_id: i64, raw: &str) -> Result<Node, VfsError> {
         let (parent, name) = self.resolve_parent(user_id, raw).await?;
+        self.mkdir_at(user_id, parent.id, &name).await
+    }
+
+    pub(crate) async fn mkdir_at(
+        &self,
+        user_id: i64,
+        parent_id: i64,
+        name: &str,
+    ) -> Result<Node, VfsError> {
         if self
             .db
-            .find_child(user_id, parent.id, &name)
+            .find_child(user_id, parent_id, name)
             .await?
             .is_some()
         {
@@ -171,10 +180,11 @@ impl Vfs {
         let now = kolimi_db::now_millis();
         let node = self
             .db
-            .insert_node(user_id, Some(parent.id), &name, "dir", None, 0, now)
+            .insert_node(user_id, Some(parent_id), name, "dir", None, 0, now)
             .await?;
+        let path = self.change_path(user_id, parent_id, name).await?;
         self.db
-            .record_change(user_id, raw, "upsert", None, 0, now, None)
+            .record_change(user_id, &path, "upsert", None, 0, now, None)
             .await?;
         Node::from_db(node)
     }
@@ -187,7 +197,7 @@ impl Vfs {
             return Err(VfsError::IsCollection);
         }
         let manifest = self.store.ingest_bytes(user_id, data).await?;
-        self.finalize_put(user_id, raw, parent.id, &name, existing, &manifest)
+        self.finalize_put_at(user_id, parent.id, &name, existing, &manifest)
             .await
     }
 
@@ -204,19 +214,34 @@ impl Vfs {
         E: Display,
     {
         let (parent, name) = self.resolve_parent(user_id, raw).await?;
-        let existing = self.db.find_child(user_id, parent.id, &name).await?;
+        self.put_stream_at(user_id, parent.id, &name, stream, max_bytes)
+            .await
+    }
+
+    pub(crate) async fn put_stream_at<B, E>(
+        &self,
+        user_id: i64,
+        parent_id: i64,
+        name: &str,
+        stream: impl Stream<Item = Result<B, E>> + Unpin,
+        max_bytes: u64,
+    ) -> Result<Node, VfsError>
+    where
+        B: AsRef<[u8]>,
+        E: Display,
+    {
+        let existing = self.db.find_child(user_id, parent_id, name).await?;
         if existing.as_ref().is_some_and(|n| n.kind != "file") {
             return Err(VfsError::IsCollection);
         }
         let (manifest, _size) = self.store.ingest_stream(user_id, stream, max_bytes).await?;
-        self.finalize_put(user_id, raw, parent.id, &name, existing, &manifest)
+        self.finalize_put_at(user_id, parent_id, name, existing, &manifest)
             .await
     }
 
-    async fn finalize_put(
+    pub(crate) async fn finalize_put_at(
         &self,
         user_id: i64,
-        raw: &str,
         parent_id: i64,
         name: &str,
         existing: Option<DbNode>,
@@ -224,7 +249,7 @@ impl Vfs {
     ) -> Result<Node, VfsError> {
         let now = kolimi_db::now_millis();
         let content_id = manifest.content_id();
-        let node = match existing {
+        let (node, path) = match existing {
             Some(node) => {
                 self.db
                     .update_file_versioned(
@@ -235,13 +260,21 @@ impl Vfs {
                         now,
                     )
                     .await?;
-                self.db
+                let updated = self
+                    .db
                     .node_by_id(user_id, node.id)
                     .await?
-                    .ok_or(VfsError::NotFound)?
+                    .ok_or(VfsError::NotFound)?;
+                let path = self
+                    .db
+                    .node_path(user_id, node.id)
+                    .await?
+                    .unwrap_or_else(|| format!("/{name}"));
+                (updated, path)
             }
             None => {
-                self.db
+                let node = self
+                    .db
                     .insert_node(
                         user_id,
                         Some(parent_id),
@@ -251,13 +284,15 @@ impl Vfs {
                         manifest.size as i64,
                         now,
                     )
-                    .await?
+                    .await?;
+                let path = self.change_path(user_id, parent_id, name).await?;
+                (node, path)
             }
         };
         self.db
             .record_change(
                 user_id,
-                raw,
+                &path,
                 "upsert",
                 Some(content_id.as_bytes()),
                 manifest.size as i64,
@@ -266,6 +301,25 @@ impl Vfs {
             )
             .await?;
         Node::from_db(node)
+    }
+
+    /// The change-feed path of `parent_id`/`name` in the owner's tree.
+    pub(crate) async fn change_path(
+        &self,
+        user_id: i64,
+        parent_id: i64,
+        name: &str,
+    ) -> Result<String, VfsError> {
+        let parent = self
+            .db
+            .node_path(user_id, parent_id)
+            .await?
+            .unwrap_or_else(|| "/".to_string());
+        Ok(if parent == "/" {
+            format!("/{name}")
+        } else {
+            format!("{parent}/{name}")
+        })
     }
 
     /// Reads a file's content.
@@ -352,7 +406,7 @@ impl Vfs {
             None => None,
         };
         let node = self
-            .finalize_put(user_id, raw, parent.id, &name, existing, manifest)
+            .finalize_put_at(user_id, parent.id, &name, existing, manifest)
             .await?;
         Ok(Some(node))
     }
@@ -363,10 +417,19 @@ impl Vfs {
         if node.parent_id.is_none() {
             return Err(VfsError::Root);
         }
+        self.trash_node_at(user_id, &node).await
+    }
+
+    pub(crate) async fn trash_node_at(&self, user_id: i64, node: &Node) -> Result<(), VfsError> {
         let now = kolimi_db::now_millis();
-        self.db.trash_node(user_id, node.id, raw, now).await?;
+        let path = self
+            .db
+            .node_path(user_id, node.id)
+            .await?
+            .unwrap_or_else(|| format!("/{}", node.name));
+        self.db.trash_node(user_id, node.id, &path, now).await?;
         self.db
-            .record_change(user_id, raw, "delete", None, 0, now, None)
+            .record_change(user_id, &path, "delete", None, 0, now, None)
             .await?;
         Ok(())
     }
@@ -407,9 +470,21 @@ impl Vfs {
             return Err(VfsError::Root);
         }
         let (dst_parent, dst_name) = self.resolve_parent(user_id, to).await?;
+        self.transfer_at(user_id, &src, dst_parent.id, &dst_name, overwrite, copy)
+            .await
+    }
 
+    pub(crate) async fn transfer_at(
+        &self,
+        user_id: i64,
+        src: &Node,
+        dst_parent_id: i64,
+        dst_name: &str,
+        overwrite: bool,
+        copy: bool,
+    ) -> Result<bool, VfsError> {
         if src.is_dir() {
-            let mut cursor = Some(dst_parent.id);
+            let mut cursor = Some(dst_parent_id);
             while let Some(id) = cursor {
                 if id == src.id {
                     return Err(VfsError::Conflict(
@@ -421,33 +496,44 @@ impl Vfs {
             }
         }
 
-        let existing = self
-            .db
-            .find_child(user_id, dst_parent.id, &dst_name)
-            .await?;
+        let existing = self.db.find_child(user_id, dst_parent_id, dst_name).await?;
         if let Some(existing) = &existing {
             if !overwrite {
                 return Err(VfsError::AlreadyExists);
             }
             // Overwritten targets are recoverable: they go to the trash.
             let now = kolimi_db::now_millis();
-            self.db.trash_node(user_id, existing.id, to, now).await?;
+            let existing_path = self
+                .db
+                .node_path(user_id, existing.id)
+                .await?
+                .unwrap_or_else(|| format!("/{dst_name}"));
+            self.db
+                .trash_node(user_id, existing.id, &existing_path, now)
+                .await?;
         }
 
         let now = kolimi_db::now_millis();
         if copy {
             self.db
-                .copy_subtree(user_id, &to_db(&src), dst_parent.id, &dst_name, now)
+                .copy_subtree(user_id, &to_db(src), dst_parent_id, dst_name, now)
                 .await?;
+            let path = self.change_path(user_id, dst_parent_id, dst_name).await?;
             self.db
-                .record_change(user_id, to, "upsert", None, 0, now, None)
+                .record_change(user_id, &path, "upsert", None, 0, now, None)
                 .await?;
         } else {
+            let from_path = self
+                .db
+                .node_path(user_id, src.id)
+                .await?
+                .unwrap_or_default();
             self.db
-                .move_node(user_id, src.id, dst_parent.id, &dst_name, now)
+                .move_node(user_id, src.id, dst_parent_id, dst_name, now)
                 .await?;
+            let path = self.change_path(user_id, dst_parent_id, dst_name).await?;
             self.db
-                .record_change(user_id, to, "move", None, 0, now, Some(from))
+                .record_change(user_id, &path, "move", None, 0, now, Some(&from_path))
                 .await?;
         }
         Ok(existing.is_none())
@@ -681,12 +767,17 @@ impl Vfs {
         Ok((checked, bytes))
     }
 
-    async fn resolve_parent(&self, user_id: i64, raw: &str) -> Result<(Node, String), VfsError> {
+    pub(crate) async fn resolve_parent(
+        &self,
+        user_id: i64,
+        raw: &str,
+    ) -> Result<(Node, String), VfsError> {
         let segments = path::parse(raw)?;
         let name = segments.last().cloned().ok_or_else(|| {
             VfsError::InvalidPath(crate::error::PathError::Segment(String::new()))
         })?;
         let mut parent = self.root(user_id).await?;
+        let root_id = parent.id;
         for segment in &segments[..segments.len() - 1] {
             let child = self.db.find_child(user_id, parent.id, segment).await?;
             parent = Node::from_db(child.ok_or(VfsError::ParentNotCollection)?)?;
@@ -694,11 +785,15 @@ impl Vfs {
                 return Err(VfsError::ParentNotCollection);
             }
         }
+        // The virtual shared root's name is reserved at the top level.
+        if parent.id == root_id && name == crate::authz::SHARED_MOUNT {
+            return Err(VfsError::Conflict("reserved name".to_string()));
+        }
         Ok((parent, name))
     }
 }
 
-fn to_db(node: &Node) -> DbNode {
+pub(crate) fn to_db(node: &Node) -> DbNode {
     DbNode {
         id: node.id,
         user_id: 0,

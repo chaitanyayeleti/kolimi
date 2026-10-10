@@ -8,6 +8,9 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
+mod sharing;
+pub use sharing::{Group, LinkSession, ReceivedShare, ShareRow};
+
 /// Current wall-clock time in Unix milliseconds.
 pub fn now_millis() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};

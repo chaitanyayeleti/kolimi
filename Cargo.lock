@@ -1287,6 +1287,8 @@ dependencies = [
  "kolimi-store",
  "kolimi-vfs",
  "kolimi-webdav",
+ "mime_guess",
+ "percent-encoding",
  "rpassword",
  "serde",
  "serde_json",

@@ -4,7 +4,9 @@
 //! into a single axum application. TLS termination lives in the binary.
 
 pub mod api;
+pub mod api_browse;
 pub mod api_passkey;
+pub mod api_shares;
 pub mod api_sync;
 pub mod auth;
 pub mod janitor;
@@ -13,7 +15,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Router,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use kolimi_auth::{cache::CredentialCache, lockout::FailedAuthTracker, passkey::Passkeys};
 use kolimi_db::Db;
@@ -129,6 +131,18 @@ pub fn build_app(state: AppState) -> Router {
             "/api/versions/{id}/restore",
             post(api_sync::restore_version),
         )
+        .route("/api/browse", get(api_browse::browse))
+        .route(
+            "/api/shares",
+            get(api_shares::list).post(api_shares::create),
+        )
+        .route("/api/shares/received", get(api_shares::received))
+        .route("/api/shares/owned", get(api_shares::owned))
+        .route(
+            "/api/shares/{id}",
+            patch(api_shares::update).delete(api_shares::delete),
+        )
+        .route("/api/shareable", get(api_shares::shareable))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -142,6 +156,18 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             "/api/passkeys/login/finish",
             post(api_passkey::login_finish),
+        )
+        .route("/public/{token}", get(api_shares::public_meta))
+        .route("/public/{token}/unlock", post(api_shares::public_unlock))
+        .route("/public/{token}/list", get(api_shares::public_list_root))
+        .route("/public/{token}/list/{*path}", get(api_shares::public_list))
+        .route(
+            "/public/{token}/download",
+            get(api_shares::public_download_root),
+        )
+        .route(
+            "/public/{token}/download/{*path}",
+            get(api_shares::public_download),
         );
 
     let vfs = state.vfs.clone();
