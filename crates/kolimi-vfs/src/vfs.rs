@@ -108,6 +108,30 @@ impl Vfs {
         Ok(node)
     }
 
+    /// Lists the dead (user-defined) properties of a path.
+    pub async fn dead_props(
+        &self,
+        user_id: i64,
+        raw: &str,
+    ) -> Result<Vec<kolimi_db::DeadProp>, VfsError> {
+        let node = self.resolve(user_id, raw).await?;
+        Ok(self.db.dead_props(user_id, node.id).await?)
+    }
+
+    /// Applies PROPPATCH operations to a path in document order.
+    pub async fn apply_proppatch(
+        &self,
+        user_id: i64,
+        raw: &str,
+        ops: &[kolimi_db::DeadPropOp],
+    ) -> Result<(), VfsError> {
+        let node = self.resolve(user_id, raw).await?;
+        if !self.db.apply_dead_prop_ops(user_id, node.id, ops).await? {
+            return Err(VfsError::NotFound);
+        }
+        Ok(())
+    }
+
     /// Like [`Vfs::resolve`], but returns `None` instead of `NotFound`.
     pub async fn stat(&self, user_id: i64, raw: &str) -> Result<Option<Node>, VfsError> {
         match self.resolve(user_id, raw).await {

@@ -25,7 +25,7 @@ use kolimi_auth::CurrentUser;
 use kolimi_store::StoreError;
 use kolimi_vfs::{Vfs, VfsError};
 
-const ALLOW: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, COPY, MOVE, MKCOL";
+const ALLOW: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, MKCOL";
 const MAX_PROPFIND_BODY: usize = 1024 * 1024;
 const MAX_UPLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
@@ -67,6 +67,7 @@ async fn handle(
         "DELETE" => delete(&vfs, user_id, &vfs_path).await,
         "MKCOL" => mkcol(&vfs, user_id, &vfs_path, body).await,
         "PROPFIND" => propfind(&vfs, user_id, &segments, &vfs_path, &headers, body).await,
+        "PROPPATCH" => proppatch(&vfs, user_id, &segments, &vfs_path, body).await,
         "COPY" => copy_move(&vfs, user_id, &vfs_path, &headers, false).await,
         "MOVE" => copy_move(&vfs, user_id, &vfs_path, &headers, true).await,
         _ => method_not_allowed(),
@@ -238,6 +239,14 @@ async fn propfind(
     };
 
     let mut entries = vec![xml::PropEntry::new(segments, &node)];
+    if let Ok(dead) = vfs.dead_props(user_id, path).await
+        && let Some(first) = entries.first_mut()
+    {
+        first.dead_props = dead
+            .into_iter()
+            .map(|p| (p.namespace, p.name, p.value))
+            .collect();
+    }
     if node.is_dir() && depth == "1" {
         match vfs.list(user_id, path).await {
             Ok(children) => {
@@ -252,6 +261,80 @@ async fn propfind(
     }
 
     match xml::multistatus(&entries, &requested) {
+        Ok(xml) => {
+            let mut response = Response::new(Body::from(xml));
+            *response.status_mut() = StatusCode::from_u16(207).unwrap_or(StatusCode::MULTI_STATUS);
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/xml; charset=utf-8"),
+            );
+            response
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn proppatch(
+    vfs: &Vfs,
+    user_id: i64,
+    segments: &[String],
+    path: &str,
+    body: Body,
+) -> Response {
+    let body = match to_bytes(body, MAX_PROPFIND_BODY).await {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let ops = match xml::parse_proppatch(&body) {
+        Ok(ops) if !ops.is_empty() => ops,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if let Err(e) = vfs.resolve(user_id, path).await {
+        return vfs_error(e);
+    }
+
+    let mut db_ops = Vec::new();
+    let mut results = Vec::new();
+    for op in &ops {
+        let namespace = op.namespace().to_string();
+        let name = op.name().to_string();
+        if namespace == "DAV:" {
+            results.push(xml::PatchResult {
+                namespace,
+                name,
+                status: 403,
+            });
+            continue;
+        }
+        results.push(xml::PatchResult {
+            namespace: namespace.clone(),
+            name: name.clone(),
+            status: 200,
+        });
+        db_ops.push(match op {
+            xml::PatchOp::Set {
+                namespace,
+                name,
+                value,
+            } => kolimi_vfs::DeadPropOp::Set {
+                namespace: namespace.clone(),
+                name: name.clone(),
+                value: value.clone(),
+            },
+            xml::PatchOp::Remove { namespace, name } => kolimi_vfs::DeadPropOp::Remove {
+                namespace: namespace.clone(),
+                name: name.clone(),
+            },
+        });
+    }
+
+    if !db_ops.is_empty()
+        && let Err(e) = vfs.apply_proppatch(user_id, path, &db_ops).await
+    {
+        return vfs_error(e);
+    }
+
+    match xml::proppatch_response(&davpath::encode_href(segments), &results) {
         Ok(xml) => {
             let mut response = Response::new(Body::from(xml));
             *response.status_mut() = StatusCode::from_u16(207).unwrap_or(StatusCode::MULTI_STATUS);

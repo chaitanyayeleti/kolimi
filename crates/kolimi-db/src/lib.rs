@@ -113,6 +113,38 @@ pub struct PasskeyRow {
     pub last_used_at: Option<i64>,
 }
 
+/// A dead (user-defined) WebDAV property.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadProp {
+    /// XML namespace (empty string for no namespace).
+    pub namespace: String,
+    /// Local name.
+    pub name: String,
+    /// Text value (inner markup for non-text values).
+    pub value: String,
+}
+
+/// One PROPPATCH operation, applied in document order.
+#[derive(Debug, Clone)]
+pub enum DeadPropOp {
+    /// Set or replace a property.
+    Set {
+        /// XML namespace (empty string for no namespace).
+        namespace: String,
+        /// Local name.
+        name: String,
+        /// Value to store.
+        value: String,
+    },
+    /// Remove a property if present.
+    Remove {
+        /// XML namespace (empty string for no namespace).
+        namespace: String,
+        /// Local name.
+        name: String,
+    },
+}
+
 /// Handle to the SQLite database.
 #[derive(Debug, Clone)]
 pub struct Db {
@@ -382,6 +414,82 @@ impl Db {
         Ok(())
     }
 
+    /// Lists the dead (user-defined) properties of a node.
+    pub async fn dead_props(&self, user_id: i64, node_id: i64) -> Result<Vec<DeadProp>, DbError> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT p.namespace, p.name, p.value FROM dead_props p
+             JOIN nodes n ON n.id = p.node_id
+             WHERE n.user_id = ? AND p.node_id = ?
+             ORDER BY p.namespace, p.name",
+        )
+        .bind(user_id)
+        .bind(node_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(namespace, name, value)| DeadProp {
+                namespace,
+                name,
+                value,
+            })
+            .collect())
+    }
+
+    /// Applies PROPPATCH operations in document order to a node.
+    ///
+    /// Returns `false` if the node does not exist or belongs to another user.
+    pub async fn apply_dead_prop_ops(
+        &self,
+        user_id: i64,
+        node_id: i64,
+        ops: &[DeadPropOp],
+    ) -> Result<bool, DbError> {
+        let mut tx = self.pool.begin().await?;
+        let (exists,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM nodes WHERE id = ? AND user_id = ?")
+                .bind(node_id)
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if exists == 0 {
+            return Ok(false);
+        }
+        for op in ops {
+            match op {
+                DeadPropOp::Set {
+                    namespace,
+                    name,
+                    value,
+                } => {
+                    sqlx::query(
+                        "INSERT INTO dead_props (node_id, namespace, name, value)
+                         VALUES (?, ?, ?, ?)
+                         ON CONFLICT (node_id, namespace, name) DO UPDATE SET value = excluded.value",
+                    )
+                    .bind(node_id)
+                    .bind(namespace)
+                    .bind(name)
+                    .bind(value)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                DeadPropOp::Remove { namespace, name } => {
+                    sqlx::query(
+                        "DELETE FROM dead_props WHERE node_id = ? AND namespace = ? AND name = ?",
+                    )
+                    .bind(node_id)
+                    .bind(namespace)
+                    .bind(name)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Returns the root directory node for a user.
     pub async fn root_node(&self, user_id: i64) -> Result<Node, DbError> {
         sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE user_id = ? AND parent_id IS NULL")
@@ -565,7 +673,7 @@ async fn insert_copy(
     dst_name: &str,
     now: i64,
 ) -> Result<Node, sqlx::Error> {
-    sqlx::query_as::<_, Node>(
+    let copy = sqlx::query_as::<_, Node>(
         "INSERT INTO nodes (user_id, parent_id, name, kind, content_id, size, created_at, modified_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING *",
@@ -579,7 +687,18 @@ async fn insert_copy(
     .bind(now)
     .bind(now)
     .fetch_one(&mut *conn)
-    .await
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO dead_props (node_id, namespace, name, value)
+         SELECT ?, namespace, name, value FROM dead_props WHERE node_id = ?",
+    )
+    .bind(copy.id)
+    .bind(src.id)
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(copy)
 }
 
 #[cfg(test)]

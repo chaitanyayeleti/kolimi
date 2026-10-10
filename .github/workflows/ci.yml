@@ -65,3 +65,20 @@ jobs:
         working-directory: fuzz
       - run: cargo fuzz run chunk_roundtrip -- -max_total_time=30 -max_len=4194304
         working-directory: fuzz
+
+  litmus:
+    name: litmus (WebDAV compliance)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libexpat1-dev zlib1g-dev
+      - name: Cache neon + litmus builds
+        uses: actions/cache@v4
+        with:
+          path: /tmp/kolimi-litmus-build
+          key: litmus-${{ runner.os }}-neon0.29.6-litmus0.13
+      - run: chmod +x scripts/litmus.sh && scripts/litmus.sh

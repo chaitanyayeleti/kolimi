@@ -9,4 +9,5 @@ pub mod path;
 mod vfs;
 
 pub use error::{PathError, VfsError};
+pub use kolimi_db::{DeadProp, DeadPropOp};
 pub use vfs::{Node, NodeKind, Vfs};

@@ -617,6 +617,98 @@ fn json_request(method: &str, uri: &str, auth: Option<&str>, body: &str) -> Requ
 }
 
 #[tokio::test]
+async fn proppatch_roundtrip_and_protected_props() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/p.txt", &auth, "text/plain", b"x"),
+    )
+    .await;
+
+    let patch = br#"<propertyupdate xmlns='DAV:'>
+        <set><prop><color xmlns='http://example.com/ns'>blue</color></prop></set>
+        <set><prop><D:getetag xmlns:D='DAV:'>hack</D:getetag></prop></set>
+    </propertyupdate>"#;
+    let (status, _, body) = send(
+        &server.app,
+        request_with_body("PROPPATCH", "/dav/p.txt", &auth, "application/xml", patch),
+    )
+    .await;
+    assert_eq!(status, StatusCode::from_u16(207).unwrap());
+    let xml = String::from_utf8(body).unwrap();
+    assert!(xml.contains("HTTP/1.1 200 OK"));
+    assert!(xml.contains("HTTP/1.1 403 Forbidden"));
+
+    let find =
+        br#"<propfind xmlns='DAV:'><prop><color xmlns='http://example.com/ns'/></prop></propfind>"#;
+    let (status, _, body) = send(
+        &server.app,
+        request_with_body("PROPFIND", "/dav/p.txt", &auth, "application/xml", find),
+    )
+    .await;
+    assert_eq!(status, StatusCode::from_u16(207).unwrap());
+    assert!(String::from_utf8(body).unwrap().contains("blue"));
+
+    let copy = Request::builder()
+        .method("COPY")
+        .uri("/dav/p.txt")
+        .header(header::AUTHORIZATION, &auth)
+        .header("destination", "/dav/p2.txt")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, copy).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _, body) = send(
+        &server.app,
+        request_with_body("PROPFIND", "/dav/p2.txt", &auth, "application/xml", find),
+    )
+    .await;
+    assert_eq!(status, StatusCode::from_u16(207).unwrap());
+    assert!(
+        String::from_utf8(body).unwrap().contains("blue"),
+        "dead properties must survive COPY"
+    );
+}
+
+#[tokio::test]
+async fn malformed_xml_bodies_are_rejected() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/p.txt", &auth, "text/plain", b"x"),
+    )
+    .await;
+
+    for body in [
+        &b"<foo>"[..],
+        &b"<D:propfind xmlns:D=\"DAV:\"><D:prop><bar:foo xmlns:bar=\"\"/></D:prop></D:propfind>"[..],
+    ] {
+        let (status, _, _) = send(
+            &server.app,
+            request_with_body("PROPFIND", "/dav/p.txt", &auth, "application/xml", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PROPPATCH",
+            "/dav/p.txt",
+            &auth,
+            "application/xml",
+            b"<nope/>",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn passkey_registration_requires_authentication() {
     let server = setup().await;
     let (status, _, _) = send(
