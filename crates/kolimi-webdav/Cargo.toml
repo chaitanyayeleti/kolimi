@@ -13,9 +13,9 @@ workspace = true
 [dependencies]
 axum.workspace = true
 httpdate.workspace = true
-kolimi-auth = { path = "../kolimi-auth" }
-kolimi-store = { path = "../kolimi-store" }
-kolimi-vfs = { path = "../kolimi-vfs" }
+kolimi-auth.workspace = true
+kolimi-store.workspace = true
+kolimi-vfs.workspace = true
 mime_guess.workspace = true
 percent-encoding.workspace = true
 quick-xml.workspace = true

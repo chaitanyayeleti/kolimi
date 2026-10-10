@@ -15,11 +15,11 @@ axum.workspace = true
 axum-server.workspace = true
 base64.workspace = true
 clap.workspace = true
-kolimi-auth = { path = "../kolimi-auth" }
-kolimi-db = { path = "../kolimi-db" }
-kolimi-store = { path = "../kolimi-store" }
-kolimi-vfs = { path = "../kolimi-vfs" }
-kolimi-webdav = { path = "../kolimi-webdav" }
+kolimi-auth.workspace = true
+kolimi-db.workspace = true
+kolimi-store.workspace = true
+kolimi-vfs.workspace = true
+kolimi-webdav.workspace = true
 rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true

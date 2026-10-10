@@ -12,9 +12,9 @@ workspace = true
 
 [dependencies]
 futures-util.workspace = true
-kolimi-chunk = { path = "../kolimi-chunk" }
-kolimi-db = { path = "../kolimi-db" }
-kolimi-store = { path = "../kolimi-store" }
+kolimi-chunk.workspace = true
+kolimi-db.workspace = true
+kolimi-store.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

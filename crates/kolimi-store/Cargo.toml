@@ -15,7 +15,7 @@ blake3.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-kolimi-chunk = { path = "../kolimi-chunk" }
+kolimi-chunk.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
