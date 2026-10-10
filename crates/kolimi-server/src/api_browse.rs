@@ -58,7 +58,7 @@ pub async fn browse(
         match state.vfs.list_access(user.user_id, "/").await {
             Ok((_, children)) => {
                 for child in children {
-                    entries.push(node_entry(&child, false, None, None));
+                    entries.push(node_entry(&child, "", false, None, None));
                 }
             }
             Err(e) => return vfs_error(e),
@@ -92,7 +92,15 @@ pub async fn browse(
             let permission = shared.then(|| access.perm.as_str().to_string());
             let entries: Vec<Value> = children
                 .iter()
-                .map(|child| node_entry(child, shared, owner.clone(), permission.clone()))
+                .map(|child| {
+                    node_entry(
+                        child,
+                        &normalized_path(&segments),
+                        shared,
+                        owner.clone(),
+                        permission.clone(),
+                    )
+                })
                 .collect();
             Json(json!({
                 "path": normalized_path(&segments),
@@ -129,12 +137,19 @@ async fn mount_entries(state: &AppState, user_id: i64) -> Result<Vec<Value>, kol
 
 fn node_entry(
     node: &Node,
+    base: &str,
     shared: bool,
     owner: Option<String>,
     permission: Option<String>,
 ) -> Value {
+    let path = if base.is_empty() || base == "/" {
+        format!("/{}", node.name)
+    } else {
+        format!("{base}/{}", node.name)
+    };
     json!({
         "name": node.name,
+        "path": path,
         "kind": if node.is_dir() { "dir" } else { "file" },
         "size": node.size,
         "modified_at": node.modified_at,

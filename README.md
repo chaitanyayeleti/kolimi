@@ -22,8 +22,9 @@ See [ROADMAP.md](ROADMAP.md) for the full plan.
 | `crates/kolimi-auth` | Argon2id passwords, session tokens, brute-force lockout, credential cache |
 | `crates/kolimi-vfs` | Path-safe virtual filesystem over DB + blobs; single permission engine |
 | `crates/kolimi-webdav` | WebDAV surface: OPTIONS, GET/HEAD, PUT, DELETE, MKCOL, PROPFIND, COPY, MOVE |
+| `crates/kolimi-ui` | Leptos (WASM) web UI, embedded into the server binary |
 | `crates/kolimi-server` | The single binary: session API, auth middleware, CLI, TLS |
-| `docs/rfc/` | Design docs: RFC 0001 (storage engine), RFC 0002 (sync protocol) |
+| `docs/rfc/` | Design docs: RFC 0001 (storage), RFC 0002 (sync), RFC 0003 (sharing/permissions) |
 | `docs/threat-model.md` | Assets, adversaries, trust boundaries, review checklist |
 | `fuzz/` | cargo-fuzz targets for chunking + manifest invariants |
 
@@ -32,6 +33,9 @@ See [ROADMAP.md](ROADMAP.md) for the full plan.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+
+# build the web UI (wasm32 + wasm-bindgen; assets are embedded on rebuild)
+scripts/build-ui.sh
 ```
 
 Fuzzing (nightly + cargo-fuzz):
@@ -82,8 +86,34 @@ Native sync API (delta transfers, RFC 0002):
 | `PUT /api/files?path=&if_content_id=` | Commit a client-built manifest (409 on conflict) |
 | `GET /api/trash`, `POST /api/trash/{id}/restore`, `DELETE /api/trash/{id}` | Trash lifecycle |
 | `GET /api/versions?path=`, `POST /api/versions/{id}/restore` | Version history |
+| `GET /api/browse?path=` | Directory listing (own tree + received shares) for the UI |
 
-Maintenance CLI:
+Sharing (RFC 0003): received shares mount at `/Shared with me/<name>` in
+WebDAV and the API; `POST /api/shares` creates user, group, or link shares;
+`GET /api/shares?path=`, `GET /api/shares/received`, `GET /api/shares/owned`,
+`PATCH /api/shares/{id}`, `DELETE /api/shares/{id}` manage them;
+`GET /api/shareable` lists recipients. Public links are served anonymously
+under `/public/{token}` (metadata, listing, `download`, `unlock`), and the
+shareable page lives at `/s/{token}`. Public links get a generated password
+and a 30-day expiry unless explicitly overridden, and unlock attempts are
+rate-limited.
+
+Groups are managed with the CLI (or `/api/admin`-style ops later):
+
+```sh
+kolimi-server group add team
+kolimi-server group add-member team alice
+kolimi-server group list
+```
+
+## Web UI
+
+The Leptos (WASM) app is served from the binary at `/app/` (public share
+pages at `/s/{token}`). Assets are built with `scripts/build-ui.sh` and
+embedded on the next server build; without them the binary serves a
+placeholder page.
+
+## Maintenance CLI
 
 ```sh
 # consistent snapshot (SQLite VACUUM INTO + blob copy) — safe while running
@@ -103,9 +133,9 @@ implemented yet).
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE).
 
-**Status:** M2 complete — chunked content-addressed storage (FastCDC +
-BLAKE3 manifests), version history with retention, recoverable trash with
-30-day retention, delta sync API with change feed and SSE, background
-janitor (retention + GC with grace period), backup/verify CLI. 148 tests;
-litmus 100%; rclone round-trips byte-identical; `kill -9` mid-upload leaves
-zero corruption. Next: M3 (sharing, public links, web UI).
+**Status:** M3 complete — single permission engine (one ACL implementation
+for WebDAV, API, links, and UI), user/group shares mounted at
+`/Shared with me`, public links with generated password + expiry + unlock
+rate limiting, groups CLI, Leptos WASM web UI (login, browser, upload,
+share dialog, trash, public pages) embedded in the binary. 175 tests;
+litmus 100%; rclone round-trips byte-identical. Next: M4 (CalDAV/CardDAV).

@@ -10,6 +10,7 @@ pub mod api_shares;
 pub mod api_sync;
 pub mod auth;
 pub mod janitor;
+pub mod ui;
 
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -151,6 +152,11 @@ pub fn build_app(state: AppState) -> Router {
     let public = Router::new()
         .route("/healthz", get(api::healthz))
         .route("/version", get(api::version))
+        .route("/", get(ui::root))
+        .route("/app", get(ui::index))
+        .route("/app/", get(ui::index))
+        .route("/app/{*path}", get(ui::asset))
+        .route("/s/{token}", get(ui::public_page))
         .route("/api/session", post(api::login))
         .route("/api/passkeys/login/begin", post(api_passkey::login_begin))
         .route(

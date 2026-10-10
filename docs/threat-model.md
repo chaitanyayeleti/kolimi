@@ -55,6 +55,9 @@ client ──(TLS, untrusted network)──> kolimi-server
 | A2 chunk-existence oracle | chunk endpoint checks visibility, constant 404 for invisible chunks | M2 |
 | A2 hostile uploads (zip bomb, image exploit) | previews in separate process: landlock+seccomp, rlimits, timeouts, no network | M5 |
 | A3 share escalation | shares are capability-scoped, re-checked server-side every request; no client-side trust | M3 |
+| A3 mount traversal | `/Shared with me/<mount>/...` resolution starts at the mount root; ancestors of a share are unreachable | M3 |
+| A3 link token brute force | 128-bit random tokens, exact-match lookup, per-share unlock lockout (5/15min), expiry | M3 |
+| A3 link password guessing | argon2id, same lockout machinery as logins, HttpOnly unlock cookies | M3 |
 | A4 plugin root | WASM component model, explicit capabilities (no ambient FS/net), fuel metering | M7 |
 | A5 operator reads content | optional client-side E2EE (per-file keys; MLS groups in v2); metadata remains visible in v1 — documented honestly | M6 |
 | A6 MITM | rustls, TLS 1.3 only, HSTS, no mixed content in UI | M1 |
@@ -85,3 +88,4 @@ client ──(TLS, untrusted network)──> kolimi-server
 - [ ] New secret: zeroized, never logged, never serialized?
 - [ ] New error path: does it leak existence or content cross-user?
 - [ ] New background job: crash-safe, resumable, rate-limited?
+- [ ] New share/link surface: owner-only by default, revocable, expiry honored?

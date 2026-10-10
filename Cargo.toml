@@ -6,6 +6,7 @@ members = [
     "crates/kolimi-db",
     "crates/kolimi-server",
     "crates/kolimi-store",
+    "crates/kolimi-ui",
     "crates/kolimi-vfs",
     "crates/kolimi-webdav",
 ]

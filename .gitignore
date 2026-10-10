@@ -5,3 +5,7 @@
 /fuzz/coverage
 **/*.rs.bk
 .DS_Store
+
+# Generated UI assets (scripts/build-ui.sh); the placeholder is committed.
+crates/kolimi-server/assets/ui/*
+!crates/kolimi-server/assets/ui/not-built.html

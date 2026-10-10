@@ -25,6 +25,7 @@ kolimi-webdav.workspace = true
 mime_guess.workspace = true
 percent-encoding.workspace = true
 rpassword.workspace = true
+rust-embed = "8"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
