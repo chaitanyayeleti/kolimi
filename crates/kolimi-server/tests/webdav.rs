@@ -9,12 +9,18 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use http_body_util::BodyExt;
-use kolimi_auth::password::hash_password;
+use kolimi_auth::{
+    passkey::{CreationChallengeResponse, RequestChallengeResponse},
+    password::hash_password,
+};
 use kolimi_server::{AppState, build_app};
+use serde_json::{Value, json};
 use tower::ServiceExt;
+use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
 
 const USER: &str = "alice";
 const PASS: &str = "test password 123";
+const ORIGIN: &str = "http://localhost:8080";
 
 struct TestServer {
     app: Router,
@@ -24,7 +30,7 @@ struct TestServer {
 
 async fn setup() -> TestServer {
     let dir = tempfile::tempdir().unwrap();
-    let state = AppState::init(dir.path(), false).await.unwrap();
+    let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
     state
         .db
         .create_user(USER, &hash_password(PASS).unwrap())
@@ -597,4 +603,213 @@ async fn users_cannot_reach_each_others_files() {
     .await;
     let (status, _, _) = send(&server.app, request("GET", "/dav/secret.txt", Some(&bob))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+fn json_request(method: &str, uri: &str, auth: Option<&str>, body: &str) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(auth) = auth {
+        builder = builder.header(header::AUTHORIZATION, auth);
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn passkey_registration_requires_authentication() {
+    let server = setup().await;
+    let (status, _, _) = send(
+        &server.app,
+        request("POST", "/api/passkeys/register/begin", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn passkey_list_and_delete_scope_to_owner() {
+    let server = setup().await;
+    server
+        .state
+        .db
+        .create_user("bob", &hash_password("bob password 1").unwrap())
+        .await
+        .unwrap();
+    let alice = basic(USER, PASS);
+    let bob = basic("bob", "bob password 1");
+
+    // Alice registers a passkey directly in the database.
+    let alice_user = server.state.db.find_user(USER).await.unwrap().unwrap();
+    server
+        .state
+        .db
+        .add_passkey(alice_user.id, "alice-key", "{}", 0)
+        .await
+        .unwrap();
+
+    let (status, _, body) = send(&server.app, request("GET", "/api/passkeys", Some(&bob))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"[]");
+
+    let (status, _, body) = send(&server.app, request("GET", "/api/passkeys", Some(&alice))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8(body).unwrap().contains("alice-key"));
+
+    // Bob cannot delete Alice's passkey.
+    let passkey_id = server.state.db.list_passkeys(alice_user.id).await.unwrap()[0].id;
+    let (status, _, _) = send(
+        &server.app,
+        request("DELETE", &format!("/api/passkeys/{passkey_id}"), Some(&bob)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = send(
+        &server.app,
+        request(
+            "DELETE",
+            &format!("/api/passkeys/{passkey_id}"),
+            Some(&alice),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn passkey_register_finish_rejects_bogus_credentials() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let (status, _, body) = send(
+        &server.app,
+        request("POST", "/api/passkeys/register/begin", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let challenge_id = parsed["challenge_id"].as_str().unwrap().to_string();
+    assert_eq!(parsed["options"]["publicKey"]["rp"]["id"], "localhost");
+
+    let bogus = json!({
+        "challenge_id": challenge_id,
+        "name": "bogus",
+        "credential": {
+            "id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "rawId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "type": "public-key",
+            "response": { "clientDataJSON": "e30", "attestationObject": "e30" }
+        }
+    })
+    .to_string();
+    let (status, _, _) = send(
+        &server.app,
+        json_request("POST", "/api/passkeys/register/finish", Some(&auth), &bogus),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Challenge was consumed: replaying the request fails the same way.
+    let (status, _, _) = send(
+        &server.app,
+        json_request("POST", "/api/passkeys/register/finish", Some(&auth), &bogus),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn passkey_login_begin_hides_unknown_users() {
+    let server = setup().await;
+    for username in ["nobody", USER] {
+        let body = json!({ "username": username }).to_string();
+        let (status, _, _) = send(
+            &server.app,
+            json_request("POST", "/api/passkeys/login/begin", None, &body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn passkey_full_register_and_login_flow() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let origin = url::Url::parse(ORIGIN).unwrap();
+    let mut token = WebauthnAuthenticator::new(SoftPasskey::new(true));
+
+    // Begin + finish registration.
+    let (status, _, body) = send(
+        &server.app,
+        request("POST", "/api/passkeys/register/begin", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let challenge_id = parsed["challenge_id"].as_str().unwrap().to_string();
+    let creation: CreationChallengeResponse =
+        serde_json::from_value(parsed["options"].clone()).unwrap();
+    let credential = token.do_registration(origin.clone(), creation).unwrap();
+
+    let finish_body = json!({
+        "challenge_id": challenge_id,
+        "name": "soft passkey",
+        "credential": credential,
+    })
+    .to_string();
+    let (status, _, body) = send(
+        &server.app,
+        json_request(
+            "POST",
+            "/api/passkeys/register/finish",
+            Some(&auth),
+            &finish_body,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // Begin + finish login (no password involved).
+    let begin_body = json!({ "username": USER }).to_string();
+    let (status, _, body) = send(
+        &server.app,
+        json_request("POST", "/api/passkeys/login/begin", None, &begin_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let challenge_id = parsed["challenge_id"].as_str().unwrap().to_string();
+    let request_options: RequestChallengeResponse =
+        serde_json::from_value(parsed["options"].clone()).unwrap();
+    let assertion = token.do_authentication(origin, request_options).unwrap();
+
+    let finish_body = json!({
+        "username": USER,
+        "challenge_id": challenge_id,
+        "credential": assertion,
+    })
+    .to_string();
+    let (status, headers, _) = send(
+        &server.app,
+        json_request("POST", "/api/passkeys/login/finish", None, &finish_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_cookie = cookie_pair(&headers, "kolimi_session").unwrap();
+
+    let me = Request::builder()
+        .method("GET")
+        .uri("/api/me")
+        .header(header::COOKIE, session_cookie)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(&server.app, me).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8(body).unwrap().contains(USER));
 }

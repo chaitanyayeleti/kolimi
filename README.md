@@ -47,8 +47,10 @@ cd fuzz && cargo fuzz run chunk_roundtrip
 # create a user (first user becomes admin)
 cargo run -p kolimi-server -- user add alice
 
-# serve (add --tls-cert cert.pem --tls-key key.pem for TLS)
-cargo run -p kolimi-server -- serve --bind 127.0.0.1:8080 --data ./kolimi-data
+# serve (add --tls-cert cert.pem --tls-key key.pem for TLS;
+# set --origin to the public URL so passkeys work in browsers)
+cargo run -p kolimi-server -- serve --bind 127.0.0.1:8080 --data ./kolimi-data \
+    --origin https://cloud.example.com
 ```
 
 Use it with any WebDAV client (rclone, davfs2, Finder, Windows Explorer):
@@ -62,10 +64,17 @@ curl -u alice:PASSWORD -X PROPFIND -H "Depth: 1" http://127.0.0.1:8080/dav/
 Session API for first-party clients: `POST /api/session` (login, sets
 `kolimi_session` + `kolimi_csrf` cookies), `GET /api/me`, `DELETE /api/session`.
 
+Passkeys (WebAuthn): `POST /api/passkeys/register/begin|finish` (authenticated),
+`GET /api/passkeys`, `DELETE /api/passkeys/{id}`, and passwordless login via
+`POST /api/passkeys/login/begin|finish`. Duplicate registrations are excluded
+per user and challenges are single-use, user-bound, and expire after 5 minutes.
+
 ## License
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE).
 
-**Status:** M1 in progress — password/session auth, per-user blob storage,
-WebDAV core, TLS, audit-friendly logging. Next: passkeys (WebAuthn),
-rclone/litmus validation, then CAS chunked storage (M2).
+**Status:** M1 complete — password + passkey auth, per-user blob storage,
+WebDAV core, TLS. Validated with rclone (upload/download/move/delete,
+byte-identical trees) and 115 tests incl. a full passkey ceremony with a
+soft authenticator. Next: litmus run, then M2 chunked CAS storage
+(versions, trash, delta sync).

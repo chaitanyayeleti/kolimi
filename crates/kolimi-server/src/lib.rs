@@ -4,6 +4,7 @@
 //! into a single axum application. TLS termination lives in the binary.
 
 pub mod api;
+pub mod api_passkey;
 pub mod auth;
 
 use std::{path::Path, sync::Arc, time::Duration};
@@ -12,7 +13,7 @@ use axum::{
     Extension, Router,
     routing::{delete, get, post},
 };
-use kolimi_auth::{cache::CredentialCache, lockout::FailedAuthTracker};
+use kolimi_auth::{cache::CredentialCache, lockout::FailedAuthTracker, passkey::Passkeys};
 use kolimi_db::Db;
 use kolimi_store::BlobStore;
 use kolimi_vfs::Vfs;
@@ -43,6 +44,9 @@ pub enum InitError {
     /// Filesystem failure creating the data directory.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Passkey relying-party configuration failure.
+    #[error("passkey configuration: {0}")]
+    Passkey(#[from] kolimi_auth::AuthError),
 }
 
 /// Shared application state.
@@ -56,13 +60,19 @@ pub struct AppState {
     pub lockout: Arc<FailedAuthTracker>,
     /// Basic-auth verification cache.
     pub cred_cache: Arc<CredentialCache>,
+    /// WebAuthn ceremonies.
+    pub passkeys: Arc<Passkeys>,
     /// Whether to set the `Secure` attribute on cookies.
     pub secure_cookies: bool,
 }
 
 impl AppState {
     /// Opens or creates the data directory and all subsystems.
-    pub async fn init(data_dir: &Path, secure_cookies: bool) -> Result<Self, InitError> {
+    pub async fn init(
+        data_dir: &Path,
+        secure_cookies: bool,
+        origin: &str,
+    ) -> Result<Self, InitError> {
         tokio::fs::create_dir_all(data_dir).await?;
         let db = Db::connect(&data_dir.join("kolimi.db")).await?;
         let store = BlobStore::open(data_dir.join("blobs")).await?;
@@ -76,6 +86,7 @@ impl AppState {
                 LOGIN_LOCKOUT,
             )),
             cred_cache: Arc::new(CredentialCache::new(Duration::from_secs(60), 1024)),
+            passkeys: Arc::new(Passkeys::from_origin(origin, "Kolimi")?),
             secure_cookies,
         })
     }
@@ -88,6 +99,16 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/me", get(api::me))
         .route("/api/session", delete(api::logout))
         .route("/api/users", post(api::create_user))
+        .route("/api/passkeys", get(api_passkey::list))
+        .route("/api/passkeys/{id}", delete(api_passkey::delete))
+        .route(
+            "/api/passkeys/register/begin",
+            post(api_passkey::register_begin),
+        )
+        .route(
+            "/api/passkeys/register/finish",
+            post(api_passkey::register_finish),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -96,7 +117,12 @@ pub fn build_app(state: AppState) -> Router {
     let public = Router::new()
         .route("/healthz", get(api::healthz))
         .route("/version", get(api::version))
-        .route("/api/session", post(api::login));
+        .route("/api/session", post(api::login))
+        .route("/api/passkeys/login/begin", post(api_passkey::login_begin))
+        .route(
+            "/api/passkeys/login/finish",
+            post(api_passkey::login_finish),
+        );
 
     let vfs = state.vfs.clone();
     Router::new()

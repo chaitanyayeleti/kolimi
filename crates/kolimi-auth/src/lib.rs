@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod lockout;
+pub mod passkey;
 pub mod password;
 pub mod token;
 mod user;
@@ -29,4 +30,11 @@ pub enum AuthError {
     /// The stored hash is malformed.
     #[error("malformed password hash")]
     MalformedHash,
+    /// WebAuthn configuration or ceremony failure.
+    #[error("passkey error: {0}")]
+    Passkey(String),
+    /// The passkey challenge is unknown, expired, already used, or
+    /// belongs to a different user.
+    #[error("passkey challenge is unknown, expired, already used, or belongs to a different user")]
+    PasskeyChallenge,
 }

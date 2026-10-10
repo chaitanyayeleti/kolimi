@@ -66,6 +66,11 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     }
     state.lockout.record_success(&req.username);
 
+    start_session(&state, &user).await
+}
+
+/// Creates a session for `user` and returns the login response with cookies.
+pub(crate) async fn start_session(state: &AppState, user: &kolimi_db::User) -> Response {
     let (Ok(session_token), Ok(csrf_token)) = (token::new_session_token(), token::new_csrf_token())
     else {
         return internal_error();
@@ -201,15 +206,15 @@ fn cookie(
     HeaderValue::from_str(&cookie).unwrap_or(HeaderValue::from_static(""))
 }
 
-fn unauthorized(message: &str) -> Response {
+pub(crate) fn unauthorized(message: &str) -> Response {
     (StatusCode::UNAUTHORIZED, Json(json!({ "error": message }))).into_response()
 }
 
-fn bad_request(message: &str) -> Response {
+pub(crate) fn bad_request(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
 }
 
-fn internal_error() -> Response {
+pub(crate) fn internal_error() -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({ "error": "internal server error" })),

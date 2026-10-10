@@ -66,6 +66,7 @@ client ──(TLS, untrusted network)──> kolimi-server
 
 ## Explicit non-goals / honest limitations
 
+- **OpenSSL is in the tree** via `webauthn-rs-core` (unconditional upstream dependency) for WebAuthn signature verification. It is not used for TLS (rustls), hashing (BLAKE3), or password hashing (Argon2id). This is a tracked, documented exception in `deny.toml`; revisit when upstream offers a pure-Rust backend.
 - **Metadata is not hidden** from the server operator in v1 (names, sizes,
   structure). E2EE hides content; hiding metadata needs encrypted search
   (a research problem) and is not claimed.

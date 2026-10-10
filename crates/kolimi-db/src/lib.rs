@@ -95,6 +95,24 @@ pub struct Node {
     pub modified_at: i64,
 }
 
+/// A registered passkey (WebAuthn credential).
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct PasskeyRow {
+    /// Primary key.
+    pub id: i64,
+    /// Owning user.
+    pub user_id: i64,
+    /// User-chosen label.
+    pub name: String,
+    /// Serialized `webauthn_rs::Passkey`; never exposed via JSON.
+    #[serde(skip_serializing)]
+    pub credential: String,
+    /// Creation time in Unix milliseconds.
+    pub created_at: i64,
+    /// Last successful authentication time.
+    pub last_used_at: Option<i64>,
+}
+
 /// Handle to the SQLite database.
 #[derive(Debug, Clone)]
 pub struct Db {
@@ -288,6 +306,80 @@ impl Db {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected())
+    }
+
+    /// Stores a new passkey for a user.
+    pub async fn add_passkey(
+        &self,
+        user_id: i64,
+        name: &str,
+        credential: &str,
+        now: i64,
+    ) -> Result<PasskeyRow, DbError> {
+        sqlx::query_as::<_, PasskeyRow>(
+            "INSERT INTO passkeys (user_id, name, credential, created_at)
+             VALUES (?, ?, ?, ?)
+             RETURNING *",
+        )
+        .bind(user_id)
+        .bind(name)
+        .bind(credential)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| map_sqlx(e, "a passkey with that name already exists"))
+    }
+
+    /// Lists a user's passkeys, oldest first.
+    pub async fn list_passkeys(&self, user_id: i64) -> Result<Vec<PasskeyRow>, DbError> {
+        Ok(sqlx::query_as::<_, PasskeyRow>(
+            "SELECT * FROM passkeys WHERE user_id = ? ORDER BY created_at, id",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Counts a user's passkeys.
+    pub async fn count_passkeys(&self, user_id: i64) -> Result<i64, DbError> {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM passkeys WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
+    }
+
+    /// Deletes one of a user's passkeys.
+    pub async fn delete_passkey(&self, user_id: i64, passkey_id: i64) -> Result<(), DbError> {
+        let result = sqlx::query("DELETE FROM passkeys WHERE user_id = ? AND id = ?")
+            .bind(user_id)
+            .bind(passkey_id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("passkey {passkey_id}")));
+        }
+        Ok(())
+    }
+
+    /// Persists an updated credential (sign counter, backup state) after login.
+    pub async fn update_passkey(
+        &self,
+        user_id: i64,
+        passkey_id: i64,
+        credential: &str,
+        last_used_at: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE passkeys SET credential = ?, last_used_at = ? WHERE user_id = ? AND id = ?",
+        )
+        .bind(credential)
+        .bind(last_used_at)
+        .bind(user_id)
+        .bind(passkey_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Returns the root directory node for a user.
@@ -683,5 +775,50 @@ mod tests {
             .unwrap();
         assert!(db.node_by_id(bob.id, node.id).await.unwrap().is_none());
         assert!(db.children(bob.id, root.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn passkey_lifecycle() {
+        let (_dir, db) = db().await;
+        let user = db.create_user("alice", "hash").await.unwrap();
+        assert_eq!(db.count_passkeys(user.id).await.unwrap(), 0);
+
+        let row = db
+            .add_passkey(user.id, "laptop", "{\"cred\":1}", now_millis())
+            .await
+            .unwrap();
+        assert_eq!(db.count_passkeys(user.id).await.unwrap(), 1);
+
+        let listed = db.list_passkeys(user.id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "laptop");
+
+        db.update_passkey(user.id, row.id, "{\"cred\":2}", now_millis())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.list_passkeys(user.id).await.unwrap()[0].credential,
+            "{\"cred\":2}"
+        );
+
+        db.delete_passkey(user.id, row.id).await.unwrap();
+        assert!(db.list_passkeys(user.id).await.unwrap().is_empty());
+        assert!(matches!(
+            db.delete_passkey(user.id, row.id).await,
+            Err(DbError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn passkey_names_are_unique_per_user() {
+        let (_dir, db) = db().await;
+        let alice = db.create_user("alice", "hash").await.unwrap();
+        let bob = db.create_user("bob", "hash").await.unwrap();
+        db.add_passkey(alice.id, "key", "{}", 0).await.unwrap();
+        assert!(matches!(
+            db.add_passkey(alice.id, "key", "{}", 0).await,
+            Err(DbError::Conflict(_))
+        ));
+        db.add_passkey(bob.id, "key", "{}", 0).await.unwrap();
     }
 }

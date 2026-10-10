@@ -1,10 +1,15 @@
 use crate::AuthError;
 
+/// Generates `bytes` random bytes as a lowercase hex string.
+pub(crate) fn random_hex(bytes: usize) -> Result<String, AuthError> {
+    let mut buffer = vec![0u8; bytes];
+    getrandom::fill(&mut buffer).map_err(|e| AuthError::Random(e.to_string()))?;
+    Ok(hex::encode(buffer))
+}
+
 /// Generates a new session token (32 random bytes, hex-encoded).
 pub fn new_session_token() -> Result<String, AuthError> {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|e| AuthError::Random(e.to_string()))?;
-    Ok(hex::encode(bytes))
+    random_hex(32)
 }
 
 /// Hashes a session token for storage and lookup.
@@ -14,9 +19,7 @@ pub fn hash_token(token: &str) -> [u8; 32] {
 
 /// Generates a CSRF token for double-submit cookie checks.
 pub fn new_csrf_token() -> Result<String, AuthError> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|e| AuthError::Random(e.to_string()))?;
-    Ok(hex::encode(bytes))
+    random_hex(16)
 }
 
 #[cfg(test)]

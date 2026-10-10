@@ -52,6 +52,10 @@ struct ServeArgs {
     /// Set the Secure attribute on cookies (enable when serving over TLS).
     #[arg(long, env = "KOLIMI_SECURE_COOKIES")]
     secure_cookies: bool,
+
+    /// Public origin for WebAuthn; must match the URL users visit.
+    #[arg(long, env = "KOLIMI_ORIGIN", default_value = "http://localhost:8080")]
+    origin: String,
 }
 
 #[derive(Subcommand)]
@@ -94,7 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
-    let state = AppState::init(&args.data, args.secure_cookies).await?;
+    let state = AppState::init(&args.data, args.secure_cookies, &args.origin).await?;
     let app = build_app(state);
 
     match (args.tls_cert, args.tls_key) {
@@ -132,6 +136,7 @@ async fn serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
 async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
     let data: PathBuf =
         std::env::var("KOLIMI_DATA").map_or_else(|_| PathBuf::from("./kolimi-data"), PathBuf::from);
+    tokio::fs::create_dir_all(&data).await?;
     let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
 
     match command {

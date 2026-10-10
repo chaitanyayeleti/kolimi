@@ -21,6 +21,10 @@ deny = [
     { crate = "openssl-sys", use-instead = "rustls" },
     { crate = "libssh2-sys" },
 ]
+skip = [
+    { crate = "openssl", reason = "forced by webauthn-rs-core for WebAuthn signature verification only; not used for TLS or hashing (rustls/RustCrypto); revisit when upstream offers a pure-Rust backend" },
+    { crate = "openssl-sys", reason = "transitive via webauthn-rs-core; see openssl skip entry" },
+]
 
 [sources]
 unknown-registry = "deny"
