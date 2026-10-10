@@ -1,0 +1,108 @@
+//! Kolimi server: composition root.
+//!
+//! Wires the database, blob store, VFS, WebDAV surface, and session API
+//! into a single axum application. TLS termination lives in the binary.
+
+pub mod api;
+pub mod auth;
+
+use std::{path::Path, sync::Arc, time::Duration};
+
+use axum::{
+    Extension, Router,
+    routing::{delete, get, post},
+};
+use kolimi_auth::{cache::CredentialCache, lockout::FailedAuthTracker};
+use kolimi_db::Db;
+use kolimi_store::BlobStore;
+use kolimi_vfs::Vfs;
+use tower_http::trace::TraceLayer;
+
+/// Session cookie name.
+pub const SESSION_COOKIE: &str = "kolimi_session";
+/// CSRF double-submit cookie name.
+pub const CSRF_COOKIE: &str = "kolimi_csrf";
+/// Session lifetime in milliseconds (30 days).
+pub const SESSION_TTL_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Failed logins allowed per window before lockout.
+pub const MAX_FAILED_LOGINS: u32 = 5;
+/// Failure counting window.
+pub const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// Lockout duration after too many failures.
+pub const LOGIN_LOCKOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Errors while initializing server state.
+#[derive(Debug, thiserror::Error)]
+pub enum InitError {
+    /// Database failure.
+    #[error("database: {0}")]
+    Db(#[from] kolimi_db::DbError),
+    /// Blob store failure.
+    #[error("storage: {0}")]
+    Store(#[from] kolimi_store::StoreError),
+    /// Filesystem failure creating the data directory.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Shared application state.
+#[derive(Clone)]
+pub struct AppState {
+    /// Database handle.
+    pub db: Arc<Db>,
+    /// Virtual filesystem.
+    pub vfs: Arc<Vfs>,
+    /// Failed-login tracker.
+    pub lockout: Arc<FailedAuthTracker>,
+    /// Basic-auth verification cache.
+    pub cred_cache: Arc<CredentialCache>,
+    /// Whether to set the `Secure` attribute on cookies.
+    pub secure_cookies: bool,
+}
+
+impl AppState {
+    /// Opens or creates the data directory and all subsystems.
+    pub async fn init(data_dir: &Path, secure_cookies: bool) -> Result<Self, InitError> {
+        tokio::fs::create_dir_all(data_dir).await?;
+        let db = Db::connect(&data_dir.join("kolimi.db")).await?;
+        let store = BlobStore::open(data_dir.join("blobs")).await?;
+        let vfs = Arc::new(Vfs::new(db.clone(), store));
+        Ok(Self {
+            db: Arc::new(db),
+            vfs,
+            lockout: Arc::new(FailedAuthTracker::new(
+                MAX_FAILED_LOGINS,
+                LOGIN_WINDOW,
+                LOGIN_LOCKOUT,
+            )),
+            cred_cache: Arc::new(CredentialCache::new(Duration::from_secs(60), 1024)),
+            secure_cookies,
+        })
+    }
+}
+
+/// Builds the full HTTP application.
+pub fn build_app(state: AppState) -> Router {
+    let protected = Router::new()
+        .merge(kolimi_webdav::routes())
+        .route("/api/me", get(api::me))
+        .route("/api/session", delete(api::logout))
+        .route("/api/users", post(api::create_user))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ));
+
+    let public = Router::new()
+        .route("/healthz", get(api::healthz))
+        .route("/version", get(api::version))
+        .route("/api/session", post(api::login));
+
+    let vfs = state.vfs.clone();
+    Router::new()
+        .merge(public)
+        .merge(protected)
+        .layer(Extension(vfs))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}

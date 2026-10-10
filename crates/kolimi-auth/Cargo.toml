@@ -1,0 +1,18 @@
+[package]
+name = "kolimi-auth"
+description = "Password hashing, session tokens, and brute-force protection for Kolimi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+argon2.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+thiserror.workspace = true

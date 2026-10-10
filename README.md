@@ -17,7 +17,12 @@ See [ROADMAP.md](ROADMAP.md) for the full plan.
 | Path | Contents |
 |---|---|
 | `crates/kolimi-chunk` | Content-defined chunking (FastCDC) + BLAKE3 content-addressed manifests |
-| `crates/kolimi-server` | The single binary (axum); WebDAV, auth, storage land in M1/M2 |
+| `crates/kolimi-store` | Per-user content-addressed blob store: atomic writes, verify-on-read |
+| `crates/kolimi-db` | SQLite persistence (users, sessions, file tree) with migrations |
+| `crates/kolimi-auth` | Argon2id passwords, session tokens, brute-force lockout, credential cache |
+| `crates/kolimi-vfs` | Path-safe virtual filesystem over DB + blobs; single permission engine |
+| `crates/kolimi-webdav` | WebDAV surface: OPTIONS, GET/HEAD, PUT, DELETE, MKCOL, PROPFIND, COPY, MOVE |
+| `crates/kolimi-server` | The single binary: session API, auth middleware, CLI, TLS |
 | `docs/rfc/` | Design docs: RFC 0001 (storage engine), RFC 0002 (sync protocol) |
 | `docs/threat-model.md` | Assets, adversaries, trust boundaries, review checklist |
 | `fuzz/` | cargo-fuzz targets for chunking + manifest invariants |
@@ -25,9 +30,8 @@ See [ROADMAP.md](ROADMAP.md) for the full plan.
 ## Development
 
 ```sh
-cargo test --workspace           # unit tests
+cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo run -p kolimi-server       # http://127.0.0.1:8080/healthz
 ```
 
 Fuzzing (nightly + cargo-fuzz):
@@ -37,8 +41,31 @@ cargo install cargo-fuzz
 cd fuzz && cargo fuzz run chunk_roundtrip
 ```
 
+## Run
+
+```sh
+# create a user (first user becomes admin)
+cargo run -p kolimi-server -- user add alice
+
+# serve (add --tls-cert cert.pem --tls-key key.pem for TLS)
+cargo run -p kolimi-server -- serve --bind 127.0.0.1:8080 --data ./kolimi-data
+```
+
+Use it with any WebDAV client (rclone, davfs2, Finder, Windows Explorer):
+
+```sh
+curl -u alice:PASSWORD -X PUT --data-binary @report.txt http://127.0.0.1:8080/dav/report.txt
+curl -u alice:PASSWORD http://127.0.0.1:8080/dav/report.txt
+curl -u alice:PASSWORD -X PROPFIND -H "Depth: 1" http://127.0.0.1:8080/dav/
+```
+
+Session API for first-party clients: `POST /api/session` (login, sets
+`kolimi_session` + `kolimi_csrf` cookies), `GET /api/me`, `DELETE /api/session`.
+
 ## License
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE).
 
-**Status:** M0 — scaffolding (workspace, CI, chunk primitives, RFCs).
+**Status:** M1 in progress — password/session auth, per-user blob storage,
+WebDAV core, TLS, audit-friendly logging. Next: passkeys (WebAuthn),
+rclone/litmus validation, then CAS chunked storage (M2).

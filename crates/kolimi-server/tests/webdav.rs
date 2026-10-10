@@ -1,0 +1,600 @@
+//! End-to-end HTTP tests: WebDAV methods, session API, and security cases.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use axum::{
+    Router,
+    body::Body,
+    http::{HeaderMap, Request, StatusCode, header},
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use http_body_util::BodyExt;
+use kolimi_auth::password::hash_password;
+use kolimi_server::{AppState, build_app};
+use tower::ServiceExt;
+
+const USER: &str = "alice";
+const PASS: &str = "test password 123";
+
+struct TestServer {
+    app: Router,
+    state: AppState,
+    _dir: tempfile::TempDir,
+}
+
+async fn setup() -> TestServer {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::init(dir.path(), false).await.unwrap();
+    state
+        .db
+        .create_user(USER, &hash_password(PASS).unwrap())
+        .await
+        .unwrap();
+    let app = build_app(state.clone());
+    TestServer {
+        app,
+        state,
+        _dir: dir,
+    }
+}
+
+fn basic(username: &str, password: &str) -> String {
+    format!(
+        "Basic {}",
+        STANDARD.encode(format!("{username}:{password}"))
+    )
+}
+
+fn request(method: &str, uri: &str, auth: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(auth) = auth {
+        builder = builder.header(header::AUTHORIZATION, auth);
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+fn request_with_body(
+    method: &str,
+    uri: &str,
+    auth: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, auth)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body.to_vec()))
+        .unwrap()
+}
+
+async fn send(app: &Router, request: Request<Body>) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, body)
+}
+
+fn cookie_pair(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|value| {
+            let pair = value.split(';').next()?;
+            let (key, _) = pair.split_once('=')?;
+            (key == name).then(|| pair.to_string())
+        })
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let pair = cookie_pair(headers, name)?;
+    pair.split_once('=').map(|(_, value)| value.to_string())
+}
+
+#[tokio::test]
+async fn unauthenticated_requests_are_rejected_with_basic_challenge() {
+    let server = setup().await;
+    let (status, headers, _) = send(&server.app, request("PROPFIND", "/dav/", None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        headers
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("Basic"))
+    );
+}
+
+#[tokio::test]
+async fn put_get_roundtrip_with_conditional_requests() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+
+    let (status, headers, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/hello.txt", &auth, "text/plain", b"hello world"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let etag = headers
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let (status, headers, body) =
+        send(&server.app, request("GET", "/dav/hello.txt", Some(&auth))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"hello world");
+    assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "text/plain");
+    assert_eq!(headers.get(header::ETAG).unwrap().to_str().unwrap(), etag);
+
+    let mut conditional = request("GET", "/dav/hello.txt", Some(&auth));
+    conditional
+        .headers_mut()
+        .insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+    let (status, _, body) = send(&server.app, conditional).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(body.is_empty());
+
+    let head = request("HEAD", "/dav/hello.txt", Some(&auth));
+    let (status, headers, body) = send(&server.app, head).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get(header::CONTENT_LENGTH).unwrap(), "11");
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn propfind_lists_files_with_properties() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/report.txt", &auth, "text/plain", b"data"),
+    )
+    .await;
+
+    let (status, headers, body) =
+        send(&server.app, request("PROPFIND", "/dav/", Some(&auth))).await;
+    assert_eq!(status, StatusCode::from_u16(207).unwrap());
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "application/xml; charset=utf-8"
+    );
+
+    let xml = String::from_utf8(body).unwrap();
+    assert!(xml.contains("<d:href>/dav/</d:href>"));
+    assert!(xml.contains("<d:href>/dav/report.txt</d:href>"));
+    assert!(xml.contains("<d:displayname>report.txt</d:displayname>"));
+    assert!(xml.contains("<d:getcontentlength>4</d:getcontentlength>"));
+    assert!(xml.contains("<d:collection/>"));
+}
+
+#[tokio::test]
+async fn propfind_depth_zero_returns_only_target() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(&server.app, request("MKCOL", "/dav/docs", Some(&auth))).await;
+
+    let mut req = request("PROPFIND", "/dav/docs", Some(&auth));
+    req.headers_mut().insert("depth", "0".parse().unwrap());
+    let (status, _, body) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::from_u16(207).unwrap());
+    let xml = String::from_utf8(body).unwrap();
+    assert!(xml.contains("<d:href>/dav/docs</d:href>"));
+    assert_eq!(xml.matches("<d:response>").count(), 1);
+}
+
+#[tokio::test]
+async fn propfind_specific_props_and_unknown_prop_404() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/a.txt", &auth, "text/plain", b"xy"),
+    )
+    .await;
+
+    let body =
+        br#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+        <d:prop><d:displayname/><oc:checksums/></d:prop></d:propfind>"#;
+    let (status, _, body) = send(
+        &server.app,
+        request_with_body("PROPFIND", "/dav/a.txt", &auth, "application/xml", body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::from_u16(207).unwrap());
+    let xml = String::from_utf8(body).unwrap();
+    assert!(xml.contains("<d:displayname>a.txt</d:displayname>"));
+    assert!(xml.contains("<d:checksums/>"));
+    assert!(xml.contains("<d:status>HTTP/1.1 404 Not Found</d:status>"));
+}
+
+#[tokio::test]
+async fn propfind_infinity_depth_is_forbidden() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let mut req = request("PROPFIND", "/dav/", Some(&auth));
+    req.headers_mut()
+        .insert("depth", "infinity".parse().unwrap());
+    let (status, _, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn propfind_missing_target_is_404() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let (status, _, _) = send(&server.app, request("PROPFIND", "/dav/nope", Some(&auth))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn mkcol_semantics() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+
+    let (status, _, _) = send(&server.app, request("MKCOL", "/dav/docs", Some(&auth))).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _, _) = send(&server.app, request("MKCOL", "/dav/docs", Some(&auth))).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+
+    let (status, _, _) = send(&server.app, request("MKCOL", "/dav/nope/docs", Some(&auth))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let with_body = request_with_body("MKCOL", "/dav/doc2", &auth, "text/plain", b"x");
+    let (status, _, _) = send(&server.app, with_body).await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+async fn move_and_copy_semantics() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/a.txt", &auth, "text/plain", b"a"),
+    )
+    .await;
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/target.txt", &auth, "text/plain", b"t"),
+    )
+    .await;
+
+    let move_req = Request::builder()
+        .method("MOVE")
+        .uri("/dav/a.txt")
+        .header(header::AUTHORIZATION, &auth)
+        .header("destination", "http://localhost/dav/moved.txt")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, move_req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = send(&server.app, request("GET", "/dav/a.txt", Some(&auth))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, body) = send(&server.app, request("GET", "/dav/moved.txt", Some(&auth))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"a");
+
+    let no_overwrite = Request::builder()
+        .method("MOVE")
+        .uri("/dav/moved.txt")
+        .header(header::AUTHORIZATION, &auth)
+        .header("destination", "http://localhost/dav/target.txt")
+        .header("overwrite", "F")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, no_overwrite).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+
+    let copy_req = Request::builder()
+        .method("COPY")
+        .uri("/dav/moved.txt")
+        .header(header::AUTHORIZATION, &auth)
+        .header("destination", "/dav/copy.txt")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, copy_req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        send(&server.app, request("GET", "/dav/moved.txt", Some(&auth)))
+            .await
+            .2,
+        b"a"
+    );
+    assert_eq!(
+        send(&server.app, request("GET", "/dav/copy.txt", Some(&auth)))
+            .await
+            .2,
+        b"a"
+    );
+}
+
+#[tokio::test]
+async fn delete_semantics() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/a.txt", &auth, "text/plain", b"a"),
+    )
+    .await;
+
+    let (status, _, _) = send(&server.app, request("DELETE", "/dav/a.txt", Some(&auth))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, _) = send(&server.app, request("GET", "/dav/a.txt", Some(&auth))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = send(&server.app, request("DELETE", "/dav", Some(&auth))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn path_traversal_is_rejected() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+
+    for uri in [
+        "/dav/..%2Fescape.txt",
+        "/dav/%2e%2e/escape.txt",
+        "/dav/..%00/x",
+    ] {
+        let (status, _, _) = send(
+            &server.app,
+            request_with_body("PUT", uri, &auth, "text/plain", b"x"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "uri {uri} must be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn put_conditional_headers() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/a.txt", &auth, "text/plain", b"one"),
+    )
+    .await;
+
+    let mut create_only = request_with_body("PUT", "/dav/a.txt", &auth, "text/plain", b"two");
+    create_only
+        .headers_mut()
+        .insert(header::IF_NONE_MATCH, "*".parse().unwrap());
+    let (status, _, _) = send(&server.app, create_only).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+
+    let mut stale = request_with_body("PUT", "/dav/a.txt", &auth, "text/plain", b"two");
+    stale
+        .headers_mut()
+        .insert(header::IF_MATCH, "\"bogus\"".parse().unwrap());
+    let (status, _, _) = send(&server.app, stale).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+
+    let (_, headers, _) = send(&server.app, request("GET", "/dav/a.txt", Some(&auth))).await;
+    let etag = headers.get(header::ETAG).unwrap().clone();
+    let mut matching = request_with_body("PUT", "/dav/a.txt", &auth, "text/plain", b"two");
+    matching.headers_mut().insert(header::IF_MATCH, etag);
+    let (status, _, _) = send(&server.app, matching).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn put_into_missing_parent_is_conflict() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/nope/a.txt", &auth, "text/plain", b"x"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn options_advertises_dav_support() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let (status, headers, _) = send(&server.app, request("OPTIONS", "/dav", Some(&auth))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("dav").unwrap(), "1");
+    assert!(
+        headers
+            .get(header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("PROPFIND") && v.contains("MOVE"))
+    );
+}
+
+#[tokio::test]
+async fn session_login_logout_flow() {
+    let server = setup().await;
+
+    let login = request_with_body(
+        "POST",
+        "/api/session",
+        "",
+        "application/json",
+        format!(r#"{{"username":"{USER}","password":"{PASS}"}}"#).as_bytes(),
+    );
+    let (status, headers, _) = send(&server.app, login).await;
+    assert_eq!(status, StatusCode::OK);
+    let session_cookie = cookie_pair(&headers, "kolimi_session").unwrap();
+    let csrf = cookie_value(&headers, "kolimi_csrf").unwrap();
+    assert!(!csrf.is_empty());
+    let both_cookies = format!("{session_cookie}; kolimi_csrf={csrf}");
+
+    let me = Request::builder()
+        .method("GET")
+        .uri("/api/me")
+        .header(header::COOKIE, &session_cookie)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(&server.app, me).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8(body).unwrap().contains(USER));
+
+    let logout = Request::builder()
+        .method("DELETE")
+        .uri("/api/session")
+        .header(header::COOKIE, &both_cookies)
+        .header("x-csrf-token", &csrf)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, logout).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let me = Request::builder()
+        .method("GET")
+        .uri("/api/me")
+        .header(header::COOKIE, &session_cookie)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, me).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn cookie_mutations_require_csrf_token() {
+    let server = setup().await;
+    let login = request_with_body(
+        "POST",
+        "/api/session",
+        "",
+        "application/json",
+        format!(r#"{{"username":"{USER}","password":"{PASS}"}}"#).as_bytes(),
+    );
+    let (_, headers, _) = send(&server.app, login).await;
+    let session_cookie = cookie_pair(&headers, "kolimi_session").unwrap();
+
+    let logout = Request::builder()
+        .method("DELETE")
+        .uri("/api/session")
+        .header(header::COOKIE, &session_cookie)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, logout).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn bearer_tokens_authenticate_api_requests() {
+    let server = setup().await;
+    let login = request_with_body(
+        "POST",
+        "/api/session",
+        "",
+        "application/json",
+        format!(r#"{{"username":"{USER}","password":"{PASS}"}}"#).as_bytes(),
+    );
+    let (_, headers, _) = send(&server.app, login).await;
+    let session = cookie_value(&headers, "kolimi_session").unwrap();
+
+    let me = Request::builder()
+        .method("GET")
+        .uri("/api/me")
+        .header(header::AUTHORIZATION, format!("Bearer {session}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, me).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn failed_logins_trigger_lockout() {
+    let server = setup().await;
+    for _ in 0..5 {
+        let attempt = request_with_body(
+            "POST",
+            "/api/session",
+            "",
+            "application/json",
+            format!(r#"{{"username":"{USER}","password":"wrong password"}}"#).as_bytes(),
+        );
+        let (status, _, _) = send(&server.app, attempt).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let blocked = request_with_body(
+        "POST",
+        "/api/session",
+        "",
+        "application/json",
+        format!(r#"{{"username":"{USER}","password":"{PASS}"}}"#).as_bytes(),
+    );
+    let (status, _, _) = send(&server.app, blocked).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn admin_api_creates_users_and_respects_permissions() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+
+    let create = Request::builder()
+        .method("POST")
+        .uri("/api/users")
+        .header(header::AUTHORIZATION, &auth)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"username":"bob","password":"bob password 1"}"#,
+        ))
+        .unwrap();
+    let (status, _, _) = send(&server.app, create).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let bob_auth = basic("bob", "bob password 1");
+    let bob_create = Request::builder()
+        .method("POST")
+        .uri("/api/users")
+        .header(header::AUTHORIZATION, &bob_auth)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"username":"carol","password":"carol password"}"#,
+        ))
+        .unwrap();
+    let (status, _, _) = send(&server.app, bob_create).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn users_cannot_reach_each_others_files() {
+    let server = setup().await;
+    server
+        .state
+        .db
+        .create_user("bob", &hash_password("bob password 1").unwrap())
+        .await
+        .unwrap();
+
+    let alice = basic(USER, PASS);
+    let bob = basic("bob", "bob password 1");
+    send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/dav/secret.txt",
+            &alice,
+            "text/plain",
+            b"top secret",
+        ),
+    )
+    .await;
+    let (status, _, _) = send(&server.app, request("GET", "/dav/secret.txt", Some(&bob))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

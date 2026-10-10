@@ -47,6 +47,7 @@
 |---|---|---|
 | **M0** (2 wk) | Repo workspace, CI (cargo-deny, cargo-audit, fuzz targets), threat model, storage + sync RFCs | `cargo test` + fuzz green, specs reviewed |
 | **M1** (6 wk) | Single binary: users, passkeys + sessions, WebDAV core (GET/PUT/PROPFIND/MOVE/COPY/DELETE), TLS | rclone + davfs + `litmus` test suite pass |
+| ↳ *core landed* | password/session auth, WebDAV (OPTIONS/GET/HEAD/PUT/DELETE/MKCOL/PROPFIND/COPY/MOVE), per-user blob store, TLS, lockout, CSRF, 103 tests | passkeys (WebAuthn), rclone + litmus runs pending |
 | **M2** (6 wk) | CAS engine, resumable chunked upload, versions, trash, delta sync, SSE notify, scrub, backup/restore CLI | `kill -9` mid-upload leaves zero corruption; restore drill passes |
 | **M3** (6 wk) | Sharing (users/groups, public links with password + expiry by default), Leptos web UI MVP | share links work end-to-end, ACL tests exhaustive |
 | **M4** (8 wk) | CalDAV/CardDAV + sync-collection REPORT, reminders | Thunderbird + iOS/macOS native clients sync cleanly |

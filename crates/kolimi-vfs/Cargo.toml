@@ -1,0 +1,22 @@
+[package]
+name = "kolimi-vfs"
+description = "Path-safe virtual filesystem over the Kolimi database and blob store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+futures-util.workspace = true
+kolimi-chunk = { path = "../kolimi-chunk" }
+kolimi-db = { path = "../kolimi-db" }
+kolimi-store = { path = "../kolimi-store" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

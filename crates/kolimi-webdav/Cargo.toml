@@ -1,0 +1,22 @@
+[package]
+name = "kolimi-webdav"
+description = "WebDAV surface (RFC 4918 subset) for Kolimi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+httpdate.workspace = true
+kolimi-auth = { path = "../kolimi-auth" }
+kolimi-store = { path = "../kolimi-store" }
+kolimi-vfs = { path = "../kolimi-vfs" }
+mime_guess.workspace = true
+percent-encoding.workspace = true
+quick-xml.workspace = true
+time.workspace = true
