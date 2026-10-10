@@ -1,0 +1,19 @@
+[package]
+name = "kolimi-server"
+description = "Kolimi server — a pure-Rust, single-binary alternative to Nextcloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

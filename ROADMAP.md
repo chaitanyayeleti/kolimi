@@ -96,5 +96,5 @@ Own DB engine, own TLS, chat/Talk, federation in v1, PHP-style plugin model, app
 | DB default | SQLite-first behind a Postgres-capable abstraction |
 | E2EE scope | Optional per-file E2EE in v1; MLS groups in v2 |
 | Federation | Out of scope for v1 |
-| License | AGPL-3.0 (network copyleft) — to be confirmed before first code |
+| License | AGPL-3.0-or-later — adopted, see [LICENSE](LICENSE) |
 | Sync protocol | WebDAV compatibility + native delta protocol for first-party clients |

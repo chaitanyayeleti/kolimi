@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/kolimi-chunk", "crates/kolimi-server"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/chaitanyayeleti/kolimi"
+rust-version = "1.85"
+
+[workspace.dependencies]
+axum = "0.8"
+blake3 = "1"
+clap = { version = "4", features = ["derive", "env"] }
+fastcdc = "3"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

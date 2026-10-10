@@ -1,0 +1,24 @@
+[package]
+name = "kolimi-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.kolimi-chunk]
+path = "../crates/kolimi-chunk"
+
+[[bin]]
+name = "chunk_roundtrip"
+path = "fuzz_targets/chunk_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
