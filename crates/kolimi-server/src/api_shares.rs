@@ -59,14 +59,11 @@ pub async fn create(
     if access.node.parent_id.is_none() {
         return api::bad_request("the root cannot be shared");
     }
-    // Encrypted content can only be shared with named users: the owner's
-    // client wraps file keys per recipient (RFC 0007 v2). Group and link
-    // shares would hand out ciphertext nobody can read, so refuse them
-    // for encrypted subtrees.
-    if req.kind != "user" && subtree_has_encrypted(&state, access.owner_id, access.node.id).await {
-        return api::bad_request(
-            "encrypted files can only be shared with named users (RFC 0007 v2)",
-        );
+    // Encrypted content can be shared with named users and groups (the
+    // owner's client wraps file keys per member, RFC 0007 v2). Public
+    // links would hand out ciphertext nobody can read.
+    if req.kind == "link" && subtree_has_encrypted(&state, access.owner_id, access.node.id).await {
+        return api::bad_request("encrypted files cannot be shared with public links");
     }
 
     let (result, generated): (Result<ShareRow, DbError>, Option<String>) = match req.kind.as_str() {
@@ -266,6 +263,29 @@ pub async fn received(
     Json(json!({ "mounts": items })).into_response()
 }
 
+/// `GET /api/groups/{name}/members` — member usernames of a group.
+///
+/// Needed by the owner's client to wrap file keys per member.
+pub async fn group_members(
+    State(state): State<AppState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(name): Path<String>,
+) -> Response {
+    let Some(group) = state.db.group_by_name(&name).await.ok().flatten() else {
+        return not_found();
+    };
+    match state.db.group_members(group.id).await {
+        Ok(members) => {
+            let names: Vec<&str> = members
+                .iter()
+                .map(|member| member.username.as_str())
+                .collect();
+            Json(json!({ "group": group.name, "members": names })).into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
 /// `GET /api/shareable` — users and groups a share can target.
 pub async fn shareable(
     State(state): State<AppState>,
@@ -426,6 +446,9 @@ pub async fn delete(
                 && let Some(recipient) = share.recipient_user_id
             {
                 let _ = state.db.delete_share_keys(share.node_id, recipient).await;
+            }
+            if share.kind == "group" {
+                let _ = state.db.delete_share_keys_for_node(share.node_id).await;
             }
             audit(
                 &state,

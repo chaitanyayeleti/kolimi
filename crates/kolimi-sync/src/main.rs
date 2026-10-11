@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use kolimi_crypto::recovery_code_display;
 use kolimi_sync::{
-    E2eeOptions, SyncConfig, create_keyring, publish_identity, share_file, sync_once, unshare_file,
-    upload_keyring,
+    E2eeOptions, ShareTarget, SyncConfig, create_keyring, publish_identity, share_path, sync_once,
+    unshare_path, upload_keyring,
 };
 
 #[derive(Parser)]
@@ -61,9 +61,13 @@ struct Cli {
     #[arg(long)]
     share: Option<String>,
 
-    /// Recipient for --share/--unshare.
+    /// Recipient user for --share/--unshare.
     #[arg(long)]
     with: Option<String>,
+
+    /// Recipient group for --share/--unshare (keys wrapped per member).
+    #[arg(long)]
+    group: Option<String>,
 
     /// Revoke the share of --share from --with instead of creating one.
     #[arg(long)]
@@ -108,15 +112,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     if let Some(path) = cli.share.clone() {
-        let Some(recipient) = cli.with.clone() else {
-            return Err("--share requires --with <username>".into());
+        let target = match (cli.with.clone(), cli.group.clone()) {
+            (Some(user), None) => ShareTarget::User(user),
+            (None, Some(group)) => ShareTarget::Group(group),
+            _ => {
+                return Err(
+                    "--share requires exactly one of --with <username> or --group <name>".into(),
+                );
+            }
         };
         if cli.unshare {
-            unshare_file(&config, &path, &recipient).await?;
-            println!("revoked {path} for {recipient}");
+            unshare_path(&config, &path, target.clone()).await?;
+            println!("revoked {path} for {} {}", target.kind(), target.name());
         } else {
-            let wrapped = share_file(&config, &path, &recipient).await?;
-            println!("shared {path} with {recipient} ({wrapped} encrypted file key(s) wrapped)");
+            let wrapped = share_path(&config, &path, target.clone()).await?;
+            println!(
+                "shared {path} with {} {} ({wrapped} encrypted file key(s) wrapped)",
+                target.kind(),
+                target.name()
+            );
         }
         return Ok(());
     }

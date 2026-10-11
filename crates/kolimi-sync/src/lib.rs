@@ -290,15 +290,58 @@ pub fn create_keyring_with_params(
     Ok((keyring, recovery))
 }
 
-/// Shares a path (relative to the local dir) with a user, wrapping the
-/// file keys of every encrypted file under it for the recipient.
-///
-/// Returns how many file keys were wrapped. Plaintext files are shared
-/// through the normal ACL path and need no keys.
+/// Who a share targets.
+#[derive(Debug, Clone)]
+pub enum ShareTarget {
+    /// A single user.
+    User(String),
+    /// Every member of a group (keys wrapped per member).
+    Group(String),
+}
+
+impl ShareTarget {
+    /// `"user"` or `"group"`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ShareTarget::User(_) => "user",
+            ShareTarget::Group(_) => "group",
+        }
+    }
+
+    /// The recipient name.
+    pub fn name(&self) -> &str {
+        match self {
+            ShareTarget::User(name) | ShareTarget::Group(name) => name,
+        }
+    }
+}
+
+/// Shares a path with one user, wrapping encrypted file keys for them.
 pub async fn share_file(
     config: &SyncConfig,
     rel_path: &str,
     recipient: &str,
+) -> Result<u64, SyncError> {
+    share_path(config, rel_path, ShareTarget::User(recipient.to_string())).await
+}
+
+/// Shares a path with a group, wrapping encrypted file keys for every
+/// member (per-member X25519 wrapping; not MLS — see RFC 0007).
+pub async fn share_file_to_group(
+    config: &SyncConfig,
+    rel_path: &str,
+    group: &str,
+) -> Result<u64, SyncError> {
+    share_path(config, rel_path, ShareTarget::Group(group.to_string())).await
+}
+
+/// Shares a path with a user or group. Returns how many key wraps were
+/// uploaded. Plaintext files are shared through the normal ACL path and
+/// need no keys.
+pub async fn share_path(
+    config: &SyncConfig,
+    rel_path: &str,
+    target: ShareTarget,
 ) -> Result<u64, SyncError> {
     let http = Http::new(config)?;
     let Some(e2ee) = unlock_e2ee(&http, config).await? else {
@@ -309,26 +352,57 @@ pub async fn share_file(
     let rel_path = rel_path.trim_start_matches('/');
     let server_path = format!("/{rel_path}");
 
-    let identity_path = format!("/api/e2ee/identity/{}", encode(recipient));
-    let (status, body) = http.get_json(&identity_path).await?;
-    if status != 200 {
-        return Err(SyncError::E2ee(format!(
-            "{recipient} has no E2EE identity (they must unlock E2EE once first)"
-        )));
+    // Resolve the recipients (group members, minus ourselves).
+    let members: Vec<String> = match &target {
+        ShareTarget::User(name) => vec![name.clone()],
+        ShareTarget::Group(name) => {
+            let path = format!("/api/groups/{}/members", encode(name));
+            let (status, body) = http.get_json(&path).await?;
+            if status != 200 {
+                return Err(SyncError::E2ee(format!("no such group: {name}")));
+            }
+            body["members"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    };
+    let mut recipients: Vec<(String, [u8; 32])> = Vec::new();
+    for member in members {
+        if member == config.username {
+            continue;
+        }
+        let path = format!("/api/e2ee/identity/{}", encode(&member));
+        let (status, body) = http.get_json(&path).await?;
+        if status != 200 {
+            return Err(SyncError::E2ee(format!(
+                "{member} has no E2EE identity (they must unlock E2EE once first)"
+            )));
+        }
+        let public_key: [u8; 32] = STANDARD
+            .decode(body["public_key"].as_str().unwrap_or_default())
+            .map_err(|error| SyncError::E2ee(format!("{member} key: {error}")))?
+            .try_into()
+            .map_err(|_| SyncError::E2ee(format!("{member} key must be 32 bytes")))?;
+        recipients.push((member, public_key));
     }
-    let public_key: [u8; 32] = STANDARD
-        .decode(body["public_key"].as_str().unwrap_or_default())
-        .map_err(|error| SyncError::E2ee(format!("recipient key: {error}")))?
-        .try_into()
-        .map_err(|_| SyncError::E2ee("recipient key must be 32 bytes".to_string()))?;
+    if recipients.is_empty() {
+        return Err(SyncError::E2ee(
+            "no recipients with an E2EE identity".to_string(),
+        ));
+    }
 
     let (status, _) = http
         .post_json(
             "/api/shares",
             &serde_json::json!({
                 "path": server_path,
-                "kind": "user",
-                "recipient": recipient,
+                "kind": target.kind(),
+                "recipient": target.name(),
                 "permission": "read",
             }),
         )
@@ -369,17 +443,19 @@ pub async fn share_file(
             .decode(body["wrapped_key"].as_str().unwrap_or_default())
             .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
         let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
-        let share_key = e2ee.identity.wrap_file_key_for(&public_key, &file_key)?;
-        let path = format!(
-            "/api/e2ee/share-key?path={}&recipient={}",
-            encode(&format!("/{rel}")),
-            encode(recipient)
-        );
-        let status = http.put_bytes(&path, &share_key).await?;
-        if status != 204 {
-            return Err(SyncError::Server { status, path });
+        for (member, public_key) in &recipients {
+            let share_key = e2ee.identity.wrap_file_key_for(public_key, &file_key)?;
+            let path = format!(
+                "/api/e2ee/share-key?path={}&recipient={}",
+                encode(&format!("/{rel}")),
+                encode(member)
+            );
+            let status = http.put_bytes(&path, &share_key).await?;
+            if status != 204 {
+                return Err(SyncError::Server { status, path });
+            }
+            wrapped_count += 1;
         }
-        wrapped_count += 1;
     }
     Ok(wrapped_count)
 }
@@ -390,6 +466,24 @@ pub async fn unshare_file(
     config: &SyncConfig,
     rel_path: &str,
     recipient: &str,
+) -> Result<(), SyncError> {
+    unshare_path(config, rel_path, ShareTarget::User(recipient.to_string())).await
+}
+
+/// Revokes a group share of `rel_path` (all members lose access).
+pub async fn unshare_file_from_group(
+    config: &SyncConfig,
+    rel_path: &str,
+    group: &str,
+) -> Result<(), SyncError> {
+    unshare_path(config, rel_path, ShareTarget::Group(group.to_string())).await
+}
+
+/// Revokes a share of `rel_path` from a user or group.
+pub async fn unshare_path(
+    config: &SyncConfig,
+    rel_path: &str,
+    target: ShareTarget,
 ) -> Result<(), SyncError> {
     let http = Http::new(config)?;
     let server_path = format!("/{}", rel_path.trim_start_matches('/'));
@@ -405,13 +499,15 @@ pub async fn unshare_file(
         .as_array()
         .and_then(|shares| {
             shares.iter().find(|share| {
-                share["kind"] == "user" && share["recipient"].as_str() == Some(recipient)
+                share["kind"] == target.kind() && share["recipient"].as_str() == Some(target.name())
             })
         })
         .and_then(|share| share["id"].as_i64());
     let Some(share_id) = share_id else {
         return Err(SyncError::E2ee(format!(
-            "no share of {server_path} with {recipient}"
+            "no share of {server_path} with {} {}",
+            target.kind(),
+            target.name()
         )));
     };
     let path = format!("/api/shares/{share_id}");

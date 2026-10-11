@@ -182,6 +182,37 @@ impl Db {
         Ok(result.rows_affected())
     }
 
+    /// Removes every wrapped key for a node (e.g. a revoked group share).
+    pub async fn delete_share_keys_for_node(&self, node_id: i64) -> Result<u64, DbError> {
+        let result = sqlx::query("DELETE FROM e2ee_share_keys WHERE node_id = ?")
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Removes a member's wrapped keys for every node shared to a group
+    /// (called when the member leaves the group).
+    pub async fn delete_share_keys_for_group_member(
+        &self,
+        group_id: i64,
+        user_id: i64,
+    ) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "DELETE FROM e2ee_share_keys
+             WHERE recipient_id = ?
+               AND node_id IN (
+                   SELECT node_id FROM shares
+                   WHERE kind = 'group' AND recipient_group_id = ?
+               )",
+        )
+        .bind(user_id)
+        .bind(group_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Whether a node is encrypted.
     pub async fn is_encrypted(&self, node_id: i64) -> Result<bool, DbError> {
         let exists: Option<i64> =

@@ -218,6 +218,7 @@ pub fn build_app(state: AppState) -> Router {
             patch(api_shares::update).delete(api_shares::delete),
         )
         .route("/api/shareable", get(api_shares::shareable))
+        .route("/api/groups/{name}/members", get(api_shares::group_members))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

@@ -158,8 +158,11 @@ kolimi-sync --server ... --user alice --password ... --local ~/Kolimi \
 
 The owner's client wraps the file keys for bob (X25519); bob's next
 sync pulls the file decrypted into `Shared with me/` (read-only).
-`--unshare` revokes it. Group/link shares of encrypted files are
-refused (no per-member keys yet).
+`--unshare` revokes it. Groups work too (`--group team`): keys are
+wrapped for every member, and removing a member revokes their keys so
+their next sync drops the local copy. This is per-member wrapping, not
+MLS — RFC 9420 group messaging remains the roadmap item. Public links
+to encrypted files are refused.
 
 Unlock works with the passphrase, the recovery code, or a passkey PRF
 (platform shells supply the PRF output; RFC 0007). The server never indexes or previews encrypted
@@ -359,8 +362,11 @@ kolimi-sync --server ... --user alice --password ... --local ~/Kolimi \
 
 The owner's client wraps the file keys for bob (X25519); bob's next
 sync pulls the file decrypted into `Shared with me/` (read-only).
-`--unshare` revokes it. Group/link shares of encrypted files are
-refused (no per-member keys yet).
+`--unshare` revokes it. Groups work too (`--group team`): keys are
+wrapped for every member, and removing a member revokes their keys so
+their next sync drops the local copy. This is per-member wrapping, not
+MLS — RFC 9420 group messaging remains the roadmap item. Public links
+to encrypted files are refused.
 
 Unlock works with the passphrase, the recovery code, or a passkey PRF
 (platform shells supply the PRF output; RFC 0007). The server never indexes or previews encrypted
