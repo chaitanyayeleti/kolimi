@@ -63,6 +63,12 @@ pub struct User {
     pub disabled: bool,
     /// Creation time in Unix milliseconds.
     pub created_at: i64,
+    /// Per-user storage quota in bytes (`None` = server default, `0` = unlimited).
+    pub quota_bytes: Option<i64>,
+    /// Used storage bytes, maintained incrementally and reconciled by the janitor.
+    pub used_bytes: i64,
+    /// When `used_bytes` was last reconciled from disk.
+    pub usage_updated_at: Option<i64>,
 }
 
 /// A login session.
@@ -585,6 +591,54 @@ impl Db {
             .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Adjusts a user's usage counter by `delta` bytes (clamped at zero).
+    pub async fn add_used_bytes(&self, user_id: i64, delta: i64) -> Result<(), DbError> {
+        sqlx::query("UPDATE users SET used_bytes = MAX(0, used_bytes + ?) WHERE id = ?")
+            .bind(delta)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Overwrites a user's usage counter (reconciliation) and stamps the
+    /// time it was measured.
+    pub async fn set_used_bytes(&self, user_id: i64, bytes: u64, now: i64) -> Result<(), DbError> {
+        sqlx::query("UPDATE users SET used_bytes = ?, usage_updated_at = ? WHERE id = ?")
+            .bind(bytes.min(i64::MAX as u64) as i64)
+            .bind(now)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Sets or clears a user's per-user quota (`None` = server default).
+    pub async fn set_quota_bytes(&self, user_id: i64, quota: Option<i64>) -> Result<(), DbError> {
+        let result = sqlx::query("UPDATE users SET quota_bytes = ? WHERE id = ?")
+            .bind(quota)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("user {user_id}")));
+        }
+        Ok(())
+    }
+
+    /// Ids of the users whose usage is least recently reconciled (never-
+    /// reconciled first), for the janitor to recompute in bounded batches.
+    pub async fn users_for_reconcile(&self, limit: i64) -> Result<Vec<i64>, DbError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM users
+             ORDER BY usage_updated_at IS NOT NULL, usage_updated_at ASC
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     /// Creates a login session.

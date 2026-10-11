@@ -23,6 +23,9 @@ pub const GC_GRACE: Duration = Duration::from_secs(60 * 60);
 pub const INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Blobs re-verified per user per pass.
 pub const SCRUB_BATCH: usize = 200;
+/// Usage counters recomputed from disk per pass (bounded; least-recently
+/// reconciled users first).
+pub const RECONCILE_BATCH: i64 = 50;
 
 /// What one janitor pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +44,8 @@ pub struct Report {
     pub scrubbed: u64,
     /// Blobs found corrupt by the scrubber.
     pub corrupt: u64,
+    /// Usage counters recomputed from disk.
+    pub reconciled: u64,
 }
 
 /// Errors during a janitor pass.
@@ -76,6 +81,14 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
         scrub_user(state, user.id, &mut report).await?;
     }
     report.expired_link_sessions = state.db.delete_expired_link_sessions(now).await?;
+
+    // Recompute a bounded batch of usage counters from disk so the cached
+    // numbers cannot drift; the request path never walks the blob tree.
+    for user_id in state.db.users_for_reconcile(RECONCILE_BATCH).await? {
+        let bytes = state.vfs.store().usage_bytes(user_id).await?;
+        state.db.set_used_bytes(user_id, bytes, now).await?;
+        report.reconciled += 1;
+    }
     Ok(report)
 }
 
@@ -129,6 +142,7 @@ pub async fn run(state: AppState) {
                     expired_link_sessions = report.expired_link_sessions,
                     scrubbed = report.scrubbed,
                     corrupt = report.corrupt,
+                    reconciled = report.reconciled,
                     "janitor pass complete"
                 );
             }

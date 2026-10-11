@@ -362,10 +362,12 @@ impl Vfs {
                 return Err(VfsError::IsCollection);
             }
             let parent_id = access.node.parent_id.ok_or(VfsError::Root)?;
-            let (manifest, _) = self
+            let max_bytes = self.quota_cap(access.owner_id, max_bytes).await?;
+            let (manifest, _, new_bytes) = self
                 .store
                 .ingest_stream(access.owner_id, stream, max_bytes)
                 .await?;
+            self.record_usage(access.owner_id, new_bytes).await?;
             return self
                 .finalize_put_at(
                     access.owner_id,

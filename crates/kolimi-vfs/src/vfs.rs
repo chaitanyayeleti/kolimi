@@ -206,9 +206,52 @@ impl Vfs {
         if existing.as_ref().is_some_and(|n| n.kind != "file") {
             return Err(VfsError::IsCollection);
         }
+        let (quota, used) = self.quota_state(user_id).await?;
+        if quota > 0 && used.saturating_add(data.len() as u64) > quota {
+            return Err(quota_error(quota));
+        }
         let manifest = self.store.ingest_bytes(user_id, data).await?;
+        self.record_usage(user_id, data.len() as u64).await?;
         self.finalize_put_at(user_id, parent.id, &name, existing, &manifest)
             .await
+    }
+
+    /// The effective quota (bytes; `0` = unlimited) and current usage for a
+    /// user's storage. The per-user override wins over the server default.
+    pub(crate) async fn quota_state(&self, user_id: i64) -> Result<(u64, u64), VfsError> {
+        match self.db.get_user(user_id).await? {
+            Some(user) => {
+                let quota = match user.quota_bytes {
+                    Some(q) if q > 0 => q as u64,
+                    Some(_) => 0,
+                    None => self.store.default_quota(),
+                };
+                Ok((quota, user.used_bytes.max(0) as u64))
+            }
+            None => Ok((0, 0)),
+        }
+    }
+
+    /// Caps a requested upload size to the user's remaining quota, returning
+    /// `QuotaExceeded` when no room remains.
+    pub(crate) async fn quota_cap(&self, user_id: i64, requested: u64) -> Result<u64, VfsError> {
+        let (quota, used) = self.quota_state(user_id).await?;
+        if quota == 0 {
+            return Ok(requested);
+        }
+        let remaining = quota.saturating_sub(used);
+        if remaining == 0 {
+            return Err(quota_error(quota));
+        }
+        Ok(requested.min(remaining))
+    }
+
+    /// Adds newly-written bytes to a user's usage counter.
+    pub(crate) async fn record_usage(&self, user_id: i64, new_bytes: u64) -> Result<(), VfsError> {
+        if new_bytes > 0 {
+            self.db.add_used_bytes(user_id, new_bytes as i64).await?;
+        }
+        Ok(())
     }
 
     /// Streams a body into a file, creating or replacing it.
@@ -244,7 +287,10 @@ impl Vfs {
         if existing.as_ref().is_some_and(|n| n.kind != "file") {
             return Err(VfsError::IsCollection);
         }
-        let (manifest, _size) = self.store.ingest_stream(user_id, stream, max_bytes).await?;
+        let max_bytes = self.quota_cap(user_id, max_bytes).await?;
+        let (manifest, _size, new_bytes) =
+            self.store.ingest_stream(user_id, stream, max_bytes).await?;
+        self.record_usage(user_id, new_bytes).await?;
         self.finalize_put_at(user_id, parent_id, name, existing, &manifest)
             .await
     }
@@ -429,7 +475,14 @@ impl Vfs {
         hash: &Hash,
         data: &[u8],
     ) -> Result<(), VfsError> {
-        Ok(self.store.put_chunk(user_id, hash, data).await?)
+        let (quota, used) = self.quota_state(user_id).await?;
+        if quota > 0 && used.saturating_add(data.len() as u64) > quota {
+            return Err(quota_error(quota));
+        }
+        if self.store.put_chunk(user_id, hash, data).await? {
+            self.record_usage(user_id, data.len() as u64).await?;
+        }
+        Ok(())
     }
 
     /// Commits a client-built manifest as a file's new content.
@@ -812,10 +865,17 @@ impl Vfs {
             // Corrupt or missing manifests keep their content id pinned but
             // expose no chunks; under-deletion is the safe failure mode.
         }
-        Ok(self
+        let stats = self
             .store
             .sweep(user_id, &keep_manifests, &keep_chunks, grace)
-            .await?)
+            .await?;
+        // Reclaimed bytes come off the usage counter (clamped at zero).
+        if stats.bytes_freed > 0 {
+            self.db
+                .add_used_bytes(user_id, -(stats.bytes_freed as i64))
+                .await?;
+        }
+        Ok(stats)
     }
 
     /// Verifies all manifests referenced by a user's files and versions.
@@ -860,6 +920,11 @@ impl Vfs {
         }
         Ok((parent, name))
     }
+}
+
+/// Builds the storage-quota error.
+fn quota_error(limit: u64) -> VfsError {
+    VfsError::Store(kolimi_store::StoreError::QuotaExceeded { limit })
 }
 
 pub(crate) fn to_db(node: &Node) -> DbNode {
@@ -909,6 +974,42 @@ mod tests {
         assert_eq!(data, b"hello");
         assert_eq!(node.etag(), node.etag());
         assert!(node.etag().starts_with('"'));
+    }
+
+    #[tokio::test]
+    async fn per_user_quota_is_enforced_and_counted() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.db().set_quota_bytes(user, Some(1024)).await.unwrap();
+
+        vfs.put_bytes(user, "/small.txt", &vec![1u8; 800])
+            .await
+            .unwrap();
+        let used = vfs.db().get_user(user).await.unwrap().unwrap().used_bytes;
+        assert!(used >= 800, "usage counter tracks writes, got {used}");
+
+        // The next write would exceed the quota.
+        let result = vfs.put_bytes(user, "/big.txt", &vec![2u8; 800]).await;
+        assert!(
+            matches!(
+                &result,
+                Err(VfsError::Store(kolimi_store::StoreError::QuotaExceeded {
+                    limit: 1024
+                }))
+            ),
+            "{result:?}"
+        );
+
+        // Raising the quota lets it through.
+        vfs.db().set_quota_bytes(user, Some(10_000)).await.unwrap();
+        vfs.put_bytes(user, "/big.txt", &vec![2u8; 800])
+            .await
+            .unwrap();
+
+        // `0` means unlimited.
+        vfs.db().set_quota_bytes(user, Some(0)).await.unwrap();
+        vfs.put_bytes(user, "/huge.txt", &vec![3u8; 5000])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

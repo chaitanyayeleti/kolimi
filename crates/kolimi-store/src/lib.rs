@@ -13,11 +13,10 @@
 //! ```
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fmt::Display,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -78,6 +77,8 @@ pub struct SweepStats {
     pub chunks_deleted: u64,
     /// Manifest blobs deleted.
     pub manifests_deleted: u64,
+    /// Total bytes reclaimed.
+    pub bytes_freed: u64,
 }
 
 /// Result of one scrub batch.
@@ -110,26 +111,26 @@ pub struct VerifyStats {
 #[derive(Debug, Clone)]
 pub struct BlobStore {
     root: PathBuf,
-    /// Per-user byte limit (`0` = unlimited).
-    quota_bytes: u64,
-    /// Cached per-user usage in bytes; shared across clones.
-    usage: Arc<Mutex<HashMap<i64, u64>>>,
+    /// Server-wide default quota in bytes (`0` = unlimited), used when a
+    /// user has no per-user override. Enforcement lives in the VFS, which
+    /// can see the per-user quota and usage counter.
+    default_quota: u64,
 }
 
 impl BlobStore {
     /// Opens (creating if needed) a blob store at `root` with no quota.
-    ///
-    /// Stale in-flight upload temp files (older than a day) are removed:
-    /// a crash mid-upload may leave those behind, but never a partially
-    /// visible blob.
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
         Self::open_with_quota(root, 0).await
     }
 
-    /// Opens a blob store with a per-user byte quota (`0` = unlimited).
+    /// Opens a blob store with a server-wide default quota (`0` = unlimited).
+    ///
+    /// Stale in-flight upload temp files (older than a day) are removed:
+    /// a crash mid-upload may leave those behind, but never a partially
+    /// visible blob.
     pub async fn open_with_quota(
         root: impl Into<PathBuf>,
-        quota_bytes: u64,
+        default_quota: u64,
     ) -> Result<Self, StoreError> {
         let root = root.into();
         let tmp = root.join("tmp");
@@ -137,59 +138,24 @@ impl BlobStore {
         cleanup_stale_temp(&tmp, Duration::from_secs(24 * 60 * 60)).await?;
         Ok(Self {
             root,
-            quota_bytes,
-            usage: Arc::new(Mutex::new(HashMap::new())),
+            default_quota,
         })
     }
 
-    /// Returns the user's stored bytes, walking the blob tree on a cache
-    /// miss. Chunks dominate, so this is an upper bound on live data.
+    /// The server-wide default quota in bytes (`0` = unlimited).
+    pub fn default_quota(&self) -> u64 {
+        self.default_quota
+    }
+
+    /// Returns the user's stored bytes by walking the blob tree. Chunks
+    /// dominate, so this is an upper bound on live data. Used by the
+    /// janitor's reconciliation, never on the request path.
     pub async fn usage_bytes(&self, user_id: i64) -> Result<u64, StoreError> {
-        if let Ok(map) = self.usage.lock()
-            && let Some(bytes) = map.get(&user_id)
-        {
-            return Ok(*bytes);
-        }
         let mut total = 0u64;
         for dir in [self.chunks_dir(user_id), self.manifests_dir(user_id)] {
             total = total.saturating_add(dir_size(&dir).await?);
         }
-        if let Ok(mut map) = self.usage.lock() {
-            map.insert(user_id, total);
-        }
         Ok(total)
-    }
-
-    /// Adds `delta` bytes to the cached usage (a no-op on a cache miss,
-    /// which will be recomputed on the next [`Self::usage_bytes`]).
-    fn record_usage(&self, user_id: i64, delta: u64) {
-        if let Ok(mut map) = self.usage.lock()
-            && let Some(bytes) = map.get_mut(&user_id)
-        {
-            *bytes = bytes.saturating_add(delta);
-        }
-    }
-
-    /// Drops the cached usage so it is recomputed from disk next time.
-    fn clear_usage(&self, user_id: i64) {
-        if let Ok(mut map) = self.usage.lock() {
-            map.remove(&user_id);
-        }
-    }
-
-    /// Returns `Err(QuotaExceeded)` when adding `additional` bytes would
-    /// exceed the per-user quota.
-    async fn ensure_quota(&self, user_id: i64, additional: u64) -> Result<(), StoreError> {
-        if self.quota_bytes == 0 {
-            return Ok(());
-        }
-        let used = self.usage_bytes(user_id).await?;
-        if used.saturating_add(additional) > self.quota_bytes {
-            return Err(StoreError::QuotaExceeded {
-                limit: self.quota_bytes,
-            });
-        }
-        Ok(())
     }
 
     /// Removes every blob owned by a user.
@@ -198,7 +164,6 @@ impl BlobStore {
     /// `users/<id>/`), so nothing else can reference these files. Used
     /// when an account is deleted; a missing directory is not an error.
     pub async fn remove_user(&self, user_id: i64) -> Result<(), StoreError> {
-        self.clear_usage(user_id);
         let dir = self.root.join("users").join(user_id.to_string());
         match tokio::fs::remove_dir_all(&dir).await {
             Ok(()) => Ok(()),
@@ -304,12 +269,15 @@ impl BlobStore {
     }
 
     /// Stores a single chunk under `hash`, verifying the bytes match.
+    ///
+    /// Returns `true` when the chunk was newly written (so callers can
+    /// adjust the usage counter), `false` when it already existed.
     pub async fn put_chunk(
         &self,
         user_id: i64,
         hash: &Hash,
         data: &[u8],
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let actual = Hash::of(data);
         if actual != *hash {
             return Err(StoreError::Mismatch {
@@ -319,17 +287,15 @@ impl BlobStore {
         }
         let path = self.chunk_path(user_id, hash);
         if tokio::fs::try_exists(&path).await? {
-            return Ok(());
+            return Ok(false);
         }
-        self.ensure_quota(user_id, data.len() as u64).await?;
         let tmp = self.tmp_path()?;
         let mut file = tokio::fs::File::create(&tmp).await?;
         file.write_all(data).await?;
         file.sync_all().await?;
         drop(file);
         commit(&tmp, &path).await?;
-        self.record_usage(user_id, data.len() as u64);
-        Ok(())
+        Ok(true)
     }
 
     /// Reads and verifies a chunk.
@@ -434,12 +400,14 @@ impl BlobStore {
     }
 
     /// Streams a body to a temp file, chunks it, and stores chunks + manifest.
+    /// Returns the manifest, the total content size, and the number of
+    /// **newly written** chunk bytes (deduplicated against existing blobs).
     pub async fn ingest_stream<B, E>(
         &self,
         user_id: i64,
         mut stream: impl Stream<Item = Result<B, E>> + Unpin,
         max_bytes: u64,
-    ) -> Result<(Manifest, u64), StoreError>
+    ) -> Result<(Manifest, u64, u64), StoreError>
     where
         B: AsRef<[u8]>,
         E: Display,
@@ -468,21 +436,16 @@ impl BlobStore {
         file.sync_all().await?;
         drop(file);
 
-        if let Err(error) = self.ensure_quota(user_id, size).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(error);
-        }
-
         let chunks_dir = self.chunks_dir(user_id);
         let ingest_path = tmp.clone();
-        let manifest = tokio::task::spawn_blocking(move || chunk_file(&chunks_dir, &ingest_path))
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))??;
+        let (manifest, new_bytes) =
+            tokio::task::spawn_blocking(move || chunk_file(&chunks_dir, &ingest_path))
+                .await
+                .map_err(|e| StoreError::Internal(e.to_string()))??;
         let _ = tokio::fs::remove_file(&tmp).await;
 
         self.put_manifest(user_id, &manifest).await?;
-        self.record_usage(user_id, size);
-        Ok((manifest, size))
+        Ok((manifest, size, new_bytes))
     }
 
     /// Reassembles a manifest's content in memory, verifying every chunk.
@@ -558,6 +521,9 @@ impl BlobStore {
                 continue;
             }
             if older_than(&path, cutoff).await? {
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    stats.bytes_freed = stats.bytes_freed.saturating_add(meta.len());
+                }
                 tokio::fs::remove_file(&path).await?;
                 stats.chunks_deleted += 1;
             }
@@ -576,13 +542,14 @@ impl BlobStore {
                 continue;
             }
             if older_than(&path, cutoff).await? {
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    stats.bytes_freed = stats.bytes_freed.saturating_add(meta.len());
+                }
                 tokio::fs::remove_file(&path).await?;
                 stats.manifests_deleted += 1;
             }
         }
 
-        // Usage changed on disk; recompute it next time.
-        self.clear_usage(user_id);
         Ok(stats)
     }
 
@@ -592,12 +559,16 @@ impl BlobStore {
     }
 }
 
-fn chunk_file(chunks_dir: &Path, path: &Path) -> Result<Manifest, StoreError> {
+/// Splits `path` into chunks under `chunks_dir`. Returns the manifest and
+/// the number of bytes that were newly written (chunks that already existed
+/// are deduplicated and not counted).
+fn chunk_file(chunks_dir: &Path, path: &Path) -> Result<(Manifest, u64), StoreError> {
     let file = std::fs::File::open(path)?;
     let chunker =
         fastcdc::v2020::StreamCDC::new(file, MIN_CHUNK_SIZE, AVG_CHUNK_SIZE, MAX_CHUNK_SIZE);
     let mut refs = Vec::new();
     let mut total: u64 = 0;
+    let mut new_bytes: u64 = 0;
     for result in chunker {
         let chunk = result.map_err(|e| StoreError::Chunking(e.to_string()))?;
         let hash = Hash::of(&chunk.data);
@@ -609,6 +580,7 @@ fn chunk_file(chunks_dir: &Path, path: &Path) -> Result<Manifest, StoreError> {
             let tmp = dir.join(format!("{hex}.part"));
             std::fs::write(&tmp, &chunk.data)?;
             std::fs::rename(&tmp, &target)?;
+            new_bytes += chunk.data.len() as u64;
         }
         refs.push(ChunkRef {
             hash,
@@ -616,11 +588,14 @@ fn chunk_file(chunks_dir: &Path, path: &Path) -> Result<Manifest, StoreError> {
         });
         total += chunk.data.len() as u64;
     }
-    Ok(Manifest {
-        version: Manifest::VERSION,
-        size: total,
-        chunks: refs,
-    })
+    Ok((
+        Manifest {
+            version: Manifest::VERSION,
+            size: total,
+            chunks: refs,
+        },
+        new_bytes,
+    ))
 }
 
 async fn commit(tmp: &Path, path: &Path) -> Result<(), StoreError> {
@@ -844,28 +819,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quota_blocks_uploads_past_the_limit() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = BlobStore::open_with_quota(dir.path(), 2000).await.unwrap();
-
-        // Fits under the quota.
-        store.ingest_bytes(1, &vec![7u8; 1500]).await.unwrap();
-        assert!(store.usage_bytes(1).await.unwrap() >= 1500);
-
-        // A second upload would exceed it.
-        assert!(matches!(
-            store.ingest_bytes(1, &vec![9u8; 1500]).await,
-            Err(StoreError::QuotaExceeded { limit: 2000 })
-        ));
-
-        // A different user has their own quota.
-        store.ingest_bytes(2, &vec![9u8; 1500]).await.unwrap();
-
-        // A store with no quota accepts anything.
-        let unlimited = BlobStore::open_with_quota(dir.path().join("u"), 0)
+    async fn ingest_stream_reports_newly_written_bytes() {
+        let (_dir, store) = store().await;
+        let chunks = || vec![Ok::<Vec<u8>, std::io::Error>(b"hello world".to_vec())];
+        let (_manifest, size, new_bytes) = store
+            .ingest_stream(1, futures_util::stream::iter(chunks()), 1024)
             .await
             .unwrap();
-        unlimited.ingest_bytes(1, &vec![9u8; 5000]).await.unwrap();
+        assert_eq!(size, 11);
+        assert_eq!(new_bytes, 11);
+
+        // Re-ingesting identical content writes nothing new.
+        let (_manifest, _size, again) = store
+            .ingest_stream(1, futures_util::stream::iter(chunks()), 1024)
+            .await
+            .unwrap();
+        assert_eq!(again, 0, "deduplicated chunks are not counted as new");
+
+        // usage_bytes reflects what is on disk (chunks + manifest).
+        assert!(store.usage_bytes(1).await.unwrap() >= 11);
+    }
+
+    #[tokio::test]
+    async fn put_chunk_reports_whether_it_wrote() {
+        let (_dir, store) = store().await;
+        let data = b"chunk bytes";
+        let hash = Hash::of(data);
+        assert!(
+            store.put_chunk(1, &hash, data).await.unwrap(),
+            "first write"
+        );
+        assert!(!store.put_chunk(1, &hash, data).await.unwrap(), "dedup");
     }
 
     #[tokio::test]
@@ -899,11 +883,12 @@ mod tests {
             Ok(b"streamed ".to_vec()),
             Ok(b"world".to_vec()),
         ];
-        let (manifest, size) = store
+        let (manifest, size, new_bytes) = store
             .ingest_stream(1, futures_util::stream::iter(chunks), 1024)
             .await
             .unwrap();
         assert_eq!(size, 20);
+        assert_eq!(new_bytes, 20);
         assert_eq!(manifest.size, 20);
         assert_eq!(
             store.read_content(1, &manifest).await.unwrap(),
