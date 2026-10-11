@@ -347,7 +347,17 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             if !yes {
                 return Err(format!("refusing to delete {username} without --yes").into());
             }
+            let user = db
+                .find_user(&username)
+                .await?
+                .ok_or_else(|| format!("no such user: {username}"))?;
             db.delete_user(&username).await?;
+            // Blob storage is per-user and the janitor only visits
+            // existing users, so remove it here or it leaks forever.
+            let store = kolimi_store::BlobStore::open(data.join("blobs")).await?;
+            if let Err(error) = store.remove_user(user.id).await {
+                eprintln!("warning: could not remove blob data for {username}: {error}");
+            }
             db.audit_append(
                 None,
                 Some("cli"),

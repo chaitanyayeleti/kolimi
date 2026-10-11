@@ -119,6 +119,20 @@ impl BlobStore {
         Ok(Self { root })
     }
 
+    /// Removes every blob owned by a user.
+    ///
+    /// Storage is per-user (manifests and chunks live under
+    /// `users/<id>/`), so nothing else can reference these files. Used
+    /// when an account is deleted; a missing directory is not an error.
+    pub async fn remove_user(&self, user_id: i64) -> Result<(), StoreError> {
+        let dir = self.root.join("users").join(user_id.to_string());
+        match tokio::fs::remove_dir_all(&dir).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(StoreError::Io(error)),
+        }
+    }
+
     fn chunk_path(&self, user_id: i64, hash: &Hash) -> PathBuf {
         let hex = hash.to_hex();
         self.root
@@ -713,6 +727,23 @@ mod tests {
             store.get_chunk(2, &manifest.chunks[0].hash).await,
             Err(StoreError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn remove_user_erases_its_blobs_and_leaves_others() {
+        let (dir, store) = store().await;
+        store.ingest_bytes(1, b"user one data").await.unwrap();
+        store.ingest_bytes(2, b"user two data").await.unwrap();
+        assert!(dir.path().join("users/1").exists());
+        assert!(dir.path().join("users/2").exists());
+
+        store.remove_user(1).await.unwrap();
+        assert!(!dir.path().join("users/1").exists());
+        assert!(dir.path().join("users/2").exists());
+
+        // Idempotent, and a never-existing user is fine too.
+        store.remove_user(1).await.unwrap();
+        store.remove_user(99).await.unwrap();
     }
 
     #[tokio::test]

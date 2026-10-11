@@ -782,6 +782,14 @@ impl Vfs {
     // ---- maintenance ---------------------------------------------------
 
     /// Removes blobs no longer referenced by any node or version.
+    /// Removes all blob data for a deleted user.
+    ///
+    /// Unlike garbage collection, this does not require the user to still
+    /// exist, so it is what makes account deletion leave nothing behind.
+    pub async fn remove_user_data(&self, user_id: i64) -> Result<(), VfsError> {
+        Ok(self.store.remove_user(user_id).await?)
+    }
+
     pub async fn collect_garbage(
         &self,
         user_id: i64,

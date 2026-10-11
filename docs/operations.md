@@ -18,11 +18,12 @@ kolimi-server user enable alice              # restore access
 kolimi-server user delete alice --yes        # delete the user and everything they own
 ```
 
-`user delete` cascades to sessions, passkeys, the file tree, shares,
-DAV collections, E2EE keys and group memberships; audit entries keep
-their history with a null actor, and the blob store is reclaimed by the
-janitor's garbage collection. `user disable` takes effect immediately
-(existing sessions stop working) and is the reversible alternative.
+`user delete` removes the account and everything it owns: sessions,
+passkeys, the file tree, shares, DAV collections, E2EE keys and group
+memberships (database rows cascade), **and the user's blob data on disk**
+is deleted with it. Audit entries are preserved with a null actor. `user
+disable` takes effect immediately (existing sessions stop working) and is
+the reversible alternative.
 
 Passkeys are registered in the web UI (toolbar → **Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is

@@ -495,6 +495,20 @@ pub async fn delete_user(
     }
     match state.db.delete_user(&username).await {
         Ok(()) => {
+            // The row and its cascades are gone; drop the per-user blob
+            // directory too, since the janitor only visits existing users.
+            if let Err(error) = state.vfs.remove_user_data(target.id).await {
+                tracing::error!(%error, user_id = target.id, "could not remove deleted user's blobs");
+                audit(
+                    &state,
+                    Some(user.user_id),
+                    Some(&user.username),
+                    "user.delete_orphan_blobs",
+                    &target.username,
+                    json!({ "error": error.to_string() }),
+                )
+                .await;
+            }
             audit(
                 &state,
                 Some(user.user_id),

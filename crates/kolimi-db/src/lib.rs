@@ -553,8 +553,10 @@ impl Db {
     ///
     /// Foreign keys cascade to sessions, passkeys, nodes, shares, DAV
     /// collections, E2EE keys, TOTP and group memberships; audit entries
-    /// keep their history with a null actor. Blob data is reclaimed by the
-    /// janitor's garbage collection. Refused for the last enabled admin.
+    /// keep their history with a null actor. The per-user blob directory
+    /// must be removed by the caller (`BlobStore::remove_user`); garbage
+    /// collection cannot reclaim it later because the janitor only visits
+    /// users that still exist. Refused for the last enabled admin.
     pub async fn delete_user(&self, username: &str) -> Result<(), DbError> {
         let mut tx = self.pool.begin().await?;
         let Some(target) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")

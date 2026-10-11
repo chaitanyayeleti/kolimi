@@ -252,7 +252,7 @@ async fn disable_blocks_login_and_drops_sessions() {
 
 #[tokio::test]
 async fn delete_removes_the_user_and_cascades() {
-    let (_dir, state, app) = setup().await;
+    let (dir, state, app) = setup().await;
 
     // Bob owns a file.
     let put = app
@@ -268,6 +268,15 @@ async fn delete_removes_the_user_and_cascades() {
         .await
         .unwrap();
     assert_eq!(put.status(), StatusCode::CREATED);
+
+    // Blob storage is per-user and must not be left orphaned on delete.
+    let bob_id = state.db.find_user("bob").await.unwrap().unwrap().id;
+    let bob_blobs = dir
+        .path()
+        .join("blobs")
+        .join("users")
+        .join(bob_id.to_string());
+    assert!(bob_blobs.exists(), "bob has stored blobs before deletion");
 
     // You cannot delete yourself; a missing user is 404.
     let (status, _) = request(
@@ -303,6 +312,10 @@ async fn delete_removes_the_user_and_cascades() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
+    assert!(
+        !bob_blobs.exists(),
+        "bob's blobs are removed with the account"
+    );
     assert!(state.db.find_user("bob").await.unwrap().is_none());
     let (status, _) = request(&app, "GET", "/api/me", Some(&basic("bob", PASS)), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
