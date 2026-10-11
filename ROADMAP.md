@@ -120,7 +120,7 @@ is silently skipped.
 | **Multi-device E2EE** | One master key per user; devices share it out-of-band | Device enrollment (QR + ephemeral key), wrapped-key replication; after MLS |
 | **Postgres backend** | Stack promises "Postgres-ready queries" | sqlx is already the layer; port migrations + connection plumbing behind the same `Db` API; decide demand-driven |
 | **HTTP/3 (quinn), zero-copy uploads** | Stack mentions both; performance targets are met without them | Only if benchmarks show a gap; not on the critical path |
-| **Compression + broader rate limiting** | Per-client limits now cover auth, passkey, public-unlock and preview endpoints (with `KOLIMI_TRUST_PROXY` for proxies), plus login lockout. Compression and a wider global limiter are still missing | Add `tower-http` compression; revisit per-account lockout DoS (issue #4) |
+| **Compression + broader rate limiting** | Per-client limits cover auth, passkey, public-unlock and preview endpoints (with `KOLIMI_TRUST_PROXY` for proxies); lockout is scoped per (account, source). Compression and a wider global limiter are still missing | Add `tower-http` compression; consider a broader global request limiter |
 | **Reproducible builds + first release** | Release workflow exists but has never run (no tag) | Tag `v0.1.0` once the audit delta for M8 lands; verify `--locked` reproducibility; publish checksums + SBOM |
 | **cargo-vet burn-down** | 570 exemptions is a placeholder, not vetting | Prioritize crypto/server crates; replace exemptions with real audits over time |
 | **AUR/deb/tray packaging of the desktop client** | Only the server is packaged today | PKGBUILD + .deb for `kolimi-sync` and the Tauri tray once the tray UI stabilizes |

@@ -232,7 +232,7 @@ See [install.md](install.md#upgrading). Migrations are forward-only.
 | Cookies not sent over HTTPS | Set `KOLIMI_SECURE_COOKIES=true` (and ensure the proxy forwards https). |
 | 413 on uploads | The reverse proxy's body limit; set `client_max_body_size 0` (nginx) and `proxy_request_buffering off`. |
 | Previews fail with 422/415 | Unsupported format, encrypted file (no server-side preview by design), or a kernel without Landlock (the worker still runs under seccomp/rlimits). |
-| "too many failed attempts" | Login lockout (5 failures / 15 min per account); wait it out or check the audit log for `auth.login_failed` reasons. |
+| "too many failed attempts" | Login lockout (5 failures / 15 min, keyed on account **and** client address) or per-client rate limiting on auth/link endpoints; wait it out, then check the audit log for `auth.login_failed` reasons. |
 | Sync reports conflicts | Expected when both sides edited a file: the server version wins and your edit is kept as `name.conflict-<ts>`. |
 | Server won't start after upgrade | Restore the pre-upgrade backup (migrations are forward-only). |
 

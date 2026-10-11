@@ -31,7 +31,9 @@ process.
   only ciphertext and wrapped keys.
 - **Auth without ceremony.** Passkeys by default, passwordless
   accounts, TOTP with one-time recovery codes, session hardening
-  (CSRF, lockout, secure cookies).
+  (CSRF, per-source lockout and rate limiting, secure cookies, HSTS).
+  Admins get a small JSON API and CLI to create, disable and delete
+  users.
 - **Append-only audit log.** Every security-relevant action is
   hash-chained; `kolimi-server audit verify` detects tampering.
 - **Nothing unsandboxed.** Previews decode in a re-executed
