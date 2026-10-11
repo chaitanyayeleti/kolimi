@@ -204,8 +204,8 @@ MLS — RFC 9420 group messaging remains the roadmap item. Public links
 to encrypted files are refused.
 
 Unlock works with the passphrase, the recovery code, or a passkey PRF
-(platform shells supply the PRF output; RFC 0007). The server never indexes or previews encrypted
-content, and sharing encrypted files is disabled in v1. Test vectors
+(platform shells supply the PRF output; RFC 0007). The server never
+indexes or previews encrypted content. Test vectors
 are committed (`crates/kolimi-crypto/tests/vectors.json`) for other
 implementations; `crates/kolimi-crypto` holds the primitives.
 
@@ -240,8 +240,8 @@ this core (uniffi bindings are the planned mobile path).
 
 ## Install
 
-**One command** (downloads the signed release, installs the systemd
-unit, creates the admin account, prints your password once):
+**One command** (downloads the signed release, installs `kolimi-server`
+and `kolimi-sync`, creates the admin account, prints your password once):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/chaitanyayeleti/kolimi/main/scripts/install.sh | sh
@@ -373,77 +373,3 @@ Password login for such accounts is rejected (and audited); sign-in
 goes through the WebAuthn endpoints. In the web UI: sign in once, open
 **Passkeys** in the toolbar to register a device, then use *Sign in with
 a passkey* on the login page — no password needed afterwards.
-
-## End-to-end encryption (alpha)
-
-Files under a configured `--e2ee-root` are encrypted on the client
-before they are chunked and uploaded; the server stores ciphertext,
-wrapped per-file keys, and a keyring it cannot decrypt. Chunks use
-deterministic AEAD so delta sync and CAS dedup keep working within a
-file's history, and the manifest hashes ciphertext chunks (structure
-leaks, content does not — RFC 0007 documents this honestly).
-
-```sh
-# one-time setup (prints a recovery code once)
-kolimi-sync --server https://cloud.example.com --user alice \
-    --local ~/Kolimi --e2ee-setup
-
-# sync with the "Private/" subtree encrypted
-KOLIMI_E2EE_PASSPHRASE=... kolimi-sync --server ... --user alice \
-    --local ~/Kolimi --e2ee-root Private
-```
-
-Sharing encrypted files with named users:
-
-```sh
-# the recipient must have set up E2EE once (--e2ee-setup)
-kolimi-sync --server ... --user alice --password ... --local ~/Kolimi \
-    --e2ee-root Private --share Private/doc.txt --with bob
-```
-
-The owner's client wraps the file keys for bob (X25519); bob's next
-sync pulls the file decrypted into `Shared with me/` (read-only).
-`--unshare` revokes it. Groups work too (`--group team`): keys are
-wrapped for every member, and removing a member revokes their keys so
-their next sync drops the local copy. This is per-member wrapping, not
-MLS — RFC 9420 group messaging remains the roadmap item. Public links
-to encrypted files are refused.
-
-Unlock works with the passphrase, the recovery code, or a passkey PRF
-(platform shells supply the PRF output; RFC 0007). The server never indexes or previews encrypted
-content, and sharing encrypted files is disabled in v1. Test vectors
-are committed (`crates/kolimi-crypto/tests/vectors.json`) for other
-implementations; `crates/kolimi-crypto` holds the primitives.
-
-## Desktop tray + mobile core
-
-- **Tray shell** (`apps/kolimi-tray`, Tauri, its own workspace): reads
-  `~/.config/kolimi/tray.json`, shows live sync status in the tray,
-  syncs on startup, every 5 minutes, and on demand.
-- **Mobile core** (`crates/kolimi-ffi`, UniFFI): Kotlin/Swift/Python
-  bindings for the sync core + E2EE setup (PRF secrets come from the
-  platform ceremony). Background scheduling (WorkManager /
-  BGTaskScheduler) is platform code; the FFI boundary is documented for
-  it.
-
-## Desktop sync (alpha)
-the change feed (per-user isolation, snippet excerpts, UI search box) and
-sandboxed previews: decoding happens in a re-executed worker under
-landlock + seccomp + rlimits with wall-clock kills, so a hostile image
-can never take the server down (tested, plus a cargo-fuzz decode target).
-Desktop sync core alpha landed (bidirectional delta sync CLI with
-conflict handling, tested end-to-end against a live server). M6
-complete for v1 scope: append-only hash-chained audit log, passkey-only
-accounts with browser WebAuthn ceremonies, and client-side E2EE (RFC
-0007) with passphrase/recovery/PRF unlock, committed interop vectors,
-and an independent decoder test. M5 clients complete: Tauri tray shell
-and UniFFI bindings (Kotlin/Swift/Python verified; Python exercised
-end-to-end). M2 scrub landed: the janitor re-verifies blobs
-incrementally with an audited cursor. Internal crypto review written
-(`docs/crypto-review.md`). M7 packaging landed: install script (one
-command to a working, password-protected share link), AUR PKGBUILD,
-.deb, distroless Docker + compose, hardened systemd unit, Helm chart,
-tag-triggered release workflow (gnu + musl tarballs, sha256, cosign
-signatures, CycloneDX SBOM), and cargo-vet infrastructure in CI.
-External audit, E2EE sharing, and the wasm plugin host remain. 250+
-tests; litmus 100%; rclone byte-identical.
