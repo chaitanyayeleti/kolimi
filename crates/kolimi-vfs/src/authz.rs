@@ -18,6 +18,10 @@ use crate::{Node, NodeKind, PathError, Vfs, VfsError, path};
 /// Name of the virtual directory where received shares are mounted.
 pub const SHARED_MOUNT: &str = "Shared with me";
 
+/// Names reserved at the root of every user's own tree (virtual or
+/// DAV-protocol namespaces).
+pub const RESERVED_ROOT_NAMES: &[&str] = &[SHARED_MOUNT, "principals", "calendars", "addressbooks"];
+
 /// A permission level. `Write` implies `Read`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Perm {

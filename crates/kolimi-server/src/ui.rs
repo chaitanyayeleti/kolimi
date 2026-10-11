@@ -30,6 +30,17 @@ pub async fn root() -> Response {
     response
 }
 
+/// `GET /.well-known/caldav|carddav` — DAV service discovery (RFC 6764):
+/// clients are sent to the WebDAV root, where `current-user-principal`
+/// leads them to the calendar/address-book homes.
+pub async fn well_known() -> Response {
+    let mut response = StatusCode::MOVED_PERMANENTLY.into_response();
+    response
+        .headers_mut()
+        .insert(header::LOCATION, HeaderValue::from_static("/dav/"));
+    response
+}
+
 /// `GET /app` and `/app/` — the application shell.
 pub async fn index() -> Response {
     shell()

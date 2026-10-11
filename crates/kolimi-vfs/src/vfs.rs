@@ -98,6 +98,11 @@ impl Vfs {
         Self { db, store }
     }
 
+    /// The underlying database handle.
+    pub fn db(&self) -> &Db {
+        &self.db
+    }
+
     /// Returns the root directory for a user.
     pub async fn root(&self, user_id: i64) -> Result<Node, VfsError> {
         Node::from_db(self.db.root_node(user_id).await?)
@@ -785,8 +790,9 @@ impl Vfs {
                 return Err(VfsError::ParentNotCollection);
             }
         }
-        // The virtual shared root's name is reserved at the top level.
-        if parent.id == root_id && name == crate::authz::SHARED_MOUNT {
+        // The virtual shared root and the DAV namespace roots are reserved
+        // at the top level of every user's tree.
+        if parent.id == root_id && crate::authz::RESERVED_ROOT_NAMES.contains(&name.as_str()) {
             return Err(VfsError::Conflict("reserved name".to_string()));
         }
         Ok((parent, name))

@@ -153,6 +153,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/healthz", get(api::healthz))
         .route("/version", get(api::version))
         .route("/", get(ui::root))
+        .route("/.well-known/caldav", get(ui::well_known))
+        .route("/.well-known/carddav", get(ui::well_known))
         .route("/app", get(ui::index))
         .route("/app/", get(ui::index))
         .route("/app/{*path}", get(ui::asset))

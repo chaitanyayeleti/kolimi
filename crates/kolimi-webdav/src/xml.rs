@@ -20,6 +20,7 @@ const SUPPORTED: &[&str] = &[
     "getlastmodified",
     "getetag",
     "creationdate",
+    "current-user-principal",
 ];
 
 /// A property requested in a PROPFIND body, with its namespace resolved.
@@ -82,16 +83,16 @@ impl PatchOp {
     }
 }
 
-struct Scope {
+pub(crate) struct Scope {
     frames: Vec<HashMap<String, String>>,
 }
 
 impl Scope {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { frames: Vec::new() }
     }
 
-    fn push_element(&mut self, attrs: &[(String, String)]) -> Result<(), ()> {
+    pub(crate) fn push_element(&mut self, attrs: &[(String, String)]) -> Result<(), ()> {
         let mut frame = HashMap::new();
         for (key, value) in attrs {
             if key == "xmlns" {
@@ -108,7 +109,7 @@ impl Scope {
         Ok(())
     }
 
-    fn pop_element(&mut self) {
+    pub(crate) fn pop_element(&mut self) {
         self.frames.pop();
     }
 
@@ -122,7 +123,7 @@ impl Scope {
         None
     }
 
-    fn resolve_name(&self, qname: &str) -> (String, Option<String>) {
+    pub(crate) fn resolve_name(&self, qname: &str) -> (String, Option<String>) {
         match qname.split_once(':') {
             Some((prefix, local)) => (local.to_string(), self.resolve(Some(prefix))),
             None => (qname.to_string(), self.resolve(None)),
@@ -130,7 +131,7 @@ impl Scope {
     }
 }
 
-fn collect_attrs(element: &BytesStart<'_>) -> Result<Vec<(String, String)>, ()> {
+pub(crate) fn collect_attrs(element: &BytesStart<'_>) -> Result<Vec<(String, String)>, ()> {
     let mut out = Vec::new();
     for attr in element.attributes() {
         let attr = attr.map_err(|_| ())?;
@@ -494,6 +495,8 @@ pub struct PropEntry {
     pub etag: String,
     /// Dead properties (namespace, name, value) of this resource.
     pub dead_props: Vec<(String, String, String)>,
+    /// `current-user-principal` href (for DAV discovery), if known.
+    pub principal_href: Option<String>,
 }
 
 impl PropEntry {
@@ -523,6 +526,7 @@ impl PropEntry {
             created_ms: node.created_at,
             etag: node.etag(),
             dead_props: Vec::new(),
+            principal_href: None,
         }
     }
 }
@@ -588,6 +592,37 @@ pub fn proppatch_response(href: &str, results: &[PatchResult]) -> QResult<Vec<u8
     }
 
     w.write_event(Event::End(BytesEnd::new("d:response")))?;
+    w.write_event(Event::End(BytesEnd::new("d:multistatus")))?;
+    Ok(w.into_inner())
+}
+
+/// Renders a `207 Multi-Status` body for a `sync-collection` REPORT:
+/// changed resources, deleted hrefs (reported with a 404 status), and the
+/// collection's new sync token.
+pub fn multistatus_sync(
+    entries: &[PropEntry],
+    deleted_hrefs: &[String],
+    requested: &RequestedProps,
+    sync_token: &str,
+) -> QResult<Vec<u8>> {
+    let mut w = Writer::new_with_indent(Vec::new(), b' ', 2);
+    w.write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)))?;
+
+    let mut ms = BytesStart::new("d:multistatus");
+    ms.push_attribute(("xmlns:d", "DAV:"));
+    w.write_event(Event::Start(ms))?;
+
+    for entry in entries {
+        write_response(&mut w, entry, requested)?;
+    }
+    for href in deleted_hrefs {
+        w.write_event(Event::Start(BytesStart::new("d:response")))?;
+        text(&mut w, "d:href", href)?;
+        text(&mut w, "d:status", "HTTP/1.1 404 Not Found")?;
+        w.write_event(Event::End(BytesEnd::new("d:response")))?;
+    }
+    text(&mut w, "d:sync-token", sync_token)?;
+
     w.write_event(Event::End(BytesEnd::new("d:multistatus")))?;
     Ok(w.into_inner())
 }
@@ -716,6 +751,13 @@ fn write_prop(w: &mut Writer<Vec<u8>>, local: &str, entry: &PropEntry) -> QResul
         "getlastmodified" => text(w, "d:getlastmodified", &cond::http_date(entry.modified_ms))?,
         "getetag" => text(w, "d:getetag", &entry.etag)?,
         "creationdate" => text(w, "d:creationdate", &cond::rfc3339(entry.created_ms))?,
+        "current-user-principal" => {
+            if let Some(href) = &entry.principal_href {
+                w.write_event(Event::Start(BytesStart::new("d:current-user-principal")))?;
+                text(w, "d:href", href)?;
+                w.write_event(Event::End(BytesEnd::new("d:current-user-principal")))?;
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -950,6 +992,7 @@ mod tests {
             created_ms: 0,
             etag: "\"abc\"".to_string(),
             dead_props: Vec::new(),
+            principal_href: None,
         }
     }
 

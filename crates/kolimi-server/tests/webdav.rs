@@ -419,12 +419,14 @@ async fn options_advertises_dav_support() {
     let auth = basic(USER, PASS);
     let (status, headers, _) = send(&server.app, request("OPTIONS", "/dav", Some(&auth))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers.get("dav").unwrap(), "1");
+    let dav = headers.get("dav").unwrap().to_str().unwrap();
+    assert!(dav.contains('1'), "{dav}");
+    assert!(dav.contains("sync-collection"), "{dav}");
     assert!(
         headers
             .get(header::ALLOW)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("PROPFIND") && v.contains("MOVE"))
+            .is_some_and(|v| v.contains("PROPFIND") && v.contains("MOVE") && v.contains("REPORT"))
     );
 }
 

@@ -7,8 +7,12 @@
 //! The router is stateless: `Vfs` and `CurrentUser` are injected via
 //! request extensions by the server crate.
 
+mod caldav;
 mod cond;
 mod davpath;
+mod ical;
+mod report;
+mod vcard;
 mod xml;
 
 use std::sync::Arc;
@@ -25,9 +29,13 @@ use kolimi_auth::CurrentUser;
 use kolimi_store::StoreError;
 use kolimi_vfs::{Node, NodeKind, SHARED_MOUNT, Vfs, VfsError};
 
-const ALLOW: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, MKCOL";
+use crate::report::{Report, ReportProps, parse_report};
+
+const ALLOW: &str =
+    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, MKCOL, REPORT";
 const MAX_PROPFIND_BODY: usize = 1024 * 1024;
 const MAX_UPLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_SYNC_CHANGES: i64 = 10_000;
 
 /// Routes served under `/dav`, generic over the app state.
 pub fn routes<S>() -> Router<S>
@@ -56,6 +64,15 @@ async fn handle(
         Ok(segments) => segments,
         Err(()) => return StatusCode::BAD_REQUEST.into_response(),
     };
+
+    // CalDAV/CardDAV namespaces.
+    if matches!(
+        segments.first().map(String::as_str),
+        Some("principals" | "calendars" | "addressbooks")
+    ) {
+        return caldav::handle(&vfs, &user, &segments, &method, &headers, body).await;
+    }
+
     let vfs_path = kolimi_vfs::path::join(&segments);
     let user_id = user.user_id;
 
@@ -66,10 +83,11 @@ async fn handle(
         "PUT" => put(&vfs, user_id, &vfs_path, &headers, body).await,
         "DELETE" => delete(&vfs, user_id, &vfs_path).await,
         "MKCOL" => mkcol(&vfs, user_id, &vfs_path, body).await,
-        "PROPFIND" => propfind(&vfs, user_id, &segments, &vfs_path, &headers, body).await,
+        "PROPFIND" => propfind(&vfs, &user, &segments, &vfs_path, &headers, body).await,
         "PROPPATCH" => proppatch(&vfs, user_id, &segments, &vfs_path, body).await,
         "COPY" => copy_move(&vfs, user_id, &vfs_path, &headers, false).await,
         "MOVE" => copy_move(&vfs, user_id, &vfs_path, &headers, true).await,
+        "REPORT" => report_file_tree(&vfs, &user, &segments, &vfs_path, body).await,
         _ => method_not_allowed(),
     }
 }
@@ -80,7 +98,7 @@ fn options() -> Response {
     headers.insert(header::ALLOW, HeaderValue::from_static(ALLOW));
     headers.insert(
         axum::http::HeaderName::from_static("dav"),
-        HeaderValue::from_static("1"),
+        HeaderValue::from_static("1, sync-collection"),
     );
     headers.insert(
         axum::http::HeaderName::from_static("ms-author-via"),
@@ -208,12 +226,14 @@ async fn mkcol(vfs: &Vfs, user_id: i64, path: &str, body: Body) -> Response {
 
 async fn propfind(
     vfs: &Vfs,
-    user_id: i64,
+    user: &CurrentUser,
     segments: &[String],
     path: &str,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
+    let user_id = user.user_id;
+    let principal = principal_href(user);
     let depth = header_str(headers, "depth")
         .unwrap_or("1")
         .trim()
@@ -237,14 +257,18 @@ async fn propfind(
     let mut entries = Vec::new();
     if segments.first().map(String::as_str) == Some(SHARED_MOUNT) && segments.len() == 1 {
         // The virtual root of received shares.
-        entries.push(xml::PropEntry::new(segments, &shared_root_node()));
+        let mut root_entry = xml::PropEntry::new(segments, &shared_root_node());
+        root_entry.principal_href = Some(principal.clone());
+        entries.push(root_entry);
         if depth == "1"
             && let Ok(mounts) = vfs.received_mounts(user_id).await
         {
             for mount in mounts {
                 let mut child_segments = segments.to_vec();
                 child_segments.push(mount.name.clone());
-                entries.push(xml::PropEntry::new(&child_segments, &mount.to_node()));
+                let mut entry = xml::PropEntry::new(&child_segments, &mount.to_node());
+                entry.principal_href = Some(principal.clone());
+                entries.push(entry);
             }
         }
     } else {
@@ -253,7 +277,9 @@ async fn propfind(
             Err(e) => return vfs_error(e),
         };
         let node = access.node;
-        entries.push(xml::PropEntry::new(segments, &node));
+        let mut entry = xml::PropEntry::new(segments, &node);
+        entry.principal_href = Some(principal.clone());
+        entries.push(entry);
         if let Ok(dead) = vfs.dead_props_access(user_id, path).await
             && let Some(first) = entries.first_mut()
         {
@@ -268,7 +294,9 @@ async fn propfind(
                     for child in children {
                         let mut child_segments = segments.to_vec();
                         child_segments.push(child.name.clone());
-                        entries.push(xml::PropEntry::new(&child_segments, &child));
+                        let mut entry = xml::PropEntry::new(&child_segments, &child);
+                        entry.principal_href = Some(principal.clone());
+                        entries.push(entry);
                     }
                 }
                 Err(e) => return vfs_error(e),
@@ -412,6 +440,139 @@ async fn copy_move(
 
 fn header_str(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) -> Option<&str> {
     headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+/// `REPORT` on the file tree: RFC 6578 `sync-collection` over the user's
+/// change feed. Reports are scoped to the addressed directory (changes
+/// outside it are filtered out).
+async fn report_file_tree(
+    vfs: &Vfs,
+    user: &CurrentUser,
+    segments: &[String],
+    path: &str,
+    body: Body,
+) -> Response {
+    let body = match to_bytes(body, MAX_PROPFIND_BODY).await {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let report = match parse_report(&body) {
+        Ok(report) => report,
+        Err(()) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let Report::SyncCollection {
+        sync_token,
+        level,
+        props,
+    } = report
+    else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    if level != 1 {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let since = match sync_token {
+        None => 0,
+        Some(token) => match parse_user_sync_token(&token, user.user_id) {
+            Some(seq) => seq,
+            None => return caldav::invalid_sync_token(),
+        },
+    };
+
+    let db = vfs.db();
+    let changes = match db
+        .changes_since(user.user_id, since, MAX_SYNC_CHANGES)
+        .await
+    {
+        Ok(changes) => changes,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let latest = db.latest_change_seq(user.user_id).await.unwrap_or(since);
+
+    let prefix = if path == "/" {
+        "/".to_string()
+    } else {
+        format!("{path}/")
+    };
+    let within =
+        |candidate: &str| path == "/" || candidate == path || candidate.starts_with(&prefix);
+
+    let principal = principal_href(user);
+    let mut entries: Vec<xml::PropEntry> = Vec::new();
+    let mut deleted: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for change in changes {
+        if change.op == "move" {
+            if let Some(from) = change.from_path.as_deref()
+                && within(from)
+            {
+                deleted.push(href_for(from));
+            }
+        } else if change.op == "delete" {
+            if within(&change.path) {
+                deleted.push(href_for(&change.path));
+            }
+            continue;
+        }
+        if !within(&change.path) || !seen.insert(change.path.clone()) {
+            continue;
+        }
+        let Ok(path_segments) = kolimi_vfs::path::parse(&change.path) else {
+            continue;
+        };
+        match vfs.resolve(user.user_id, &change.path).await {
+            Ok(node) => {
+                let mut entry = xml::PropEntry::new(&path_segments, &node);
+                entry.principal_href = Some(principal.clone());
+                if let Ok(dead) = vfs.dead_props(user.user_id, &change.path).await {
+                    entry.dead_props = dead
+                        .into_iter()
+                        .map(|prop| (prop.namespace, prop.name, prop.value))
+                        .collect();
+                }
+                entries.push(entry);
+            }
+            Err(_) => deleted.push(href_for(&change.path)),
+        }
+    }
+    let _ = segments;
+
+    let requested = match props {
+        ReportProps::Only(list) => xml::RequestedProps::Only(list),
+        _ => xml::RequestedProps::All,
+    };
+    let token = format!("urn:kolimi:sync:user:{}:{}", user.user_id, latest);
+    match xml::multistatus_sync(&entries, &deleted, &requested, &token) {
+        Ok(xml) => {
+            let mut response = Response::new(Body::from(xml));
+            *response.status_mut() = StatusCode::from_u16(207).unwrap_or(StatusCode::MULTI_STATUS);
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/xml; charset=utf-8"),
+            );
+            response
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn href_for(path: &str) -> String {
+    kolimi_vfs::path::parse(path)
+        .map(|segments| davpath::encode_href(&segments))
+        .unwrap_or_else(|_| "/dav/".to_string())
+}
+
+fn parse_user_sync_token(token: &str, user_id: i64) -> Option<i64> {
+    let rest = token.strip_prefix("urn:kolimi:sync:user:")?;
+    let (id, seq) = rest.split_once(':')?;
+    if id.parse::<i64>().ok()? != user_id {
+        return None;
+    }
+    seq.parse().ok()
+}
+
+fn principal_href(user: &CurrentUser) -> String {
+    format!("/dav/principals/{}/", user.username)
 }
 
 fn shared_root_node() -> Node {

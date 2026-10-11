@@ -8,7 +8,9 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
+mod dav;
 mod sharing;
+pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
 pub use sharing::{Group, LinkSession, ReceivedShare, ShareRow};
 
 /// Current wall-clock time in Unix milliseconds.

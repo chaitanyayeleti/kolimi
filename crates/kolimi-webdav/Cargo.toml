@@ -12,11 +12,15 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
+blake3.workspace = true
 httpdate.workspace = true
+icalendar = "0.17"
 kolimi-auth.workspace = true
+kolimi-db.workspace = true
 kolimi-store.workspace = true
 kolimi-vfs.workspace = true
 mime_guess.workspace = true
 percent-encoding.workspace = true
 quick-xml.workspace = true
+thiserror.workspace = true
 time.workspace = true

@@ -21,10 +21,10 @@ See [ROADMAP.md](ROADMAP.md) for the full plan.
 | `crates/kolimi-db` | SQLite persistence (users, sessions, file tree) with migrations |
 | `crates/kolimi-auth` | Argon2id passwords, session tokens, brute-force lockout, credential cache |
 | `crates/kolimi-vfs` | Path-safe virtual filesystem over DB + blobs; single permission engine |
-| `crates/kolimi-webdav` | WebDAV surface: OPTIONS, GET/HEAD, PUT, DELETE, MKCOL, PROPFIND, COPY, MOVE |
+| `crates/kolimi-webdav` | WebDAV surface: OPTIONS, GET/HEAD, PUT, DELETE, MKCOL, PROPFIND, COPY, MOVE + CalDAV/CardDAV and REPORT |
 | `crates/kolimi-ui` | Leptos (WASM) web UI, embedded into the server binary |
 | `crates/kolimi-server` | The single binary: session API, auth middleware, CLI, TLS |
-| `docs/rfc/` | Design docs: RFC 0001 (storage), RFC 0002 (sync), RFC 0003 (sharing/permissions) |
+| `docs/rfc/` | Design docs: RFC 0001 (storage), RFC 0002 (sync), RFC 0003 (sharing), RFC 0004 (CalDAV/CardDAV) |
 | `docs/threat-model.md` | Assets, adversaries, trust boundaries, review checklist |
 | `fuzz/` | cargo-fuzz targets for chunking + manifest invariants |
 
@@ -106,6 +106,24 @@ kolimi-server group add-member team alice
 kolimi-server group list
 ```
 
+## Calendars & contacts (CalDAV / CardDAV)
+
+Point Thunderbird, iOS, macOS, or DAVx⁵ at the server; discovery runs
+through `/.well-known/caldav|carddav` → `/dav/` → principal → homes:
+
+```
+/dav/principals/{user}/         calendar-home-set + addressbook-home-set
+/dav/calendars/{user}/{cal}/    MKCALENDAR, PROPFIND, REPORT, PROPPATCH
+/dav/addressbooks/{user}/{ab}/  extended MKCOL (addressbook resourcetype)
+```
+
+Object resources support GET/PUT/DELETE/PROPFIND with ETag preconditions;
+REPORT supports `calendar-query`/`addressbook-query` (filters advisory),
+`*-multiget`, and `sync-collection` (RFC 6578) — including on the file
+tree. iCalendar payloads are validated (one UID per resource) and vCards
+structurally (3.0 and 4.0 accepted); both are stored byte-for-byte so
+VALARMs and X-properties survive exactly. See RFC 0004 for deviations.
+
 ## Web UI
 
 The Leptos (WASM) app is served from the binary at `/app/` (public share
@@ -133,9 +151,10 @@ implemented yet).
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE).
 
-**Status:** M3 complete — single permission engine (one ACL implementation
-for WebDAV, API, links, and UI), user/group shares mounted at
-`/Shared with me`, public links with generated password + expiry + unlock
-rate limiting, groups CLI, Leptos WASM web UI (login, browser, upload,
-share dialog, trash, public pages) embedded in the binary. 175 tests;
-litmus 100%; rclone round-trips byte-identical. Next: M4 (CalDAV/CardDAV).
+**Status:** M4 complete — CalDAV/CardDAV (RFC 4791/6352) with RFC 6764
+discovery, byte-exact iCalendar/vCard storage with UID conflict detection,
+RFC 6578 `sync-collection` for calendar, address-book, and file
+collections, and calendar-query/multiget reports. 209 tests; litmus 100%;
+rclone round-trips byte-identical; live-verified over HTTP (well-known →
+principal → MKCALENDAR → PUT → incremental sync). Next: M5 (search,
+sandboxed previews, desktop/mobile clients).
