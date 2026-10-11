@@ -340,10 +340,11 @@ mod tests {
     fn json_roundtrip_and_methods() {
         let master = MasterKey::generate().unwrap();
         let recovery = generate_recovery_code().unwrap();
-        let keyring = Keyring::create(&master, "pw", &fast_params(), &recovery).unwrap();
+        let passphrase = "leak-check-passphrase-9f3a";
+        let keyring = Keyring::create(&master, passphrase, &fast_params(), &recovery).unwrap();
         let json = keyring.to_json().unwrap();
         assert!(
-            !json.contains("pw"),
+            !json.contains("leak-check"),
             "plaintext must not leak into the keyring"
         );
         let back = Keyring::from_json(&json).unwrap();
