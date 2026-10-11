@@ -252,6 +252,36 @@ impl Db {
         &self.pool
     }
 
+    /// The scrub cursor for a user (`None` = cycle finished / not started).
+    pub async fn scrub_cursor(&self, user_id: i64) -> Result<Option<String>, DbError> {
+        Ok(
+            sqlx::query_scalar("SELECT cursor FROM scrub_state WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten(),
+        )
+    }
+
+    /// Persists the scrub cursor (or clears it when the cycle finished).
+    pub async fn set_scrub_cursor(
+        &self,
+        user_id: i64,
+        cursor: Option<&str>,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO scrub_state (user_id, cursor, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(user_id) DO UPDATE SET cursor = excluded.cursor,
+                 updated_at = excluded.updated_at",
+        )
+        .bind(user_id)
+        .bind(cursor)
+        .bind(now_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Creates a user plus their root directory. The first user becomes admin.
     pub async fn create_user(&self, username: &str, password_hash: &str) -> Result<User, DbError> {
         validate_username(username)?;

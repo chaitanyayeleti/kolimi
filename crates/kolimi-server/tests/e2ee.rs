@@ -55,6 +55,16 @@ fn e2ee_options(passphrase: Option<&str>, recovery: Option<&str>) -> E2eeOptions
     E2eeOptions {
         passphrase: passphrase.map(str::to_string),
         recovery_code: recovery.map(str::to_string),
+        prf_secret: None,
+        encrypted_roots: vec!["Private".to_string()],
+    }
+}
+
+fn e2ee_options_prf(prf_secret: &[u8]) -> E2eeOptions {
+    E2eeOptions {
+        passphrase: None,
+        recovery_code: None,
+        prf_secret: Some(prf_secret.to_vec()),
         encrypted_roots: vec!["Private".to_string()],
     }
 }
@@ -293,6 +303,58 @@ async fn recovery_code_unlocks_and_conflicts_resolve() {
         })
         .expect("conflict copy");
     assert_eq!(std::fs::read(conflict_copy.path()).unwrap(), b"local edit");
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn passkey_prf_unlocks_the_keyring() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let seed = root.path().join("seed");
+    let mirror = root.path().join("mirror");
+    std::fs::create_dir_all(&mirror).unwrap();
+
+    // Setup adds a PRF wrap (the platform shell would supply the PRF
+    // output from a WebAuthn ceremony; here it is a fixed test secret).
+    let prf = [0x5au8; 32];
+    let (mut keyring, _recovery) = create_keyring_with_params(E2EE_PASS, &fast_params()).unwrap();
+    let master = keyring.unlock_with_passphrase(E2EE_PASS).unwrap();
+    keyring.add_prf(&master, &prf).unwrap();
+    assert!(keyring.methods().contains(&"prf"));
+    upload_keyring(&config(&server.url, &seed, None), &keyring)
+        .await
+        .unwrap();
+
+    std::fs::create_dir_all(seed.join("Private")).unwrap();
+    std::fs::write(seed.join("Private/prf.txt"), b"unlocked with a passkey").unwrap();
+    sync_once(&config(
+        &server.url,
+        &seed,
+        Some(e2ee_options(Some(E2EE_PASS), None)),
+    ))
+    .await
+    .unwrap();
+
+    // The mirror unlocks with the PRF secret alone.
+    let report = sync_once(&config(&server.url, &mirror, Some(e2ee_options_prf(&prf))))
+        .await
+        .unwrap();
+    assert_eq!(report.pulled, 1, "{report:?}");
+    assert_eq!(
+        std::fs::read(mirror.join("Private/prf.txt")).unwrap(),
+        b"unlocked with a passkey"
+    );
+
+    // A wrong PRF secret fails closed.
+    let error = sync_once(&config(
+        &server.url,
+        &mirror,
+        Some(e2ee_options_prf(&[0u8; 32])),
+    ))
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("PRF"), "{error}");
 
     server.handle.abort();
 }

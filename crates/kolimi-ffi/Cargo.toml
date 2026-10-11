@@ -1,0 +1,32 @@
+[package]
+name = "kolimi-ffi"
+description = "UniFFI bindings for the Kolimi sync core (Android/iOS shells)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "kolimi_ffi"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "bin/uniffi-bindgen.rs"
+
+[dependencies]
+kolimi-crypto.workspace = true
+kolimi-sync.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uniffi = { version = "0.32", features = ["tokio", "cli"] }
+
+[dev-dependencies]
+axum.workspace = true
+kolimi-auth.workspace = true
+kolimi-server.workspace = true
+tempfile.workspace = true

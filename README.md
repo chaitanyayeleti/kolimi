@@ -154,6 +154,17 @@ content, and sharing encrypted files is disabled in v1. Test vectors
 are committed (`crates/kolimi-crypto/tests/vectors.json`) for other
 implementations; `crates/kolimi-crypto` holds the primitives.
 
+## Desktop tray + mobile core
+
+- **Tray shell** (`apps/kolimi-tray`, Tauri, its own workspace): reads
+  `~/.config/kolimi/tray.json`, shows live sync status in the tray,
+  syncs on startup, every 5 minutes, and on demand.
+- **Mobile core** (`crates/kolimi-ffi`, UniFFI): Kotlin/Swift/Python
+  bindings for the sync core + E2EE setup (PRF secrets come from the
+  platform ceremony). Background scheduling (WorkManager /
+  BGTaskScheduler) is platform code; the FFI boundary is documented for
+  it.
+
 ## Desktop sync (alpha)
 
 `kolimi-sync` mirrors a local directory against the server over the
@@ -224,7 +235,9 @@ kolimi-server user passkey-only alice  # requires >= 1 registered passkey
 ```
 
 Password login for such accounts is rejected (and audited); sign-in
-goes through the WebAuthn endpoints.
+goes through the WebAuthn endpoints. In the web UI: sign in once, open
+**Passkeys** in the toolbar to register a device, then use *Sign in with
+a passkey* on the login page — no password needed afterwards.
 
 ## End-to-end encryption (alpha)
 
@@ -251,6 +264,17 @@ content, and sharing encrypted files is disabled in v1. Test vectors
 are committed (`crates/kolimi-crypto/tests/vectors.json`) for other
 implementations; `crates/kolimi-crypto` holds the primitives.
 
+## Desktop tray + mobile core
+
+- **Tray shell** (`apps/kolimi-tray`, Tauri, its own workspace): reads
+  `~/.config/kolimi/tray.json`, shows live sync status in the tray,
+  syncs on startup, every 5 minutes, and on demand.
+- **Mobile core** (`crates/kolimi-ffi`, UniFFI): Kotlin/Swift/Python
+  bindings for the sync core + E2EE setup (PRF secrets come from the
+  platform ceremony). Background scheduling (WorkManager /
+  BGTaskScheduler) is platform code; the FFI boundary is documented for
+  it.
+
 ## Desktop sync (alpha)
 the change feed (per-user isolation, snippet excerpts, UI search box) and
 sandboxed previews: decoding happens in a re-executed worker under
@@ -258,11 +282,13 @@ landlock + seccomp + rlimits with wall-clock kills, so a hostile image
 can never take the server down (tested, plus a cargo-fuzz decode target).
 Desktop sync core alpha landed (bidirectional delta sync CLI with
 conflict handling, tested end-to-end against a live server). M6
-progress: append-only hash-chained audit log, passkey-only accounts,
-and the E2EE core (RFC 0007): `kolimi-crypto` (master/file keys, chunk
-AEAD, keyring), server key storage + encrypted-file guards, and
-encrypted sync with passphrase/recovery unlock, committed interop test
-vectors, and an independent decoder test. 251 tests; litmus 100%;
-rclone byte-identical. Remaining M6: passkey-PRF unlock, UI WebAuthn,
-sharing/PRF follow-ups. Remaining M5: Tauri shell + mobile background
-upload (uniffi).
+complete for v1 scope: append-only hash-chained audit log, passkey-only
+accounts with browser WebAuthn ceremonies, and client-side E2EE (RFC
+0007) with passphrase/recovery/PRF unlock, committed interop vectors,
+and an independent decoder test. M5 clients complete: Tauri tray shell
+and UniFFI bindings (Kotlin/Swift/Python verified; Python exercised
+end-to-end). M2 scrub landed: the janitor re-verifies blobs
+incrementally with an audited cursor. Internal crypto review written
+(`docs/crypto-review.md`); external audit, E2EE sharing, and the
+wasm plugin host (M7) remain. 250+ tests; litmus 100%; rclone
+byte-identical.

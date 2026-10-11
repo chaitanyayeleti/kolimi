@@ -203,6 +203,23 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
         });
     };
 
+    let passkey_login = move |_| {
+        let user = username.get_untracked();
+        if user.is_empty() {
+            error.set("Enter your username, then use the passkey button".to_string());
+            return;
+        }
+        busy.set(true);
+        spawn_local(async move {
+            let result = crate::passkey::login(&user).await;
+            busy.set(false);
+            match result {
+                Ok(()) => view.set(View::Browser),
+                Err(e) => error.set(e),
+            }
+        });
+    };
+
     view! {
         <form class="card login" on:submit=submit>
             <h2>"Sign in"</h2>
@@ -227,6 +244,9 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
             <button type="submit" disabled=move || busy.get()>
                 {move || if busy.get() { "Signing in…" } else { "Sign in" }}
             </button>
+            <button type="button" disabled=move || busy.get() on:click=passkey_login>
+                "Sign in with a passkey"
+            </button>
             <p class="error">{move || error.get()}</p>
         </form>
     }
@@ -246,6 +266,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let query = RwSignal::new(String::new());
     let results = RwSignal::new(Vec::<SearchHit>::new());
     let search_active = RwSignal::new(false);
+    let passkeys_open = RwSignal::new(false);
 
     let load = move |target: String| {
         spawn_local(async move {
@@ -512,6 +533,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 >
                     "Trash"
                 </button>
+                <button on:click=move |_| passkeys_open.set(true)>"Passkeys"</button>
                 <button on:click=sign_out>"Sign out"</button>
             </div>
         </div>
@@ -719,6 +741,110 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     }
                 })
         }}
+
+        {move || {
+            passkeys_open
+                .get()
+                .then(|| {
+                    view! {
+                        <PasskeysDialog on_close=Callback::new(move |_| passkeys_open.set(false))/>
+                    }
+                })
+        }}
+    }
+}
+
+#[component]
+fn PasskeysDialog(on_close: Callback<()>) -> impl IntoView {
+    let passkeys = RwSignal::new(Vec::<Value>::new());
+    let error = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+
+    let load = Callback::new(move |_: ()| {
+        spawn_local(async move {
+            if let Ok(r) = api::get("/api/passkeys").await
+                && r.status == 200
+            {
+                passkeys.set(r.body.as_array().cloned().unwrap_or_default());
+            }
+        });
+    });
+    Effect::new(move |_| load.run(()));
+
+    let add = move |_| {
+        let Some(name) = api::prompt("Name this passkey (e.g. \"laptop\")", "laptop") else {
+            return;
+        };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        busy.set(true);
+        spawn_local(async move {
+            let result = crate::passkey::register(&name).await;
+            busy.set(false);
+            match result {
+                Ok(()) => {
+                    error.set(String::new());
+                    load.run(());
+                }
+                Err(e) => error.set(e),
+            }
+        });
+    };
+
+    let remove = move |id: i64| {
+        spawn_local(async move {
+            if let Ok(r) = api::delete(&format!("/api/passkeys/{id}")).await
+                && r.status == 204
+            {
+                load.run(());
+            }
+        });
+    };
+
+    let close = move |_| on_close.run(());
+
+    view! {
+        <div class="backdrop">
+            <div class="card modal">
+                <div class="modal-head">
+                    <h2>"Passkeys"</h2>
+                    <button on:click=close>"Close"</button>
+                </div>
+                <p class="muted">
+                    "Passkeys sign you in without a password. Add one, then you can "
+                    "switch this account to passkey-only."
+                </p>
+                <ul class="shares">
+                    <For
+                        each=move || passkeys.get()
+                        key=|passkey| passkey["id"].as_i64().unwrap_or(0)
+                        children=move |passkey| {
+                            let id = passkey["id"].as_i64().unwrap_or(0);
+                            let name = passkey["name"].as_str().unwrap_or_default().to_string();
+                            view! {
+                                <li class="row">
+                                    <span class="name">{name}</span>
+                                    <span class="row-actions">
+                                        <button on:click=move |_| remove(id)>"Remove"</button>
+                                    </span>
+                                </li>
+                            }
+                        }
+                    />
+                    <Show when=move || passkeys.get().is_empty()>
+                        <li class="row muted">"No passkeys yet."</li>
+                    </Show>
+                </ul>
+                <div class="row-actions">
+                    <button disabled=move || busy.get() on:click=add>
+                        {move || if busy.get() { "Waiting for authenticator…" } else { "Add passkey" }}
+                    </button>
+                </div>
+                <p class="error">{move || error.get()}</p>
+            </div>
+        </div>
     }
 }
 

@@ -7,6 +7,7 @@ use chacha20poly1305::{
 };
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroize;
 
 use crate::{CryptoError, FileKey};
 
@@ -187,6 +188,12 @@ impl MasterKey {
 impl std::fmt::Debug for MasterKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("MasterKey([redacted])")
+    }
+}
+
+impl Drop for MasterKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 

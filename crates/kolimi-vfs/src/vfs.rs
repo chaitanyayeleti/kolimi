@@ -99,6 +99,11 @@ impl Vfs {
     }
 
     /// The underlying database handle.
+    /// The underlying blob store (used by the background scrubber).
+    pub fn store(&self) -> &BlobStore {
+        &self.store
+    }
+
     pub fn db(&self) -> &Db {
         &self.db
     }

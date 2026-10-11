@@ -8,6 +8,7 @@
 
 mod api;
 mod app;
+mod passkey;
 mod public;
 
 use leptos::mount::mount_to_body;

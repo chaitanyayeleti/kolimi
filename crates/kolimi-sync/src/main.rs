@@ -48,6 +48,24 @@ struct Cli {
     /// E2EE recovery code (alternative unlock path).
     #[arg(long, env = "KOLIMI_E2EE_RECOVERY", hide_env_values = true)]
     e2ee_recovery: Option<String>,
+
+    /// WebAuthn PRF output as hex (64 chars) for passkey unlock; platform
+    /// shells usually pass this via the library API instead.
+    #[arg(long, env = "KOLIMI_E2EE_PRF", hide_env_values = true)]
+    e2ee_prf: Option<String>,
+}
+
+fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
+    let text = text.trim();
+    if !text.len().is_multiple_of(2) {
+        return Err("hex length must be even".to_string());
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&text[i..i + 2], 16).map_err(|_| "invalid hex digits".to_string())
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -61,9 +79,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         e2ee: if cli.e2ee_roots.is_empty() {
             None
         } else {
+            let prf_secret = match &cli.e2ee_prf {
+                Some(hex) => Some(hex_decode(hex).map_err(|e| format!("--e2ee-prf: {e}"))?),
+                None => None,
+            };
             Some(E2eeOptions {
                 passphrase: cli.e2ee_passphrase.clone(),
                 recovery_code: cli.e2ee_recovery.clone(),
+                prf_secret,
                 encrypted_roots: cli.e2ee_roots.clone(),
             })
         },

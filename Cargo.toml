@@ -5,6 +5,7 @@ members = [
     "crates/kolimi-chunk",
     "crates/kolimi-crypto",
     "crates/kolimi-db",
+    "crates/kolimi-ffi",
     "crates/kolimi-preview",
     "crates/kolimi-search",
     "crates/kolimi-server",
@@ -14,7 +15,7 @@ members = [
     "crates/kolimi-vfs",
     "crates/kolimi-webdav",
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "apps/kolimi-tray"]
 
 [workspace.package]
 version = "0.0.1"
@@ -45,8 +46,10 @@ kolimi-auth = { version = "0.0.1", path = "crates/kolimi-auth" }
 kolimi-chunk = { version = "0.0.1", path = "crates/kolimi-chunk" }
 kolimi-crypto = { version = "0.0.1", path = "crates/kolimi-crypto" }
 kolimi-db = { version = "0.0.1", path = "crates/kolimi-db" }
+kolimi-ffi = { version = "0.0.1", path = "crates/kolimi-ffi" }
 kolimi-preview = { version = "0.0.1", path = "crates/kolimi-preview" }
 kolimi-search = { version = "0.0.1", path = "crates/kolimi-search" }
+kolimi-server = { version = "0.0.1", path = "crates/kolimi-server" }
 kolimi-store = { version = "0.0.1", path = "crates/kolimi-store" }
 kolimi-sync = { version = "0.0.1", path = "crates/kolimi-sync" }
 kolimi-vfs = { version = "0.0.1", path = "crates/kolimi-vfs" }
@@ -61,6 +64,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
+zeroize = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "io-util", "time", "process", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace"] }

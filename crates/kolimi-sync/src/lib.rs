@@ -51,6 +51,9 @@ pub struct E2eeOptions {
     pub passphrase: Option<String>,
     /// Recovery code (alternative unlock path).
     pub recovery_code: Option<String>,
+    /// WebAuthn PRF output (32 bytes) for passkey unlock; platform shells
+    /// obtain it from the authenticator and pass it here (RFC 0007).
+    pub prf_secret: Option<Vec<u8>>,
     /// Relative paths whose files are encrypted end-to-end.
     pub encrypted_roots: Vec<String>,
 }
@@ -206,6 +209,14 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
         keyring
             .unlock_with_recovery(&code)
             .map_err(|_| SyncError::E2ee("wrong recovery code".to_string()))?
+    } else if let Some(prf) = &options.prf_secret {
+        let prf: [u8; 32] = prf
+            .as_slice()
+            .try_into()
+            .map_err(|_| SyncError::E2ee("PRF secret must be exactly 32 bytes".to_string()))?;
+        keyring
+            .unlock_with_prf(&prf)
+            .map_err(|_| SyncError::E2ee("PRF secret does not unlock the keyring".to_string()))?
     } else {
         return Err(SyncError::E2ee(
             "e2ee roots are configured but neither a passphrase nor a recovery code was given"

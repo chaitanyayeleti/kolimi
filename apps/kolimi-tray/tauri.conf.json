@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "kolimi-tray",
+  "version": "0.0.1",
+  "identifier": "dev.kolimi.tray",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "windows": [],
+    "trayIcon": {
+      "iconPath": "icon.png"
+    },
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icon.png"]
+  }
+}

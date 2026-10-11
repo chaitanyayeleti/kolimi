@@ -1,5 +1,7 @@
 //! Per-file keys and deterministic chunk encryption.
 
+use zeroize::Zeroize;
+
 use crate::{
     CryptoError,
     keys::{CHUNK_AAD, KEY_LEN, NONCE_LEN, TAG_LEN, aead_decrypt, aead_encrypt, hkdf32, random},
@@ -82,6 +84,12 @@ impl FileKey {
 impl std::fmt::Debug for FileKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("FileKey([redacted])")
+    }
+}
+
+impl Drop for FileKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 

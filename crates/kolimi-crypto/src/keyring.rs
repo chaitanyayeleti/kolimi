@@ -6,6 +6,7 @@
 //! PRF output).
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::MasterKey;
 pub use crate::keys::Argon2Params;
@@ -102,7 +103,7 @@ impl Keyring {
     ) -> Result<(), CryptoError> {
         params.argon2_params()?;
         let salt = random::<16>()?;
-        let kek = kek_from_passphrase(passphrase, &salt, params)?;
+        let kek = Zeroizing::new(kek_from_passphrase(passphrase, &salt, params)?);
         let wrapped = wrap(&kek, master_key.as_bytes(), PASSPHRASE_AAD)?;
         self.wraps.retain(|wrap| wrap.method() != "passphrase");
         self.wraps.push(Wrap::Passphrase {
@@ -121,7 +122,7 @@ impl Keyring {
         master_key: &MasterKey,
         recovery_code: &[u8; RECOVERY_CODE_LEN],
     ) -> Result<(), CryptoError> {
-        let kek = kek_from_recovery_code(recovery_code)?;
+        let kek = Zeroizing::new(kek_from_recovery_code(recovery_code)?);
         let wrapped = wrap(&kek, master_key.as_bytes(), RECOVERY_AAD)?;
         self.wraps.retain(|wrap| wrap.method() != "recovery");
         self.wraps.push(Wrap::Recovery { wrapped });
@@ -134,7 +135,7 @@ impl Keyring {
         master_key: &MasterKey,
         prf_output: &[u8; KEY_LEN],
     ) -> Result<(), CryptoError> {
-        let kek = kek_from_prf(prf_output)?;
+        let kek = Zeroizing::new(kek_from_prf(prf_output)?);
         let wrapped = wrap(&kek, master_key.as_bytes(), PRF_AAD)?;
         self.wraps.retain(|wrap| wrap.method() != "prf");
         self.wraps.push(Wrap::Prf { wrapped });
@@ -158,7 +159,7 @@ impl Keyring {
             t_cost: *t_cost,
             p_cost: *p_cost,
         };
-        let kek = kek_from_passphrase(passphrase, salt, &params)?;
+        let kek = Zeroizing::new(kek_from_passphrase(passphrase, salt, &params)?);
         let bytes = unwrap(&kek, wrapped, PASSPHRASE_AAD).map_err(|_| CryptoError::Unlock)?;
         Ok(MasterKey::from_bytes(bytes))
     }
@@ -173,7 +174,7 @@ impl Keyring {
         else {
             return Err(CryptoError::Unlock);
         };
-        let kek = kek_from_recovery_code(recovery_code)?;
+        let kek = Zeroizing::new(kek_from_recovery_code(recovery_code)?);
         let bytes = unwrap(&kek, wrapped, RECOVERY_AAD).map_err(|_| CryptoError::Unlock)?;
         Ok(MasterKey::from_bytes(bytes))
     }
@@ -184,7 +185,7 @@ impl Keyring {
         else {
             return Err(CryptoError::Unlock);
         };
-        let kek = kek_from_prf(prf_output)?;
+        let kek = Zeroizing::new(kek_from_prf(prf_output)?);
         let bytes = unwrap(&kek, wrapped, PRF_AAD).map_err(|_| CryptoError::Unlock)?;
         Ok(MasterKey::from_bytes(bytes))
     }

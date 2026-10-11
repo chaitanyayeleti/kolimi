@@ -66,6 +66,8 @@ client ──(TLS, untrusted network)──> kolimi-server
 | A6 MITM | rustls, TLS 1.3 only, HSTS, no mixed content in UI | M1 |
 | A7 memory scraping | `zeroize`/`secrecy` for secrets, no keys in logs; full-disk encryption is the operator's responsibility | M1+ |
 | A8 malicious dependency | `cargo-deny`, `cargo-audit`, `cargo-vet`, minimal dep tree, pinned lockfile in CI | M0 |
+| Secrets in memory / swap | `zeroize` on master/file keys and KEK locals; wrapped keys only on disk; internal review in `docs/crypto-review.md` | landed (M6) |
+| Silent bit-rot or tampering in the blob store | background janitor scrubber re-hashes chunks (BLAKE3) and re-derives manifest ids incrementally; corruption is logged and audited | landed (M2/M6) |
 | A8 build/release tampering | reproducible builds, signed release artifacts, tagged builds from CI only | M7 |
 | Replay/CSRF | CSRF double-submit tokens, SameSite=Strict cookies, no state-changing GETs | M1 |
 | Log leakage | never log content or full URLs with tokens; structured logs with redaction | M1 |

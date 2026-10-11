@@ -9,3 +9,6 @@
 # Generated UI assets (scripts/build-ui.sh); the placeholder is committed.
 crates/kolimi-server/assets/ui/*
 !crates/kolimi-server/assets/ui/not-built.html
+
+# Tauri tray has its own workspace and target dir
+apps/kolimi-tray/target/

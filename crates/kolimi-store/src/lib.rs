@@ -73,6 +73,23 @@ pub struct SweepStats {
     pub manifests_deleted: u64,
 }
 
+/// Result of one scrub batch.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ScrubBatch {
+    /// Blobs verified in this batch.
+    pub checked: u64,
+    /// Relative paths whose bytes do not match their hash.
+    pub corrupt: Vec<String>,
+    /// Cursor for the next call; `None` means the cycle finished.
+    pub next: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobKind {
+    Chunk,
+    Manifest,
+}
+
 /// Result of verifying a manifest's chunks.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct VerifyStats {
@@ -142,6 +159,60 @@ impl BlobStore {
             .root
             .join("tmp")
             .join(format!("{}.part", hex::encode(random))))
+    }
+
+    /// Verifies up to `limit` blobs strictly after the cursor `after`,
+    /// in lexicographic order (the scrub cycle order).
+    ///
+    /// Chunks are re-hashed against their address; manifests are parsed
+    /// and their structural content id recomputed. Returns the corrupt
+    /// paths and the cursor for the next batch (`None` = cycle finished,
+    /// start over next time).
+    pub async fn scrub_batch(
+        &self,
+        user_id: i64,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<ScrubBatch, StoreError> {
+        let mut blobs: Vec<(String, BlobKind)> = Vec::new();
+        collect_blobs(
+            &self.chunks_dir(user_id),
+            "chunks",
+            BlobKind::Chunk,
+            &mut blobs,
+        )
+        .await?;
+        collect_blobs(
+            &self.manifests_dir(user_id),
+            "manifests",
+            BlobKind::Manifest,
+            &mut blobs,
+        )
+        .await?;
+        blobs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut batch = ScrubBatch::default();
+        let mut last: Option<String> = None;
+        for (rel, kind) in &blobs {
+            if after.is_some_and(|after| rel.as_str() <= after) {
+                continue;
+            }
+            if batch.checked as usize >= limit {
+                break;
+            }
+            batch.checked += 1;
+            last = Some(rel.clone());
+            let path = self.root.join("users").join(user_id.to_string()).join(rel);
+            if !verify_blob(&path, rel, *kind).await {
+                batch.corrupt.push(rel.clone());
+            }
+        }
+        batch.next = if batch.checked as usize == limit {
+            last
+        } else {
+            None
+        };
+        Ok(batch)
     }
 
     /// Stores a single chunk under `hash`, verifying the bytes match.
@@ -493,6 +564,50 @@ async fn older_than(path: &Path, cutoff: SystemTime) -> Result<bool, StoreError>
     Ok(modified < cutoff)
 }
 
+async fn collect_blobs(
+    dir: &Path,
+    prefix: &str,
+    kind: BlobKind,
+    out: &mut Vec<(String, BlobKind)>,
+) -> Result<(), StoreError> {
+    let mut stack = vec![(dir.to_path_buf(), prefix.to_string())];
+    while let Some((dir, prefix)) = stack.pop() {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(StoreError::Io(e)),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                stack.push((path, format!("{prefix}/{name}")));
+            } else {
+                out.push((format!("{prefix}/{name}"), kind));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn verify_blob(path: &Path, rel: &str, kind: BlobKind) -> bool {
+    let Some(name) = rel.rsplit('/').next() else {
+        return false;
+    };
+    let Ok(expected) = name.parse::<Hash>() else {
+        return false;
+    };
+    let Ok(bytes) = tokio::fs::read(path).await else {
+        return false;
+    };
+    match kind {
+        BlobKind::Chunk => Hash::of(&bytes) == expected,
+        BlobKind::Manifest => serde_json::from_slice::<Manifest>(&bytes)
+            .map(|manifest| manifest.content_id() == expected)
+            .unwrap_or(false),
+    }
+}
+
 async fn cleanup_stale_temp(tmp: &Path, max_age: Duration) -> Result<(), StoreError> {
     let cutoff = SystemTime::now()
         .checked_sub(max_age)
@@ -716,5 +831,54 @@ mod tests {
         let restored = BlobStore::open(dest.path()).await.unwrap();
         let bytes = restored.read_content(1, &manifest).await.unwrap();
         assert_eq!(bytes, b"backup me");
+    }
+
+    #[tokio::test]
+    async fn scrub_verifies_blobs_and_detects_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::open(dir.path().join("blobs")).await.unwrap();
+        let data = b"scrub me please, thoroughly".to_vec();
+        store.ingest_bytes(1, &data).await.unwrap();
+
+        // A clean cycle checks the chunks and the manifest, then finishes.
+        let batch = store.scrub_batch(1, None, 1000).await.unwrap();
+        assert!(batch.checked >= 2, "{batch:?}");
+        assert!(batch.corrupt.is_empty(), "{batch:?}");
+        assert_eq!(batch.next, None);
+
+        // Corrupt one chunk on disk: the scrubber names it.
+        let mut corrupt_path = None;
+        let mut stack = vec![dir.path().join("blobs/users/1/chunks")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    corrupt_path = Some(path);
+                }
+            }
+        }
+        let corrupt_path = corrupt_path.expect("a chunk file");
+        let mut bytes = std::fs::read(&corrupt_path).unwrap();
+        bytes[0] ^= 0xff;
+        std::fs::write(&corrupt_path, &bytes).unwrap();
+        let name = corrupt_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let batch = store.scrub_batch(1, None, 1000).await.unwrap();
+        assert_eq!(batch.corrupt.len(), 1, "{batch:?}");
+        assert!(batch.corrupt[0].ends_with(&name));
+
+        // Cursor batches advance deterministically.
+        let first = store.scrub_batch(1, None, 1).await.unwrap();
+        assert_eq!(first.checked, 1);
+        let cursor = first.next.clone().expect("more blobs remain");
+        let second = store.scrub_batch(1, Some(&cursor), 1).await.unwrap();
+        assert_eq!(second.checked, 1);
+        assert_ne!(second.next, Some(cursor));
     }
 }

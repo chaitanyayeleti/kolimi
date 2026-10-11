@@ -1,8 +1,13 @@
-//! Background maintenance: trash/version retention and blob GC.
+//! Background maintenance: trash/version retention, blob GC, and the
+//! incremental scrubber.
 //!
 //! The janitor runs hourly. All operations are idempotent and safe to run
 //! concurrently with traffic: blob deletion has a grace period so blobs
-//! written by in-flight uploads are never swept.
+//! written by in-flight uploads are never swept, and the scrubber only
+//! reads. Each pass re-verifies a bounded batch of blobs per user (BLAKE3
+//! for chunks, structural content id for manifests), advancing a durable
+//! cursor so every blob is checked regularly; corruption is logged and
+//! audited (single-node installs have no replica to self-heal from).
 
 use std::time::Duration;
 
@@ -16,6 +21,8 @@ pub const VERSION_RETENTION_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
 pub const GC_GRACE: Duration = Duration::from_secs(60 * 60);
 /// Janitor interval.
 pub const INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Blobs re-verified per user per pass.
+pub const SCRUB_BATCH: usize = 200;
 
 /// What one janitor pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +37,10 @@ pub struct Report {
     pub manifests_deleted: u64,
     /// Expired public-link unlock sessions removed.
     pub expired_link_sessions: u64,
+    /// Blobs re-verified by the scrubber.
+    pub scrubbed: u64,
+    /// Blobs found corrupt by the scrubber.
+    pub corrupt: u64,
 }
 
 /// Errors during a janitor pass.
@@ -41,6 +52,9 @@ pub enum JanitorError {
     /// Storage failure.
     #[error("storage: {0}")]
     Vfs(#[from] kolimi_vfs::VfsError),
+    /// Blob store failure.
+    #[error("blob store: {0}")]
+    Store(#[from] kolimi_store::StoreError),
 }
 
 /// Runs one maintenance pass for every user.
@@ -59,9 +73,44 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
         let swept = state.vfs.collect_garbage(user.id, GC_GRACE).await?;
         report.chunks_deleted += swept.chunks_deleted;
         report.manifests_deleted += swept.manifests_deleted;
+        scrub_user(state, user.id, &mut report).await?;
     }
     report.expired_link_sessions = state.db.delete_expired_link_sessions(now).await?;
     Ok(report)
+}
+
+/// Re-verifies one batch of a user's blobs and advances the cursor.
+async fn scrub_user(
+    state: &AppState,
+    user_id: i64,
+    report: &mut Report,
+) -> Result<(), JanitorError> {
+    let cursor = state.db.scrub_cursor(user_id).await?;
+    let batch = state
+        .vfs
+        .store()
+        .scrub_batch(user_id, cursor.as_deref(), SCRUB_BATCH)
+        .await?;
+    report.scrubbed += batch.checked;
+    for blob in &batch.corrupt {
+        report.corrupt += 1;
+        tracing::error!(user_id, blob, "scrub: blob corrupt");
+        state
+            .db
+            .audit_append(
+                None,
+                Some("janitor"),
+                "scrub.corrupt",
+                blob,
+                &serde_json::json!({ "user_id": user_id }),
+            )
+            .await?;
+    }
+    state
+        .db
+        .set_scrub_cursor(user_id, batch.next.as_deref())
+        .await?;
+    Ok(())
 }
 
 /// Runs the janitor forever on the configured interval.
@@ -78,6 +127,8 @@ pub async fn run(state: AppState) {
                     chunks_deleted = report.chunks_deleted,
                     manifests_deleted = report.manifests_deleted,
                     expired_link_sessions = report.expired_link_sessions,
+                    scrubbed = report.scrubbed,
+                    corrupt = report.corrupt,
                     "janitor pass complete"
                 );
             }
