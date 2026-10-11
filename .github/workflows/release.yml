@@ -62,7 +62,10 @@ jobs:
       - name: SBOM (CycloneDX)
         run: |
           cargo install cargo-cyclonedx --locked
-          cargo cyclonedx --format json --output-file "dist/kolimi-${{ matrix.target }}.sbom.cdx.json"
+          cargo cyclonedx --format json --no-build-deps \
+            --manifest-path crates/kolimi-server/Cargo.toml
+          cp crates/kolimi-server/kolimi-server.cdx.json \
+            "dist/kolimi-${{ matrix.target }}.sbom.cdx.json"
       - name: Sign artifact (cosign keyless)
         uses: sigstore/cosign-installer@v3
       - run: |
