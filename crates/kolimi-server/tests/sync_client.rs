@@ -45,6 +45,7 @@ fn config(server: &str, local: &Path) -> SyncConfig {
         username: "alice".to_string(),
         password: PASS.to_string(),
         local_dir: local.to_path_buf(),
+        e2ee: None,
     }
 }
 

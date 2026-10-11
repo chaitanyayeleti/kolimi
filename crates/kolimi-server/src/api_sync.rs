@@ -123,6 +123,13 @@ pub async fn tree(
         Ok(nodes) => nodes,
         Err(_) => return internal_error(),
     };
+    let encrypted: std::collections::HashSet<i64> = state
+        .db
+        .encrypted_node_ids(user.user_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
     let mut info: HashMap<i64, (Option<i64>, String)> = HashMap::new();
     for node in &nodes {
@@ -145,6 +152,7 @@ pub async fn tree(
             "content_id": node.content_id.as_deref().and_then(bytes_to_hash_hex),
             "etag": etag_for(node),
             "modified_at": node.modified_at,
+            "encrypted": encrypted.contains(&node.id),
         }));
         last_id = node.id;
     }

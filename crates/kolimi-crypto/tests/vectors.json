@@ -1,0 +1,31 @@
+{
+  "chunk": {
+    "ciphertext": "2e115250ce4f3fc4885b8d4eefc73ccbe9891398b434b12dbe00b6cafa069f72d8f24f7ddcc9e078466ef29e9f511aa75ff43ecdc16075a2fc0953b5f0ee210fb13b7999ce85fb69687fa97edf6a251b",
+    "file_key": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+    "plaintext": "6b6f6c696d6920656e642d746f2d656e6420656e6372797074696f6e207465737420766563746f72"
+  },
+  "kek_passphrase": {
+    "kek": "a891dd91a3d123add6ea78ceedcc94a7f1dc1e4ca480e57e6f240a113662ea2f",
+    "m_cost": 8192,
+    "p_cost": 1,
+    "passphrase": "correct horse battery staple",
+    "salt": "000102030405060708090a0b0c0d0e0f",
+    "t_cost": 2
+  },
+  "kek_prf": {
+    "kek": "67d09f7a9a4f46843b7b21b130c3e05d7ff74a088a99be090b17964620adb86e",
+    "prf": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f"
+  },
+  "kek_recovery": {
+    "code": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+    "kek": "4e7cef97b8e826981a8bef779e420f927d709c4643ae7d467730a6843f1e8fc8"
+  },
+  "version": 1,
+  "wrap": {
+    "aad": "kolimi-keyring-v1:recovery",
+    "kek": "505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f",
+    "key": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+    "nonce": "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7",
+    "wrapped": "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7c0a1306247bd3848a12d5015ba516cb96e29467a5b3a91fe9c0f94f2553833734f2250c9b33ac16bf036b16429801d5c"
+  }
+}

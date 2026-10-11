@@ -59,6 +59,9 @@ pub async fn create(
     if access.node.parent_id.is_none() {
         return api::bad_request("the root cannot be shared");
     }
+    if state.db.is_encrypted(access.node.id).await.unwrap_or(false) {
+        return api::bad_request("encrypted files cannot be shared yet (RFC 0007 v1)");
+    }
 
     let (result, generated): (Result<ShareRow, DbError>, Option<String>) = match req.kind.as_str() {
         "user" => {

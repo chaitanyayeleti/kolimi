@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod api_browse;
+pub mod api_e2ee;
 pub mod api_passkey;
 pub mod api_shares;
 pub mod api_sync;
@@ -141,6 +142,14 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/sync/events", get(api_sync::events))
         .route("/api/manifests/{content_id}", get(api_sync::manifest_by_id))
         .route("/api/files/manifest", get(api_sync::file_manifest))
+        .route(
+            "/api/e2ee/keyring",
+            get(api_e2ee::get_keyring).put(api_e2ee::put_keyring),
+        )
+        .route(
+            "/api/files/key",
+            get(api_e2ee::get_file_key).put(api_e2ee::put_file_key),
+        )
         .route("/api/files", axum::routing::put(api_sync::commit_file))
         .route(
             "/api/chunks/{hash}",

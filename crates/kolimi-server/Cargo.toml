@@ -37,9 +37,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 http-body-util.workspace = true
 image.workspace = true
+kolimi-crypto.workspace = true
 kolimi-sync.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "rustls-native-certs"] }
 tempfile.workspace = true
 tower.workspace = true
 url.workspace = true

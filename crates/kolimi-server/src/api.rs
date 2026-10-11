@@ -333,3 +333,11 @@ pub(crate) fn internal_error() -> Response {
     )
         .into_response()
 }
+
+pub(crate) fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response()
+}
+
+pub(crate) fn forbidden(message: &str) -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response()
+}

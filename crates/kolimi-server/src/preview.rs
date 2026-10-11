@@ -148,6 +148,9 @@ pub async fn handler(
     if access.node.is_dir() {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
+    if state.db.is_encrypted(access.node.id).await.unwrap_or(false) {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
     let Some(kind) = classify(&access.node.name) else {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     };

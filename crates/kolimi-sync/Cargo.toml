@@ -19,8 +19,11 @@ name = "kolimi-sync"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
+rpassword.workspace = true
 kolimi-chunk.workspace = true
+kolimi-crypto.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "rustls-native-certs"] }
 serde.workspace = true
 serde_json.workspace = true

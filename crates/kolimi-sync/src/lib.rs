@@ -21,7 +21,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kolimi_chunk::{Manifest, chunker};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use kolimi_chunk::{ChunkRef, Manifest, chunker};
+use kolimi_crypto::{
+    Argon2Params, FileKey, Keyring, MasterKey, generate_recovery_code, recovery_code_parse,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,6 +40,29 @@ pub struct SyncConfig {
     pub password: String,
     /// Local directory to mirror.
     pub local_dir: PathBuf,
+    /// End-to-end encryption settings (RFC 0007); `None` syncs plaintext.
+    pub e2ee: Option<E2eeOptions>,
+}
+
+/// E2EE settings for a sync root.
+#[derive(Debug, Clone)]
+pub struct E2eeOptions {
+    /// Passphrase used to unlock the master key.
+    pub passphrase: Option<String>,
+    /// Recovery code (alternative unlock path).
+    pub recovery_code: Option<String>,
+    /// Relative paths whose files are encrypted end-to-end.
+    pub encrypted_roots: Vec<String>,
+}
+
+impl E2eeOptions {
+    /// Whether `rel` (a relative path) is covered by an encrypted root.
+    pub fn covers(&self, rel: &str) -> bool {
+        self.encrypted_roots.iter().any(|root| {
+            let root = root.trim_matches('/');
+            rel == root || rel.starts_with(&format!("{root}/"))
+        })
+    }
 }
 
 /// What one sync pass did.
@@ -73,11 +100,20 @@ pub enum SyncError {
         /// Request path.
         path: String,
     },
+    /// E2EE failure (missing keyring, wrong secret, mixed plaintext state).
+    #[error("e2ee error: {0}")]
+    E2ee(String),
+    /// Crypto primitive failure.
+    #[error("crypto error: {0}")]
+    Crypto(#[from] kolimi_crypto::CryptoError),
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct State {
     files: BTreeMap<String, StateFile>,
+    /// Wrapped file keys by relative path (base64), cached from the server.
+    #[serde(default)]
+    keys: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,15 +156,96 @@ pub async fn sync_once(config: &SyncConfig) -> Result<SyncReport, SyncError> {
     let http = Http::new(config)?;
     std::fs::create_dir_all(config.local_dir.join(".kolimi"))?;
     let mut state = State::load(&config.local_dir)?;
+    let e2ee = unlock_e2ee(&http, config).await?;
     let mut report = SyncReport::default();
-    pull(&http, config, &mut state, &mut report).await?;
-    push(&http, config, &mut state, &mut report).await?;
+    pull(&http, config, e2ee.as_ref(), &mut state, &mut report).await?;
+    push(&http, config, e2ee.as_ref(), &mut state, &mut report).await?;
     if report.conflicts > 0 {
         // Fetch the winning server versions for the conflicted paths.
-        pull(&http, config, &mut state, &mut report).await?;
+        pull(&http, config, e2ee.as_ref(), &mut state, &mut report).await?;
     }
     state.save(&config.local_dir)?;
     Ok(report)
+}
+
+/// Unlocked E2EE session state.
+struct E2ee {
+    master: MasterKey,
+    options: E2eeOptions,
+}
+
+async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, SyncError> {
+    let Some(options) = &config.e2ee else {
+        return Ok(None);
+    };
+    let (status, body) = http.get_json("/api/e2ee/keyring").await?;
+    match status {
+        200 => {}
+        404 => {
+            return Err(SyncError::E2ee(
+                "no keyring on the server; run `kolimi-sync --e2ee-setup` first".to_string(),
+            ));
+        }
+        status => {
+            return Err(SyncError::Server {
+                status,
+                path: "/api/e2ee/keyring".to_string(),
+            });
+        }
+    }
+    let keyring_json = body["keyring"]
+        .as_str()
+        .ok_or_else(|| SyncError::E2ee("malformed keyring response".to_string()))?;
+    let keyring = Keyring::from_json(keyring_json)?;
+    let master = if let Some(passphrase) = &options.passphrase {
+        keyring
+            .unlock_with_passphrase(passphrase)
+            .map_err(|_| SyncError::E2ee("wrong passphrase".to_string()))?
+    } else if let Some(code) = &options.recovery_code {
+        let code = recovery_code_parse(code)?;
+        keyring
+            .unlock_with_recovery(&code)
+            .map_err(|_| SyncError::E2ee("wrong recovery code".to_string()))?
+    } else {
+        return Err(SyncError::E2ee(
+            "e2ee roots are configured but neither a passphrase nor a recovery code was given"
+                .to_string(),
+        ));
+    };
+    Ok(Some(E2ee {
+        master,
+        options: options.clone(),
+    }))
+}
+
+/// Creates a keyring (setup side); returns it plus the recovery code.
+pub fn create_keyring(passphrase: &str) -> Result<(Keyring, [u8; 32]), SyncError> {
+    create_keyring_with_params(passphrase, &Argon2Params::default())
+}
+
+/// Creates a keyring with explicit Argon2id parameters (tests).
+pub fn create_keyring_with_params(
+    passphrase: &str,
+    params: &Argon2Params,
+) -> Result<(Keyring, [u8; 32]), SyncError> {
+    let master = MasterKey::generate()?;
+    let recovery = generate_recovery_code()?;
+    let keyring = Keyring::create(&master, passphrase, params, &recovery)?;
+    Ok((keyring, recovery))
+}
+
+/// Uploads a keyring to the server (setup side).
+pub async fn upload_keyring(config: &SyncConfig, keyring: &Keyring) -> Result<(), SyncError> {
+    let http = Http::new(config)?;
+    let path = "/api/e2ee/keyring";
+    let status = http.put_bytes(path, keyring.to_json()?.as_bytes()).await?;
+    if status != 204 {
+        return Err(SyncError::Server {
+            status,
+            path: path.to_string(),
+        });
+    }
+    Ok(())
 }
 
 struct Http {
@@ -243,6 +360,8 @@ struct RemoteFile {
     path: String,
     /// BLAKE3 manifest identity.
     content_id: String,
+    /// Whether the server holds this file encrypted (RFC 0007).
+    encrypted: bool,
 }
 
 async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncError> {
@@ -278,6 +397,7 @@ async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncE
                     RemoteFile {
                         path: server_path.to_string(),
                         content_id: content_id.to_string(),
+                        encrypted: entry["encrypted"].as_bool().unwrap_or(false),
                     },
                 );
             }
@@ -292,6 +412,7 @@ async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncE
 async fn pull(
     http: &Http,
     config: &SyncConfig,
+    e2ee: Option<&E2ee>,
     state: &mut State,
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
@@ -331,9 +452,28 @@ async fn pull(
             continue;
         }
         let manifest: Manifest = serde_json::from_value(manifest_value)?;
+        let file_key = if file.encrypted {
+            let Some(e2ee) = e2ee else {
+                return Err(SyncError::E2ee(format!(
+                    "remote file /{rel} is encrypted but no e2ee roots are configured"
+                )));
+            };
+            if !e2ee.options.covers(rel) {
+                return Err(SyncError::E2ee(format!(
+                    "remote file /{rel} is encrypted but not under a configured e2ee root"
+                )));
+            }
+            Some(load_file_key(http, state, e2ee, rel).await?)
+        } else {
+            None
+        };
         let mut data = Vec::with_capacity(manifest.size as usize);
         for chunk in &manifest.chunks {
-            data.extend_from_slice(&chunk_bytes(http, config, &chunk.hash.to_hex()).await?);
+            let bytes = chunk_bytes(http, config, &chunk.hash.to_hex()).await?;
+            match &file_key {
+                Some(key) => data.extend_from_slice(&key.decrypt_chunk(&bytes)?),
+                None => data.extend_from_slice(&bytes),
+            }
         }
         if let Some(parent) = local.parent() {
             std::fs::create_dir_all(parent)?;
@@ -369,9 +509,78 @@ async fn pull(
             std::fs::remove_file(&local)?;
         }
         state.files.remove(&rel);
+        state.keys.remove(&rel);
         report.removed_local += 1;
     }
     Ok(())
+}
+
+async fn load_file_key(
+    http: &Http,
+    state: &mut State,
+    e2ee: &E2ee,
+    rel: &str,
+) -> Result<FileKey, SyncError> {
+    if let Some(cached) = state.keys.get(rel) {
+        let wrapped = STANDARD
+            .decode(cached)
+            .map_err(|error| SyncError::E2ee(format!("cached key: {error}")))?;
+        return Ok(e2ee.master.unwrap_file_key(&wrapped)?);
+    }
+    let path = format!("/api/files/key?path={}", encode(&format!("/{rel}")));
+    let (status, body) = http.get_json(&path).await?;
+    if status != 200 {
+        return Err(SyncError::Server { status, path });
+    }
+    let encoded = body["wrapped_key"]
+        .as_str()
+        .ok_or_else(|| SyncError::E2ee("malformed file key response".to_string()))?;
+    let wrapped = STANDARD
+        .decode(encoded)
+        .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
+    let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
+    state.keys.insert(rel.to_string(), encoded.to_string());
+    Ok(file_key)
+}
+
+/// Loads an existing file key or generates one for a new encrypted file.
+///
+/// Returns the key plus, for new files, the wrapped blob to upload after
+/// the manifest commit has created the node (the server stores keys per
+/// node, so the node must exist first).
+async fn fetch_or_create_file_key(
+    http: &Http,
+    state: &mut State,
+    e2ee: &E2ee,
+    rel: &str,
+) -> Result<(FileKey, Option<Vec<u8>>), SyncError> {
+    if let Some(cached) = state.keys.get(rel) {
+        let wrapped = STANDARD
+            .decode(cached)
+            .map_err(|error| SyncError::E2ee(format!("cached key: {error}")))?;
+        return Ok((e2ee.master.unwrap_file_key(&wrapped)?, None));
+    }
+    let path = format!("/api/files/key?path={}", encode(&format!("/{rel}")));
+    let (status, body) = http.get_json(&path).await?;
+    match status {
+        200 => {
+            let encoded = body["wrapped_key"]
+                .as_str()
+                .ok_or_else(|| SyncError::E2ee("malformed file key response".to_string()))?;
+            let wrapped = STANDARD
+                .decode(encoded)
+                .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
+            let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
+            state.keys.insert(rel.to_string(), encoded.to_string());
+            Ok((file_key, None))
+        }
+        404 => {
+            let file_key = FileKey::generate()?;
+            let wrapped = e2ee.master.wrap_file_key(&file_key)?;
+            Ok((file_key, Some(wrapped)))
+        }
+        status => Err(SyncError::Server { status, path }),
+    }
 }
 
 async fn chunk_bytes(http: &Http, config: &SyncConfig, hash: &str) -> Result<Vec<u8>, SyncError> {
@@ -399,6 +608,7 @@ async fn chunk_bytes(http: &Http, config: &SyncConfig, hash: &str) -> Result<Vec
 async fn push(
     http: &Http,
     config: &SyncConfig,
+    e2ee: Option<&E2ee>,
     state: &mut State,
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
@@ -433,15 +643,46 @@ async fn push(
             continue;
         }
         let data = std::fs::read(&local_path)?;
-        let manifest = Manifest::for_data(&data);
-        let content_id = manifest.content_id().to_hex();
-        for chunk in chunker::split(&data) {
-            let path = format!("/api/chunks/{}", chunk.hash.to_hex());
-            let status = http.put_bytes(&path, chunk.data).await?;
-            if status != 201 && status != 204 {
-                return Err(SyncError::Server { status, path });
+        let mut pending_key: Option<Vec<u8>> = None;
+        let manifest = if let Some(e2ee) = e2ee.filter(|e2ee| e2ee.options.covers(&rel)) {
+            // Encrypt-then-chunk (RFC 0007): chunk boundaries follow the
+            // plaintext so edits stay delta-friendly; the manifest hashes
+            // ciphertext chunks.
+            let (file_key, pending) = fetch_or_create_file_key(http, state, e2ee, &rel).await?;
+            pending_key = pending;
+            let mut chunks = Vec::new();
+            let mut total = 0u64;
+            for chunk in chunker::split(&data) {
+                let ciphertext = file_key.encrypt_chunk(chunk.data)?;
+                let hash = kolimi_chunk::Hash::of(&ciphertext);
+                let path = format!("/api/chunks/{}", hash.to_hex());
+                let status = http.put_bytes(&path, &ciphertext).await?;
+                if status != 201 && status != 204 {
+                    return Err(SyncError::Server { status, path });
+                }
+                total += ciphertext.len() as u64;
+                chunks.push(ChunkRef {
+                    hash,
+                    len: ciphertext.len() as u32,
+                });
             }
-        }
+            Manifest {
+                version: Manifest::VERSION,
+                size: total,
+                chunks,
+            }
+        } else {
+            let manifest = Manifest::for_data(&data);
+            for chunk in chunker::split(&data) {
+                let path = format!("/api/chunks/{}", chunk.hash.to_hex());
+                let status = http.put_bytes(&path, chunk.data).await?;
+                if status != 201 && status != 204 {
+                    return Err(SyncError::Server { status, path });
+                }
+            }
+            manifest
+        };
+        let content_id = manifest.content_id().to_hex();
         let remote_path = format!("/{rel}");
         let mut path = format!("/api/files?path={}", encode(&remote_path));
         if let Some(known) = state.files.get(&rel) {
@@ -452,6 +693,19 @@ async fn push(
             .await?;
         match status {
             200 => {
+                if let Some(wrapped) = pending_key {
+                    // The node now exists: store the wrapped file key so
+                    // the server can flag the file as encrypted.
+                    let key_path = format!("/api/files/key?path={}", encode(&remote_path));
+                    let status = http.put_bytes(&key_path, &wrapped).await?;
+                    if status != 204 {
+                        return Err(SyncError::Server {
+                            status,
+                            path: key_path,
+                        });
+                    }
+                    state.keys.insert(rel.clone(), STANDARD.encode(&wrapped));
+                }
                 state.files.insert(
                     rel,
                     StateFile {
@@ -468,6 +722,7 @@ async fn push(
                 let conflict = conflict_path(&local_path);
                 std::fs::rename(&local_path, &conflict)?;
                 state.files.remove(&rel);
+                state.keys.remove(&rel);
                 report.conflicts += 1;
             }
             status => return Err(SyncError::Server { status, path }),
@@ -489,6 +744,7 @@ async fn push(
             return Err(SyncError::Server { status, path });
         }
         state.files.remove(&rel);
+        state.keys.remove(&rel);
         report.removed_remote += 1;
     }
     Ok(())

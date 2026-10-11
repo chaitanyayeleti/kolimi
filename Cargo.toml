@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/kolimi-auth",
     "crates/kolimi-chunk",
+    "crates/kolimi-crypto",
     "crates/kolimi-db",
     "crates/kolimi-preview",
     "crates/kolimi-search",
@@ -24,6 +25,9 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 argon2 = "0.6"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.23"
@@ -39,6 +43,7 @@ httpdate = "1"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
 kolimi-auth = { version = "0.0.1", path = "crates/kolimi-auth" }
 kolimi-chunk = { version = "0.0.1", path = "crates/kolimi-chunk" }
+kolimi-crypto = { version = "0.0.1", path = "crates/kolimi-crypto" }
 kolimi-db = { version = "0.0.1", path = "crates/kolimi-db" }
 kolimi-preview = { version = "0.0.1", path = "crates/kolimi-preview" }
 kolimi-search = { version = "0.0.1", path = "crates/kolimi-search" }

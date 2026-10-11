@@ -129,6 +129,31 @@ tree. iCalendar payloads are validated (one UID per resource) and vCards
 structurally (3.0 and 4.0 accepted); both are stored byte-for-byte so
 VALARMs and X-properties survive exactly. See RFC 0004 for deviations.
 
+## End-to-end encryption (alpha)
+
+Files under a configured `--e2ee-root` are encrypted on the client
+before they are chunked and uploaded; the server stores ciphertext,
+wrapped per-file keys, and a keyring it cannot decrypt. Chunks use
+deterministic AEAD so delta sync and CAS dedup keep working within a
+file's history, and the manifest hashes ciphertext chunks (structure
+leaks, content does not — RFC 0007 documents this honestly).
+
+```sh
+# one-time setup (prints a recovery code once)
+kolimi-sync --server https://cloud.example.com --user alice \
+    --local ~/Kolimi --e2ee-setup
+
+# sync with the "Private/" subtree encrypted
+KOLIMI_E2EE_PASSPHRASE=... kolimi-sync --server ... --user alice \
+    --local ~/Kolimi --e2ee-root Private
+```
+
+Unlock works with the passphrase, the recovery code, or (designed,
+RFC 0007) a passkey PRF. The server never indexes or previews encrypted
+content, and sharing encrypted files is disabled in v1. Test vectors
+are committed (`crates/kolimi-crypto/tests/vectors.json`) for other
+implementations; `crates/kolimi-crypto` holds the primitives.
+
 ## Desktop sync (alpha)
 
 `kolimi-sync` mirrors a local directory against the server over the
@@ -201,6 +226,31 @@ kolimi-server user passkey-only alice  # requires >= 1 registered passkey
 Password login for such accounts is rejected (and audited); sign-in
 goes through the WebAuthn endpoints.
 
+## End-to-end encryption (alpha)
+
+Files under a configured `--e2ee-root` are encrypted on the client
+before they are chunked and uploaded; the server stores ciphertext,
+wrapped per-file keys, and a keyring it cannot decrypt. Chunks use
+deterministic AEAD so delta sync and CAS dedup keep working within a
+file's history, and the manifest hashes ciphertext chunks (structure
+leaks, content does not — RFC 0007 documents this honestly).
+
+```sh
+# one-time setup (prints a recovery code once)
+kolimi-sync --server https://cloud.example.com --user alice \
+    --local ~/Kolimi --e2ee-setup
+
+# sync with the "Private/" subtree encrypted
+KOLIMI_E2EE_PASSPHRASE=... kolimi-sync --server ... --user alice \
+    --local ~/Kolimi --e2ee-root Private
+```
+
+Unlock works with the passphrase, the recovery code, or (designed,
+RFC 0007) a passkey PRF. The server never indexes or previews encrypted
+content, and sharing encrypted files is disabled in v1. Test vectors
+are committed (`crates/kolimi-crypto/tests/vectors.json`) for other
+implementations; `crates/kolimi-crypto` holds the primitives.
+
 ## Desktop sync (alpha)
 the change feed (per-user isolation, snippet excerpts, UI search box) and
 sandboxed previews: decoding happens in a re-executed worker under
@@ -208,8 +258,11 @@ landlock + seccomp + rlimits with wall-clock kills, so a hostile image
 can never take the server down (tested, plus a cargo-fuzz decode target).
 Desktop sync core alpha landed (bidirectional delta sync CLI with
 conflict handling, tested end-to-end against a live server). M6
-started: append-only hash-chained audit log (auth, file, share, link,
-passkey, and CLI events; `audit list|verify`), passkey-only accounts,
-and the E2EE design (RFC 0007; implementation next). 231 tests; litmus
-100%; rclone byte-identical. Remaining M5: Tauri shell + mobile
-background upload (uniffi).
+progress: append-only hash-chained audit log, passkey-only accounts,
+and the E2EE core (RFC 0007): `kolimi-crypto` (master/file keys, chunk
+AEAD, keyring), server key storage + encrypted-file guards, and
+encrypted sync with passphrase/recovery unlock, committed interop test
+vectors, and an independent decoder test. 251 tests; litmus 100%;
+rclone byte-identical. Remaining M6: passkey-PRF unlock, UI WebAuthn,
+sharing/PRF follow-ups. Remaining M5: Tauri shell + mobile background
+upload (uniffi).
