@@ -890,12 +890,7 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
 
     let patch = move |username: String, body: Value, ok: &'static str| {
         spawn_local(async move {
-            match api::send_json(
-                "PATCH",
-                &format!("/api/users/{}", encode(&username)),
-                &body,
-            )
-            .await
+            match api::send_json("PATCH", &format!("/api/users/{}", encode(&username)), &body).await
             {
                 Ok(r) if r.status == 200 => {
                     notice.set(ok.to_string());
