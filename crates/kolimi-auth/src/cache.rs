@@ -86,11 +86,18 @@ mod tests {
 
     #[test]
     fn stores_and_expires() {
-        let cache = CredentialCache::new(Duration::from_millis(20), 16);
+        // Freshness is checked with a long TTL so an unlucky scheduling
+        // delay on a busy CI runner cannot expire the entry before read.
+        let cache = CredentialCache::new(Duration::from_secs(60), 16);
         cache.insert("k".to_string(), 42);
         assert_eq!(cache.get("k"), Some(42));
-        sleep(Duration::from_millis(30));
-        assert_eq!(cache.get("k"), None);
+
+        // Expiry is checked separately with a short TTL and a sleep well
+        // beyond it.
+        let expiring = CredentialCache::new(Duration::from_millis(20), 16);
+        expiring.insert("k".to_string(), 42);
+        sleep(Duration::from_millis(200));
+        assert_eq!(expiring.get("k"), None);
     }
 
     #[test]
