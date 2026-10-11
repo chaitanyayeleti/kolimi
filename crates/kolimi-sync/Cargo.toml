@@ -1,0 +1,31 @@
+[package]
+name = "kolimi-sync"
+description = "Kolimi desktop sync core: bidirectional delta sync with the server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "kolimi_sync"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kolimi-sync"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+kolimi-chunk.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "rustls-native-certs"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -122,3 +122,26 @@ resume by simply retrying; partial STATE is never inconsistent.
 3. Should clients be able to pin/prioritize sync roots?
 4. Durable client-side queue format is per-client (desktop, mobile), but
    shared consistency tests belong in this repo — test vectors?
+
+## Client implementation (M5 alpha: `kolimi-sync`)
+
+The first client implementation lives in `crates/kolimi-sync` (lib + CLI).
+It follows this RFC directly:
+
+- **Pull** walks `/api/sync/tree`, fetches manifests, and downloads only
+  chunks missing from `<local>/.kolimi/chunks/` (the delta base), writing
+  files atomically.
+- **Push** chunks changed local files with the same FastCDC + BLAKE3
+  parameters as the server, uploads missing chunks, and commits with
+  `if_content_id` from its state file.
+- **Deletions** propagate both ways: files that vanish locally become
+  tombstones and are deleted remotely on the next push; files deleted
+  remotely are removed locally on the next pull.
+- **Conflicts** are resolved by keeping the server version and preserving
+  the local edit as `name.conflict-<timestamp>` (the local file is then
+  re-pulled to match the server).
+
+State is a JSON file (`state.json`: path → content_id, size, mtime_ns,
+tombstone). The Tauri shell and the mobile (uniffi) client are thin
+wrappers over this core; the one-shot `sync_once` is intended to be
+called from a timer or file watcher.

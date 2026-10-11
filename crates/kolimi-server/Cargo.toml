@@ -39,6 +39,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 image.workspace = true
+kolimi-sync.workspace = true
 tempfile.workspace = true
 tower.workspace = true
 url.workspace = true

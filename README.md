@@ -24,6 +24,7 @@ See [ROADMAP.md](ROADMAP.md) for the full plan.
 | `crates/kolimi-webdav` | WebDAV surface: OPTIONS, GET/HEAD, PUT, DELETE, MKCOL, PROPFIND, COPY, MOVE + CalDAV/CardDAV and REPORT |
 | `crates/kolimi-search` | tantivy full-text index fed from the change feed, per-user isolation |
 | `crates/kolimi-preview` | Preview decoding in a landlock+seccomp+rlimits worker process |
+| `crates/kolimi-sync` | Desktop sync core + `kolimi-sync` CLI: bidirectional delta sync |
 | `crates/kolimi-ui` | Leptos (WASM) web UI, embedded into the server binary |
 | `crates/kolimi-server` | The single binary: session API, auth middleware, CLI, TLS |
 | `docs/rfc/` | Design docs: RFC 0001 (storage), RFC 0002 (sync), RFC 0003 (sharing), RFC 0004 (CalDAV/CardDAV), RFC 0005 (search/previews) |
@@ -128,6 +129,24 @@ tree. iCalendar payloads are validated (one UID per resource) and vCards
 structurally (3.0 and 4.0 accepted); both are stored byte-for-byte so
 VALARMs and X-properties survive exactly. See RFC 0004 for deviations.
 
+## Desktop sync (alpha)
+
+`kolimi-sync` mirrors a local directory against the server over the
+native delta protocol: pull downloads only chunks missing from the local
+cache, push chunks client-side (FastCDC + BLAKE3, identical to the
+server) and commits manifests with conflict detection. Conflicts keep the
+server version and preserve local edits as `name.conflict-<timestamp>`;
+deletions propagate both ways; state and chunk cache live in
+`<local>/.kolimi/`.
+
+```sh
+kolimi-sync --server https://cloud.example.com --user alice \
+    --local ~/Kolimi            # password via KOLIMI_PASSWORD
+```
+
+Run it from a timer or file watcher; the Tauri/mobile shells will wrap
+this core (uniffi bindings are the planned mobile path).
+
 ## Web UI
 
 The Leptos (WASM) app is served from the binary at `/app/` (public share
@@ -160,5 +179,7 @@ the change feed (per-user isolation, snippet excerpts, UI search box) and
 sandboxed previews: decoding happens in a re-executed worker under
 landlock + seccomp + rlimits with wall-clock kills, so a hostile image
 can never take the server down (tested, plus a cargo-fuzz decode target).
-226 tests; litmus 100%; rclone byte-identical. In progress: desktop sync
-client alpha, mobile background upload (M5 clients).
+Desktop sync core alpha landed (bidirectional delta sync CLI with
+conflict handling, tested end-to-end against a live server). 228 tests;
+litmus 100%; rclone byte-identical. Remaining M5: Tauri shell + mobile
+background upload (uniffi).

@@ -8,6 +8,7 @@ members = [
     "crates/kolimi-search",
     "crates/kolimi-server",
     "crates/kolimi-store",
+    "crates/kolimi-sync",
     "crates/kolimi-ui",
     "crates/kolimi-vfs",
     "crates/kolimi-webdav",
@@ -42,6 +43,7 @@ kolimi-db = { version = "0.0.1", path = "crates/kolimi-db" }
 kolimi-preview = { version = "0.0.1", path = "crates/kolimi-preview" }
 kolimi-search = { version = "0.0.1", path = "crates/kolimi-search" }
 kolimi-store = { version = "0.0.1", path = "crates/kolimi-store" }
+kolimi-sync = { version = "0.0.1", path = "crates/kolimi-sync" }
 kolimi-vfs = { version = "0.0.1", path = "crates/kolimi-vfs" }
 kolimi-webdav = { version = "0.0.1", path = "crates/kolimi-webdav" }
 mime_guess = "2"
