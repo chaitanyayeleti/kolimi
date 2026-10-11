@@ -1,7 +1,9 @@
 #![allow(clippy::result_large_err)]
 
+use std::net::SocketAddr;
+
 use axum::{
-    extract::Request,
+    extract::{ConnectInfo, Request},
     http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -9,7 +11,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use kolimi_auth::{CurrentUser, cache::credential_cache_key, password, token};
 
-use crate::{AppState, CSRF_COOKIE, SESSION_COOKIE};
+use crate::{AppState, CSRF_COOKIE, SESSION_COOKIE, hardening};
 
 /// Authentication middleware: resolves the caller from Basic credentials,
 /// a bearer token, or a session cookie, and attaches the [`CurrentUser`].
@@ -25,8 +27,15 @@ pub async fn require_auth(
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let headers = req.headers().clone();
+    let ip = hardening::client_ip(
+        &headers,
+        req.extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0),
+        state.trust_proxy,
+    );
 
-    let (user, via_cookie) = authenticate(&state, &headers).await?;
+    let (user, via_cookie) = authenticate(&state, &headers, &ip).await?;
 
     if via_cookie
         && path.starts_with("/api/")
@@ -82,10 +91,11 @@ fn extract_credentials(headers: &HeaderMap) -> Option<Credentials> {
 async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
+    ip: &str,
 ) -> Result<(CurrentUser, bool), Response> {
     match extract_credentials(headers) {
         Some(Credentials::Basic { username, password }) => {
-            authenticate_basic(state, &username, &password)
+            authenticate_basic(state, &username, &password, ip)
                 .await
                 .map(|user| (user, false))
         }
@@ -103,8 +113,12 @@ async fn authenticate_basic(
     state: &AppState,
     username: &str,
     password: &str,
+    ip: &str,
 ) -> Result<CurrentUser, Response> {
-    if state.lockout.check(username).is_some() {
+    // Keying the lockout on (account, source) means a flood from one
+    // client cannot lock the account out for everyone else.
+    let lockout_key = format!("basic:{username}:{ip}");
+    if state.lockout.check(&lockout_key).is_some() {
         return Err(StatusCode::TOO_MANY_REQUESTS.into_response());
     }
 
@@ -122,17 +136,17 @@ async fn authenticate_basic(
                 .await
                 .unwrap_or(false);
                 if verified {
-                    state.lockout.record_success(username);
+                    state.lockout.record_success(&lockout_key);
                     state.cred_cache.insert(key, user.id);
                     Some(user)
                 } else {
-                    state.lockout.record_failure(username);
+                    state.lockout.record_failure(&lockout_key);
                     None
                 }
             }
             _ => {
                 burn_password_time(state, password).await;
-                state.lockout.record_failure(username);
+                state.lockout.record_failure(&lockout_key);
                 None
             }
         }

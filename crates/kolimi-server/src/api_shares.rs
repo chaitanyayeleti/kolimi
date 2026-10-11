@@ -627,6 +627,7 @@ pub struct UnlockRequest {
 
 pub async fn public_unlock(
     State(state): State<AppState>,
+    crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
     Path(token): Path<String>,
     Json(req): Json<UnlockRequest>,
 ) -> Response {
@@ -637,7 +638,9 @@ pub async fn public_unlock(
     let Some(password_hash) = share.password_hash.clone() else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    let lockout_key = format!("link:{}", share.id);
+    // Key the lockout on (link, source) so a flood cannot lock the link
+    // out for everyone who legitimately holds it.
+    let lockout_key = format!("link:{}:{}", share.id, ip);
     if state.lockout.check(&lockout_key).is_some() {
         return (
             StatusCode::TOO_MANY_REQUESTS,

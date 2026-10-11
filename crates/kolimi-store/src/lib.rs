@@ -13,10 +13,11 @@
 //! ```
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Display,
     io,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -40,6 +41,12 @@ pub enum StoreError {
     #[error("upload exceeds the {limit} byte limit")]
     TooLarge {
         /// Configured maximum size in bytes.
+        limit: u64,
+    },
+    /// The owner is over their storage quota.
+    #[error("storage quota exceeded (limit {limit} bytes)")]
+    QuotaExceeded {
+        /// Configured per-user limit in bytes.
         limit: u64,
     },
     /// The upload stream failed.
@@ -103,20 +110,86 @@ pub struct VerifyStats {
 #[derive(Debug, Clone)]
 pub struct BlobStore {
     root: PathBuf,
+    /// Per-user byte limit (`0` = unlimited).
+    quota_bytes: u64,
+    /// Cached per-user usage in bytes; shared across clones.
+    usage: Arc<Mutex<HashMap<i64, u64>>>,
 }
 
 impl BlobStore {
-    /// Opens (creating if needed) a blob store at `root`.
+    /// Opens (creating if needed) a blob store at `root` with no quota.
     ///
     /// Stale in-flight upload temp files (older than a day) are removed:
     /// a crash mid-upload may leave those behind, but never a partially
     /// visible blob.
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        Self::open_with_quota(root, 0).await
+    }
+
+    /// Opens a blob store with a per-user byte quota (`0` = unlimited).
+    pub async fn open_with_quota(
+        root: impl Into<PathBuf>,
+        quota_bytes: u64,
+    ) -> Result<Self, StoreError> {
         let root = root.into();
         let tmp = root.join("tmp");
         tokio::fs::create_dir_all(&tmp).await?;
         cleanup_stale_temp(&tmp, Duration::from_secs(24 * 60 * 60)).await?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            quota_bytes,
+            usage: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Returns the user's stored bytes, walking the blob tree on a cache
+    /// miss. Chunks dominate, so this is an upper bound on live data.
+    pub async fn usage_bytes(&self, user_id: i64) -> Result<u64, StoreError> {
+        if let Ok(map) = self.usage.lock()
+            && let Some(bytes) = map.get(&user_id)
+        {
+            return Ok(*bytes);
+        }
+        let mut total = 0u64;
+        for dir in [self.chunks_dir(user_id), self.manifests_dir(user_id)] {
+            total = total.saturating_add(dir_size(&dir).await?);
+        }
+        if let Ok(mut map) = self.usage.lock() {
+            map.insert(user_id, total);
+        }
+        Ok(total)
+    }
+
+    /// Adds `delta` bytes to the cached usage (a no-op on a cache miss,
+    /// which will be recomputed on the next [`Self::usage_bytes`]).
+    fn record_usage(&self, user_id: i64, delta: u64) {
+        if let Ok(mut map) = self.usage.lock()
+            && let Some(bytes) = map.get_mut(&user_id)
+        {
+            *bytes = bytes.saturating_add(delta);
+        }
+    }
+
+    /// Drops the cached usage so it is recomputed from disk next time.
+    fn clear_usage(&self, user_id: i64) {
+        if let Ok(mut map) = self.usage.lock() {
+            map.remove(&user_id);
+        }
+    }
+
+    /// Returns `Err(QuotaExceeded)` when adding `additional` bytes would
+    /// exceed the per-user quota.
+    async fn ensure_quota(&self, user_id: i64, additional: u64) -> Result<(), StoreError> {
+        if self.quota_bytes == 0 {
+            return Ok(());
+        }
+        let used = self.usage_bytes(user_id).await?;
+        if used.saturating_add(additional) > self.quota_bytes {
+            return Err(StoreError::QuotaExceeded {
+                limit: self.quota_bytes,
+            });
+        }
+        Ok(())
     }
 
     /// Removes every blob owned by a user.
@@ -125,6 +198,7 @@ impl BlobStore {
     /// `users/<id>/`), so nothing else can reference these files. Used
     /// when an account is deleted; a missing directory is not an error.
     pub async fn remove_user(&self, user_id: i64) -> Result<(), StoreError> {
+        self.clear_usage(user_id);
         let dir = self.root.join("users").join(user_id.to_string());
         match tokio::fs::remove_dir_all(&dir).await {
             Ok(()) => Ok(()),
@@ -247,12 +321,15 @@ impl BlobStore {
         if tokio::fs::try_exists(&path).await? {
             return Ok(());
         }
+        self.ensure_quota(user_id, data.len() as u64).await?;
         let tmp = self.tmp_path()?;
         let mut file = tokio::fs::File::create(&tmp).await?;
         file.write_all(data).await?;
         file.sync_all().await?;
         drop(file);
-        commit(&tmp, &path).await
+        commit(&tmp, &path).await?;
+        self.record_usage(user_id, data.len() as u64);
+        Ok(())
     }
 
     /// Reads and verifies a chunk.
@@ -391,6 +468,11 @@ impl BlobStore {
         file.sync_all().await?;
         drop(file);
 
+        if let Err(error) = self.ensure_quota(user_id, size).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(error);
+        }
+
         let chunks_dir = self.chunks_dir(user_id);
         let ingest_path = tmp.clone();
         let manifest = tokio::task::spawn_blocking(move || chunk_file(&chunks_dir, &ingest_path))
@@ -399,6 +481,7 @@ impl BlobStore {
         let _ = tokio::fs::remove_file(&tmp).await;
 
         self.put_manifest(user_id, &manifest).await?;
+        self.record_usage(user_id, size);
         Ok((manifest, size))
     }
 
@@ -498,6 +581,8 @@ impl BlobStore {
             }
         }
 
+        // Usage changed on disk; recompute it next time.
+        self.clear_usage(user_id);
         Ok(stats)
     }
 
@@ -549,6 +634,18 @@ async fn commit(tmp: &Path, path: &Path) -> Result<(), StoreError> {
             Err(StoreError::Io(e))
         }
     }
+}
+
+/// Sums the sizes of all files under `dir` (recursively); a missing
+/// directory counts as zero.
+async fn dir_size(dir: &Path) -> Result<u64, StoreError> {
+    let mut total = 0u64;
+    for path in collect_files(dir).await? {
+        if let Ok(meta) = tokio::fs::metadata(&path).await {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    Ok(total)
 }
 
 async fn collect_files(root: &Path) -> Result<Vec<PathBuf>, StoreError> {
@@ -744,6 +841,31 @@ mod tests {
         // Idempotent, and a never-existing user is fine too.
         store.remove_user(1).await.unwrap();
         store.remove_user(99).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn quota_blocks_uploads_past_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::open_with_quota(dir.path(), 2000).await.unwrap();
+
+        // Fits under the quota.
+        store.ingest_bytes(1, &vec![7u8; 1500]).await.unwrap();
+        assert!(store.usage_bytes(1).await.unwrap() >= 1500);
+
+        // A second upload would exceed it.
+        assert!(matches!(
+            store.ingest_bytes(1, &vec![9u8; 1500]).await,
+            Err(StoreError::QuotaExceeded { limit: 2000 })
+        ));
+
+        // A different user has their own quota.
+        store.ingest_bytes(2, &vec![9u8; 1500]).await.unwrap();
+
+        // A store with no quota accepts anything.
+        let unlimited = BlobStore::open_with_quota(dir.path().join("u"), 0)
+            .await
+            .unwrap();
+        unlimited.ingest_bytes(1, &vec![9u8; 5000]).await.unwrap();
     }
 
     #[tokio::test]

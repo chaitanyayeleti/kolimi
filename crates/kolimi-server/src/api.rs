@@ -35,11 +35,18 @@ pub struct LoginRequest {
 }
 
 /// `POST /api/session` — exchanges credentials for a session cookie.
-pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Response {
+pub async fn login(
+    State(state): State<AppState>,
+    crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
+    Json(req): Json<LoginRequest>,
+) -> Response {
     if req.username.is_empty() || req.password.is_empty() {
         return bad_request("username and password are required");
     }
-    if state.lockout.check(&req.username).is_some() {
+    // Key the lockout on (account, source) so one client cannot lock an
+    // account out for everyone.
+    let lockout_key = format!("login:{}:{}", req.username, ip);
+    if state.lockout.check(&lockout_key).is_some() {
         audit(
             &state,
             None,
@@ -58,7 +65,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
 
     let Some(user) = state.db.find_user(&req.username).await.ok().flatten() else {
         crate::auth::burn_password_time(&state, &req.password).await;
-        state.lockout.record_failure(&req.username);
+        state.lockout.record_failure(&lockout_key);
         state.metrics.login_failure();
         audit(
             &state,
@@ -73,7 +80,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     };
     if user.disabled {
         crate::auth::burn_password_time(&state, &req.password).await;
-        state.lockout.record_failure(&req.username);
+        state.lockout.record_failure(&lockout_key);
         state.metrics.login_failure();
         audit(
             &state,
@@ -88,7 +95,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     }
     if user.password_hash.is_empty() {
         crate::auth::burn_password_time(&state, &req.password).await;
-        state.lockout.record_failure(&req.username);
+        state.lockout.record_failure(&lockout_key);
         state.metrics.login_failure();
         audit(
             &state,
@@ -110,7 +117,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     .await
     .unwrap_or(false);
     if !verified {
-        state.lockout.record_failure(&req.username);
+        state.lockout.record_failure(&lockout_key);
         state.metrics.login_failure();
         audit(
             &state,
@@ -154,7 +161,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
                 .await
                 .unwrap_or(false)
             {
-                state.lockout.record_failure(&req.username);
+                state.lockout.record_failure(&lockout_key);
                 state.metrics.login_failure();
                 audit(
                     &state,
@@ -176,7 +183,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
         {
             "recovery_code"
         } else {
-            state.lockout.record_failure(&req.username);
+            state.lockout.record_failure(&lockout_key);
             state.metrics.login_failure();
             audit(
                 &state,
@@ -189,7 +196,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
             .await;
             return unauthorized("invalid credentials");
         };
-        state.lockout.record_success(&req.username);
+        state.lockout.record_success(&lockout_key);
         audit(
             &state,
             Some(user.id),
@@ -202,7 +209,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
         return start_session(&state, &user).await;
     }
 
-    state.lockout.record_success(&req.username);
+    state.lockout.record_success(&lockout_key);
     audit(
         &state,
         Some(user.id),

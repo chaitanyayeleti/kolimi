@@ -61,6 +61,10 @@ fn vfs_error_response(e: VfsError) -> Response {
         | VfsError::ParentNotCollection => StatusCode::BAD_REQUEST,
         VfsError::AlreadyExists | VfsError::Conflict(_) => StatusCode::CONFLICT,
         VfsError::MissingChunk(_) => StatusCode::CONFLICT,
+        VfsError::Store(kolimi_store::StoreError::TooLarge { .. })
+        | VfsError::Store(kolimi_store::StoreError::QuotaExceeded { .. }) => {
+            StatusCode::PAYLOAD_TOO_LARGE
+        }
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, Json(json!({ "error": e.to_string() }))).into_response()
@@ -587,6 +591,15 @@ pub async fn events(
     Extension(user): Extension<CurrentUser>,
     Query(query): Query<PageQuery>,
 ) -> Response {
+    // Bound the number of live streams and their lifetime so a client
+    // cannot exhaust tasks/DB polling with many open connections.
+    let Ok(permit) = state.sse_permits.clone().try_acquire_owned() else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "too many event streams\n",
+        )
+            .into_response();
+    };
     let start_seq = query.since.unwrap_or(0).max(0);
     let current = state
         .db
@@ -596,18 +609,25 @@ pub async fn events(
     let initial = Event::default()
         .event("change")
         .data(json!({ "seq": current }).to_string());
+    let deadline = tokio::time::Instant::now() + crate::SSE_MAX_LIFETIME;
 
     let updates = futures_util::stream::unfold(
-        (state, user.user_id, current),
-        |(state, user_id, last)| async move {
+        (state, user.user_id, current, deadline, permit),
+        |(state, user_id, last, deadline, permit)| async move {
             loop {
+                if tokio::time::Instant::now() >= deadline {
+                    return None;
+                }
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 match state.db.latest_change_seq(user_id).await {
                     Ok(seq) if seq > last => {
                         let event = Event::default()
                             .event("change")
                             .data(json!({ "seq": seq }).to_string());
-                        return Some((Ok::<Event, Infallible>(event), (state, user_id, seq)));
+                        return Some((
+                            Ok::<Event, Infallible>(event),
+                            (state, user_id, seq, deadline, permit),
+                        ));
                     }
                     _ => continue,
                 }

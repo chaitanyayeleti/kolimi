@@ -152,6 +152,13 @@ scrape_configs:
   `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`;
   `Strict-Transport-Security` is added when secure cookies are enabled.
   The web UI additionally sends a strict `Content-Security-Policy`.
+- **Per-user storage quota.** Set `KOLIMI_USER_QUOTA_BYTES` to bound how
+  many bytes each account may store; an upload that would exceed it is
+  refused with `413`. The default `0` is unlimited. Re-uploaded
+  (deduplicated) content counts conservatively toward the limit.
+- **Event streams.** At most 64 concurrent `/api/sync/events` SSE
+  connections are served (further ones get `503`), and each is closed
+  after 30 minutes.
 
 ## E2EE operations
 

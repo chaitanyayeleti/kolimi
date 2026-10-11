@@ -83,6 +83,19 @@ async fn unknown_user_and_bad_password_share_the_same_error() {
 }
 
 #[tokio::test]
+async fn repeated_failures_lock_the_account_for_that_source() {
+    let (_dir, app) = setup(false).await;
+    let mut codes = Vec::new();
+    for _ in 0..6 {
+        codes.push(app.clone().oneshot(login("alice")).await.unwrap().status());
+    }
+    // Wrong password, then locked (the lockout is keyed on account+source,
+    // which is the shared "unknown" bucket here).
+    assert_eq!(codes[0], StatusCode::UNAUTHORIZED);
+    assert_eq!(codes[5], StatusCode::TOO_MANY_REQUESTS, "{codes:?}");
+}
+
+#[tokio::test]
 async fn security_headers_are_present() {
     let (_dir, app) = setup(true).await;
     let response = app

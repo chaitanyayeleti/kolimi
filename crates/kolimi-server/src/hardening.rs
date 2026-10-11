@@ -9,8 +9,8 @@ use std::{
 };
 
 use axum::{
-    extract::{ConnectInfo, Request, State},
-    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
+    extract::{ConnectInfo, FromRequestParts, Request, State},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -98,6 +98,26 @@ pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>, trust_proxy: boo
     }
     peer.map(|addr| addr.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Extracts the caller's address for lockout/rate-limit keying. Always
+/// succeeds: the address is the peer, or `X-Forwarded-For` when a proxy
+/// is trusted, falling back to `"unknown"`.
+pub struct ClientIp(pub String);
+
+impl FromRequestParts<AppState> for ClientIp {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0);
+        Ok(ClientIp(client_ip(&parts.headers, peer, state.trust_proxy)))
+    }
 }
 
 /// Middleware: rate-limits login, passkey, public-unlock, and preview

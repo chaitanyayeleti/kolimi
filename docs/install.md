@@ -207,6 +207,7 @@ KOLIMI_DATA=./kolimi-data kolimi-server serve \
 | `--tls-key` | `KOLIMI_TLS_KEY` | — |
 | `--secure-cookies` | `KOLIMI_SECURE_COOKIES` | off |
 | trust proxy IPs | `KOLIMI_TRUST_PROXY` | off |
+| per-user storage quota (bytes) | `KOLIMI_USER_QUOTA_BYTES` | `0` (unlimited) |
 | log level | `RUST_LOG` | `info` |
 
 Set `KOLIMI_TRUST_PROXY=1` when running behind a reverse proxy (the

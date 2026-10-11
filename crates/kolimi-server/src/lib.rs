@@ -44,6 +44,10 @@ pub const MAX_FAILED_LOGINS: u32 = 5;
 pub const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Lockout duration after too many failures.
 pub const LOGIN_LOCKOUT: Duration = Duration::from_secs(15 * 60);
+/// Maximum concurrent SSE change streams.
+pub const SSE_MAX_CONNECTIONS: usize = 64;
+/// Lifetime cap for a single SSE change stream.
+pub const SSE_MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
 /// Errors while initializing server state.
 #[derive(Debug, thiserror::Error)]
@@ -94,6 +98,8 @@ pub struct AppState {
     pub preview_worker: PathBuf,
     /// Limits concurrent preview workers.
     pub preview_permits: Arc<tokio::sync::Semaphore>,
+    /// Caps concurrent SSE change streams.
+    pub sse_permits: Arc<tokio::sync::Semaphore>,
     /// Prometheus metrics.
     pub metrics: Arc<metrics::Metrics>,
     /// Sandboxed WebAssembly plugins.
@@ -119,7 +125,11 @@ impl AppState {
         tokio::fs::create_dir_all(data_dir).await?;
         tokio::fs::create_dir_all(data_dir.join("tmp")).await?;
         let db = Db::connect(&data_dir.join("kolimi.db")).await?;
-        let store = BlobStore::open(data_dir.join("blobs")).await?;
+        let quota_bytes = std::env::var("KOLIMI_USER_QUOTA_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let store = BlobStore::open_with_quota(data_dir.join("blobs"), quota_bytes).await?;
         let vfs = Arc::new(Vfs::new(db.clone(), store));
         let search = Arc::new(SearchIndex::open(&data_dir.join("search"))?);
         let preview_worker =
@@ -145,6 +155,7 @@ impl AppState {
             data_dir: data_dir.to_path_buf(),
             preview_worker,
             preview_permits: Arc::new(tokio::sync::Semaphore::new(preview::MAX_CONCURRENT_WORKERS)),
+            sse_permits: Arc::new(tokio::sync::Semaphore::new(SSE_MAX_CONNECTIONS)),
             metrics: Arc::new(metrics::Metrics::new()?),
             plugins: Arc::new(kolimi_plugins::PluginHost::load(&data_dir.join("plugins"))?),
             rate_limiter: Arc::new(hardening::RateLimiter::new()),

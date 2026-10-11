@@ -603,7 +603,9 @@ fn vfs_error(e: VfsError) -> Response {
         VfsError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
         VfsError::Store(store) => match store {
             StoreError::NotFound(_) => StatusCode::NOT_FOUND,
-            StoreError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            StoreError::TooLarge { .. } | StoreError::QuotaExceeded { .. } => {
+                StatusCode::PAYLOAD_TOO_LARGE
+            }
             StoreError::Mismatch { .. } => StatusCode::BAD_REQUEST,
             StoreError::Corrupt(_)
             | StoreError::Io(_)
