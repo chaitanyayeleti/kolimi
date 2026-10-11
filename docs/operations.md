@@ -137,6 +137,22 @@ scrape_configs:
       - targets: ["cloud.example.com"]
 ```
 
+## Hardening
+
+- **Rate limiting.** Login, passkey ceremonies, public-link unlocks, and
+  preview requests are limited per client address (20 auth attempts /
+  5 min, 30 unlocks / 5 min, 120 previews / min), returning `429` with
+  `Retry-After`. Beyond a trusted reverse proxy, set
+  `KOLIMI_TRUST_PROXY=1` so the client address comes from
+  `X-Forwarded-For` instead of the proxy.
+- **Login lockout** additionally locks an account for 15 minutes after
+  5 failed attempts, and login responses are deliberately uniform and
+  timing-equalised so failures do not reveal whether a username exists.
+- **Security headers.** Every response carries
+  `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`;
+  `Strict-Transport-Security` is added when secure cookies are enabled.
+  The web UI additionally sends a strict `Content-Security-Policy`.
+
 ## E2EE operations
 
 - **Setup** (per user, once): `kolimi-sync --e2ee-setup …` creates the

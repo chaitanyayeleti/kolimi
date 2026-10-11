@@ -11,6 +11,7 @@ pub mod api_passkey;
 pub mod api_shares;
 pub mod api_sync;
 pub mod auth;
+pub mod hardening;
 pub mod janitor;
 pub mod metrics;
 pub mod plugins;
@@ -97,6 +98,15 @@ pub struct AppState {
     pub metrics: Arc<metrics::Metrics>,
     /// Sandboxed WebAssembly plugins.
     pub plugins: Arc<kolimi_plugins::PluginHost>,
+    /// Per-client rate limiter for sensitive endpoints.
+    pub rate_limiter: Arc<hardening::RateLimiter>,
+    /// Fixed password hash verified when a user has none, so login timing
+    /// does not reveal whether a username exists (see issue about
+    /// enumeration).
+    pub dummy_password_hash: String,
+    /// Whether to read the client address from `X-Forwarded-For`
+    /// (`KOLIMI_TRUST_PROXY=1` when behind a trusted reverse proxy).
+    pub trust_proxy: bool,
 }
 
 impl AppState {
@@ -114,6 +124,12 @@ impl AppState {
         let search = Arc::new(SearchIndex::open(&data_dir.join("search"))?);
         let preview_worker =
             std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kolimi-server"));
+        let dummy_password_hash =
+            kolimi_auth::password::hash_password("kolimi-dummy-hash-please-ignore")?;
+        let trust_proxy = matches!(
+            std::env::var("KOLIMI_TRUST_PROXY").ok().as_deref(),
+            Some("1" | "true" | "yes" | "on")
+        );
         Ok(Self {
             db: Arc::new(db),
             vfs,
@@ -131,6 +147,9 @@ impl AppState {
             preview_permits: Arc::new(tokio::sync::Semaphore::new(preview::MAX_CONCURRENT_WORKERS)),
             metrics: Arc::new(metrics::Metrics::new()?),
             plugins: Arc::new(kolimi_plugins::PluginHost::load(&data_dir.join("plugins"))?),
+            rate_limiter: Arc::new(hardening::RateLimiter::new()),
+            dummy_password_hash,
+            trust_proxy,
         })
     }
 }
@@ -270,6 +289,14 @@ pub fn build_app(state: AppState) -> Router {
         ))
         .layer(Extension(vfs))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            hardening::limit,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            hardening::security_headers,
+        ))
         .with_state(state)
 }
 

@@ -207,7 +207,7 @@ async fn serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             tracing::info!(bind = %args.bind, tls = true, "kolimi server listening");
             axum_server::bind_rustls(args.bind, config)
                 .handle(handle)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         }
         (None, None) => {
@@ -216,9 +216,12 @@ async fn serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             }
             let listener = tokio::net::TcpListener::bind(args.bind).await?;
             tracing::info!(bind = %args.bind, tls = false, "kolimi server listening");
-            axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal())
-                .await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
         }
         _ => return Err("--tls-cert and --tls-key must be provided together".into()),
     }

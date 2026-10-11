@@ -43,6 +43,18 @@ pub async fn require_auth(
     Ok(next.run(req).await)
 }
 
+/// Spends the same Argon2id work as a real password verification, so that
+/// login timing does not reveal whether a username exists (or is
+/// disabled / passkey-only). See the user-enumeration issue.
+pub(crate) async fn burn_password_time(state: &AppState, candidate: &str) {
+    let hash = state.dummy_password_hash.clone();
+    let candidate = candidate.to_owned();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = password::verify_password(&hash, &candidate);
+    })
+    .await;
+}
+
 enum Credentials {
     Basic { username: String, password: String },
     Bearer(String),
@@ -119,6 +131,7 @@ async fn authenticate_basic(
                 }
             }
             _ => {
+                burn_password_time(state, password).await;
                 state.lockout.record_failure(username);
                 None
             }

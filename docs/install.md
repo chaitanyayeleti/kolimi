@@ -206,7 +206,13 @@ KOLIMI_DATA=./kolimi-data kolimi-server serve \
 | `--tls-cert` | `KOLIMI_TLS_CERT` | — |
 | `--tls-key` | `KOLIMI_TLS_KEY` | — |
 | `--secure-cookies` | `KOLIMI_SECURE_COOKIES` | off |
+| trust proxy IPs | `KOLIMI_TRUST_PROXY` | off |
 | log level | `RUST_LOG` | `info` |
+
+Set `KOLIMI_TRUST_PROXY=1` when running behind a reverse proxy (the
+sample Traefik stack does) so per-client rate limiting and login lockout
+use the real client address from `X-Forwarded-For` rather than the
+proxy's IP.
 
 ## TLS and reverse proxies
 

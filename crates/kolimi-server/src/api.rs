@@ -57,6 +57,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     }
 
     let Some(user) = state.db.find_user(&req.username).await.ok().flatten() else {
+        crate::auth::burn_password_time(&state, &req.password).await;
         state.lockout.record_failure(&req.username);
         state.metrics.login_failure();
         audit(
@@ -71,6 +72,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
         return unauthorized("invalid credentials");
     };
     if user.disabled {
+        crate::auth::burn_password_time(&state, &req.password).await;
         state.lockout.record_failure(&req.username);
         state.metrics.login_failure();
         audit(
@@ -85,6 +87,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
         return unauthorized("invalid credentials");
     }
     if user.password_hash.is_empty() {
+        crate::auth::burn_password_time(&state, &req.password).await;
         state.lockout.record_failure(&req.username);
         state.metrics.login_failure();
         audit(

@@ -44,6 +44,9 @@ services:
     environment:
       KOLIMI_ORIGIN: https://${KOLIMI_DOMAIN:?set KOLIMI_DOMAIN in .env}
       KOLIMI_SECURE_COOKIES: "true"
+      # Behind Traefik: rate limiting and lockout key on the real client
+      # address from X-Forwarded-For, not the proxy's IP.
+      KOLIMI_TRUST_PROXY: "true"
       RUST_LOG: info
     volumes:
       - kolimi-data:/data
