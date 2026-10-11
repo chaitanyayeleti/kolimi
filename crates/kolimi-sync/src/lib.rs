@@ -358,6 +358,11 @@ pub async fn share_path(
         ShareTarget::Group(name) => {
             let path = format!("/api/groups/{}/members", encode(name));
             let (status, body) = http.get_json(&path).await?;
+            if status == 403 {
+                return Err(SyncError::E2ee(format!(
+                    "you must be a member of group {name} to share encrypted files with it"
+                )));
+            }
             if status != 200 {
                 return Err(SyncError::E2ee(format!("no such group: {name}")));
             }

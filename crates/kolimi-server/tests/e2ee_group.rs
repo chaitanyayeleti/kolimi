@@ -127,9 +127,11 @@ async fn group_share_reaches_members_and_removal_revokes() {
         setup_keyring(&server.url, user, dir).await;
     }
 
-    // Group "team" with bob + carol.
+    // Group "team" with alice (the sharer) + bob + carol. Wrapping keys
+    // for a group requires the sharer to be a member (rosters are only
+    // visible to members and admins).
     let group = state.db.create_group("team").await.unwrap();
-    for username in ["bob", "carol"] {
+    for username in ["alice", "bob", "carol"] {
         let user = state.db.find_user(username).await.unwrap().unwrap();
         state.db.add_group_member(group.id, user.id).await.unwrap();
     }

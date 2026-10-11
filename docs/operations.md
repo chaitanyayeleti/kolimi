@@ -159,6 +159,11 @@ scrape_configs:
 - **Event streams.** At most 64 concurrent `/api/sync/events` SSE
   connections are served (further ones get `503`), and each is closed
   after 30 minutes.
+- **Information exposure.** `/version` now requires authentication —
+  use `/healthz` for unauthenticated liveness checks. Group rosters
+  (`/api/groups/{name}/members`) are only visible to the group's members
+  and administrators; consequently, wrapping E2EE keys for a group
+  requires the sharer to be a member.
 
 ## E2EE operations
 

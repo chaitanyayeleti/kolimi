@@ -7,6 +7,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode, header},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use kolimi_auth::password::hash_password;
 use kolimi_server::{AppState, build_app, hardening};
 use tower::ServiceExt;
@@ -14,7 +15,7 @@ use tower::ServiceExt;
 const ORIGIN: &str = "http://localhost:8080";
 const PASS: &str = "test password 123";
 
-async fn setup(secure: bool) -> (tempfile::TempDir, Router) {
+async fn setup_state(secure: bool) -> (tempfile::TempDir, AppState, Router) {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::init(dir.path(), secure, ORIGIN).await.unwrap();
     state
@@ -22,8 +23,29 @@ async fn setup(secure: bool) -> (tempfile::TempDir, Router) {
         .create_user("alice", &hash_password(PASS).unwrap())
         .await
         .unwrap();
-    let app = build_app(state);
+    let app = build_app(state.clone());
+    (dir, state, app)
+}
+
+async fn setup(secure: bool) -> (tempfile::TempDir, Router) {
+    let (dir, _state, app) = setup_state(secure).await;
     (dir, app)
+}
+
+fn basic(user: &str, password: &str) -> String {
+    format!("Basic {}", STANDARD.encode(format!("{user}:{password}")))
+}
+
+async fn get_status(app: &Router, uri: &str, auth: Option<&str>) -> StatusCode {
+    let mut builder = Request::builder().method("GET").uri(uri);
+    if let Some(value) = auth {
+        builder = builder.header(header::AUTHORIZATION, value);
+    }
+    app.clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
 }
 
 fn passkey_begin(username: &str) -> Request<Body> {
@@ -121,6 +143,76 @@ async fn security_headers_are_present() {
             .unwrap()
             .contains("max-age=31536000"),
         "HSTS present when secure cookies are on"
+    );
+}
+
+#[tokio::test]
+async fn version_requires_authentication() {
+    let (_dir, app) = setup(false).await;
+    assert_eq!(
+        get_status(&app, "/version", None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get_status(&app, "/version", Some(&basic("alice", PASS))).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn group_roster_is_scoped_to_members_and_admins() {
+    let (_dir, state, app) = setup_state(false).await;
+    let bob = state
+        .db
+        .create_user("bob", &hash_password("pw123456").unwrap())
+        .await
+        .unwrap();
+    state
+        .db
+        .create_user("mallory", &hash_password("pw123456").unwrap())
+        .await
+        .unwrap();
+    let group = state.db.create_group("team").await.unwrap();
+    state.db.add_group_member(group.id, bob.id).await.unwrap();
+
+    // Member and administrator may see the roster.
+    assert_eq!(
+        get_status(
+            &app,
+            "/api/groups/team/members",
+            Some(&basic("bob", "pw123456"))
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_status(
+            &app,
+            "/api/groups/team/members",
+            Some(&basic("alice", PASS))
+        )
+        .await,
+        StatusCode::OK
+    );
+    // A non-member, non-admin may not.
+    assert_eq!(
+        get_status(
+            &app,
+            "/api/groups/team/members",
+            Some(&basic("mallory", "pw123456"))
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    // Unknown group is still 404.
+    assert_eq!(
+        get_status(
+            &app,
+            "/api/groups/nope/members",
+            Some(&basic("alice", PASS))
+        )
+        .await,
+        StatusCode::NOT_FOUND
     );
 }
 

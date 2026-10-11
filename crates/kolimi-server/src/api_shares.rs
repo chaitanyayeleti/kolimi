@@ -268,22 +268,25 @@ pub async fn received(
 /// Needed by the owner's client to wrap file keys per member.
 pub async fn group_members(
     State(state): State<AppState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(name): Path<String>,
 ) -> Response {
     let Some(group) = state.db.group_by_name(&name).await.ok().flatten() else {
         return not_found();
     };
-    match state.db.group_members(group.id).await {
-        Ok(members) => {
-            let names: Vec<&str> = members
-                .iter()
-                .map(|member| member.username.as_str())
-                .collect();
-            Json(json!({ "group": group.name, "members": names })).into_response()
-        }
-        Err(_) => api::internal_error(),
+    let members = match state.db.group_members(group.id).await {
+        Ok(members) => members,
+        Err(_) => return api::internal_error(),
+    };
+    // Rosters are only for the group's own members and administrators.
+    if !user.is_admin && !members.iter().any(|member| member.id == user.user_id) {
+        return forbidden("not a member of this group");
     }
+    let names: Vec<&str> = members
+        .iter()
+        .map(|member| member.username.as_str())
+        .collect();
+    Json(json!({ "group": group.name, "members": names })).into_response()
 }
 
 /// `GET /api/shareable` — users and groups a share can target.
