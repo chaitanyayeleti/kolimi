@@ -92,6 +92,13 @@ jobs:
           KOLIMI_DATA=./kolimi-data ./target/release/kolimi-server serve --bind 127.0.0.1:8080 &
           sleep 2
           curl -fsS http://127.0.0.1:8080/app/ | grep -q 'id="app"'
+          curl -fsS http://127.0.0.1:8080/app/ | grep -q 'src="/app/bootstrap.js"'
+          # An inline script would be blocked by the CSP (script-src 'self').
+          if curl -fsS http://127.0.0.1:8080/app/ | grep -q '<script type="module">'; then
+            echo "error: inline script would be blocked by the CSP"; exit 1
+          fi
+          curl -fsS -o /dev/null http://127.0.0.1:8080/app/bootstrap.js
+          curl -fsS -o /dev/null http://127.0.0.1:8080/app/app.js
           curl -fsS -o /dev/null -w '%{content_type}' http://127.0.0.1:8080/app/app_bg.wasm | grep -q application/wasm
           curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/s/sometoken | grep -q 200
           kill %1
@@ -161,6 +168,7 @@ jobs:
           # The install must ship a usable UI, not just the placeholder.
           curl -fsS -o /dev/null -w '%{content_type}' \
             http://127.0.0.1:18080/app/app_bg.wasm | grep -q application/wasm
+          curl -fsS -o /dev/null http://127.0.0.1:18080/app/bootstrap.js
           printf 'shared via one-command install' > "$RUNNER_TEMP/doc.txt"
           curl -fsS -u admin:install-smoke-pass-123 -T "$RUNNER_TEMP/doc.txt" \
             http://127.0.0.1:18080/dav/doc.txt -o /dev/null
