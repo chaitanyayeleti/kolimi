@@ -95,8 +95,13 @@ docker run -d --name kolimi \
 - The image is distroless and runs as nonroot (uid 65532); the `/data`
   volume is pre-owned so named volumes inherit the right ownership.
 - The build compiles the web UI to WebAssembly and embeds it in the
-  binary, so the first `docker build` takes a few minutes (it installs
-  `wasm-bindgen-cli` and builds `kolimi-ui`).
+  binary, so the first `docker build` is slow (it installs
+  `wasm-bindgen-cli` and builds `kolimi-ui`). Later builds reuse
+  BuildKit cache mounts for the cargo registry and target directory, so
+  only changed crates recompile — expect seconds to a couple of minutes.
+  Keep this in mind if you use `--no-cache` (it still reuses the cache
+  mounts, so it stays fast) or `docker builder prune` (clears them; the
+  next build is slow again).
 - Compose examples: `packaging/docker/compose.yaml` (direct port) and
   `packaging/docker/compose.traefik.yaml` (TLS via Traefik, below).
 - Create the first admin inside the container:
