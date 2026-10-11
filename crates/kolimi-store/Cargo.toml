@@ -16,7 +16,7 @@ fastcdc.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-kolimi-chunk = { version = "0.0.1", path = "../kolimi-chunk" }
+kolimi-chunk = { version = "0.1.0", path = "../kolimi-chunk" }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

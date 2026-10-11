@@ -193,11 +193,16 @@ Key values (`packaging/helm/kolimi/values.yaml`): `image.repository/tag`,
 The deployment runs non-root with a read-only root filesystem, probes
 `/healthz`, and uses a `Recreate` strategy (SQLite on a RWO volume).
 
-Build and push the image first, e.g.:
+The chart pulls the **published image** by default
+(`ghcr.io/chaitanyayeleti/kolimi:<appVersion>`, with `:latest` also
+available) — tagged releases push it automatically. For a custom build,
+override the image:
 
 ```sh
-docker build -f packaging/docker/Dockerfile -t ghcr.io/you/kolimi:0.1.0 .
-docker push ghcr.io/you/kolimi:0.1.0
+docker build -f packaging/docker/Dockerfile -t ghcr.io/you/kolimi:dev .
+docker push ghcr.io/you/kolimi:dev
+helm upgrade --install kolimi packaging/helm/kolimi \
+  --set image.repository=ghcr.io/you/kolimi --set image.tag=dev
 ```
 
 ## Manual / from source

@@ -12,6 +12,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  packages: write
 
 jobs:
   build:
@@ -50,6 +51,14 @@ jobs:
           cp packaging/systemd/kolimi.service packaging/systemd/kolimi.env.example "dist/$NAME/"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+      - name: Build .deb (gnu only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          mkdir -p target/release
+          cp "target/${{ matrix.target }}/release/kolimi-server" target/release/kolimi-server
+          cp "target/${{ matrix.target }}/release/kolimi-sync" target/release/kolimi-sync
+          cargo install cargo-deb --locked
+          cargo deb -p kolimi-server --no-build --output dist/
       - name: SBOM (CycloneDX)
         run: |
           cargo install cargo-cyclonedx --locked
@@ -65,9 +74,61 @@ jobs:
           name: kolimi-${{ matrix.target }}
           path: dist/*
 
+  container:
+    name: container (ghcr.io)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/docker/Dockerfile
+          # arm64 is emulated here (slow for the wasmtime build); add it via a
+          # native arm runner later.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm:
+    name: helm package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: azure/setup-helm@v4
+      - run: |
+          mkdir -p dist
+          helm package packaging/helm/kolimi --destination dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helm
+          path: dist/*
+
   publish:
     name: publish release
-    needs: build
+    needs: [build, helm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

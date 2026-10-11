@@ -38,8 +38,9 @@ SBOM, signatures), the **container image on GHCR**, **Arch (AUR)**, and
 
 ## Container specifics
 
-- Multi-arch via buildx + QEMU, distroless base (the build already embeds
-  the WASM UI).
+- `linux/amd64` first (distroless base; the build embeds the WASM UI).
+  **arm64** lands later via a native `ubuntu-24.04-arm` runner — building
+  the wasmtime tree under QEMU is far too slow.
 - Publishing to GHCR makes the Helm chart's `image.repository` real
   (currently a placeholder) and lets users `docker run ghcr.io/…`.
 - Tags: `vX.Y.Z`, `X.Y`, `latest`.
