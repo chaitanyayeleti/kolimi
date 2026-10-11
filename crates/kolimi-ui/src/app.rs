@@ -529,7 +529,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                 {move || format!("{} result(s)", results.get().len())}
                             </span>
                             <span class="row-actions">
-                                <button on:click=move |ev| clear(ev)>"Clear"</button>
+                                <button on:click=clear>"Clear"</button>
                             </span>
                         </li>
                         <For

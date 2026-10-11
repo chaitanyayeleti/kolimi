@@ -12,6 +12,9 @@ all-features = true
 unmaintained = "workspace"
 unsound = "all"
 yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0253", reason = "lru 0.16.4 via tantivy 0.26 (no semver-compatible fix; patched only in >= 0.18.2). The unsoundness requires a panicking Drop on a cache *key* during LruCache::pop with unwinding catch_unwind; tantivy's cache keys are plain (Field, u64)/String values whose Drop cannot panic. Revisit when tantivy moves to lru 0.18." },
+]
 
 [bans]
 multiple-versions = "warn"
