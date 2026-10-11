@@ -136,10 +136,18 @@ jobs:
     needs: [build, helm]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      # Only our own artifacts (skip buildx's internal *.dockerbuild record).
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
         with:
+          pattern: kolimi-*
           path: dist
           merge-multiple: true
+      - name: Download Helm chart
+        uses: actions/download-artifact@v4
+        with:
+          name: helm
+          path: dist
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
