@@ -17,7 +17,7 @@ SBOM, signatures), the **container image on GHCR**, **Arch (AUR)**, and
 
 | Channel | Artifact | Status |
 | --- | --- | --- |
-| GitHub Releases | gnu + musl tarballs, CycloneDX SBOM, cosign signatures | **exists** (`release.yml`) |
+| GitHub Releases | gnu tarball, Catalyst SBOM, cosign signatures | **exists** (`release.yml`); **musl/aarch64 tarballs** need a vendored OpenSSL (`webauthn-rs` → `openssl-sys`) — follow-up |
 | `.deb` | cargo-deb build (metadata + postinst exist) | built in the CI `packaging` job, **not attached to releases** → add to `release.yml` |
 | Container | OCI image | built locally only, **never published** → add buildx push to GHCR |
 | Arch (AUR) | `packaging/arch/PKGBUILD` | exists; `pkgver`/`sha256sums` updated by hand → automate |

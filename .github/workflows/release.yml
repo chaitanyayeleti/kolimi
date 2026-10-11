@@ -21,7 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl]
+        # musl/aarch64 tarballs need a vendored OpenSSL (webauthn-rs pulls
+        # openssl-sys); tracked as a follow-up. install.sh uses the gnu build.
+        target: [x86_64-unknown-linux-gnu]
     steps:
       - uses: actions/checkout@v5
         with:
