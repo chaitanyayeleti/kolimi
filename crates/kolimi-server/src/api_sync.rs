@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::AppState;
-use crate::api::{bad_request, internal_error};
+use crate::api::{bad_request, forbidden, internal_error, not_found};
 
 const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMMIT_BYTES: usize = 64 * 1024 * 1024;
@@ -196,6 +196,102 @@ fn path_for(
     path
 }
 
+/// `GET /api/sync/shared-tree` — files shared with the caller.
+///
+/// Paths are presented under `/Shared with me/<name>/…`, mirroring the
+/// browse mount. Encrypted files carry `encrypted: true` and their keys
+/// are fetched separately (`/api/e2ee/share-key`).
+pub async fn shared_tree(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    let shares = match state.db.received_shares(user.user_id).await {
+        Ok(shares) => shares,
+        Err(_) => return internal_error(),
+    };
+
+    let mut entries = Vec::new();
+    let mut seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    let mut nodes_cache: HashMap<i64, Vec<kolimi_db::Node>> = HashMap::new();
+    let mut encrypted_cache: HashMap<i64, std::collections::HashSet<i64>> = HashMap::new();
+
+    for share in shares {
+        if !seen.insert((share.owner_id, share.node_id)) {
+            continue;
+        }
+        if let std::collections::hash_map::Entry::Vacant(entry) = nodes_cache.entry(share.owner_id)
+        {
+            let nodes = state
+                .db
+                .all_live_nodes(share.owner_id)
+                .await
+                .unwrap_or_default();
+            entry.insert(nodes);
+        }
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            encrypted_cache.entry(share.owner_id)
+        {
+            let ids = state
+                .db
+                .encrypted_node_ids(share.owner_id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            entry.insert(ids);
+        }
+        let nodes = &nodes_cache[&share.owner_id];
+        let encrypted = &encrypted_cache[&share.owner_id];
+
+        let mut info: HashMap<i64, (Option<i64>, String)> = HashMap::new();
+        for node in nodes {
+            info.insert(node.id, (node.parent_id, node.name.clone()));
+        }
+
+        for node in nodes {
+            if node.kind != "file" {
+                continue;
+            }
+            // The node itself, or a descendant of the shared directory.
+            let mut current = Some(node.id);
+            let mut relative = Vec::new();
+            let mut belongs = false;
+            while let Some(id) = current {
+                if id == share.node_id {
+                    belongs = true;
+                    break;
+                }
+                let Some((parent, name)) = info.get(&id) else {
+                    break;
+                };
+                relative.push(name.clone());
+                current = *parent;
+            }
+            if !belongs {
+                continue;
+            }
+            relative.reverse();
+            let suffix = relative.join("/");
+            let path = if suffix.is_empty() {
+                format!("/Shared with me/{}", share.name)
+            } else {
+                format!("/Shared with me/{}/{}", share.name, suffix)
+            };
+            entries.push(json!({
+                "path": path,
+                "content_id": node.content_id.as_deref().and_then(bytes_to_hash_hex),
+                "size": node.size,
+                "modified_at": node.modified_at,
+                "encrypted": encrypted.contains(&node.id),
+                "owner": share.owner_username,
+                "shared": true,
+                "etag": etag_for(node),
+            }));
+        }
+    }
+    json_response(StatusCode::OK, json!({ "entries": entries }))
+}
+
 /// `GET /api/manifests/{content_id}` — manifest by content id.
 pub async fn manifest_by_id(
     State(state): State<AppState>,
@@ -224,15 +320,45 @@ pub async fn file_manifest(
 }
 
 /// `GET /api/chunks/{hash}` — download one chunk.
+#[derive(Deserialize)]
+pub struct ChunkQuery {
+    /// Optional file path; when present the chunk is read from that
+    /// file's owner store (shared files) and must belong to the file.
+    #[serde(default)]
+    path: Option<String>,
+}
+
 pub async fn get_chunk(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
     Path(hash): Path<String>,
+    Query(query): Query<ChunkQuery>,
 ) -> Response {
     let Ok(hash) = hash.parse::<Hash>() else {
         return bad_request("invalid chunk hash");
     };
-    match state.vfs.read_chunk(user.user_id, &hash).await {
+    let mut owner_id = user.user_id;
+    if let Some(path) = query.path.as_deref() {
+        let access = match state.vfs.resolve_access(user.user_id, path).await {
+            Ok(access) => access,
+            Err(VfsError::NotFound) => return not_found(),
+            Err(_) => return internal_error(),
+        };
+        if access.node.is_dir() {
+            return bad_request("path must be a file");
+        }
+        let Some(content_id) = access.node.content_id else {
+            return not_found();
+        };
+        let Ok(manifest) = state.vfs.manifest(access.owner_id, &content_id).await else {
+            return not_found();
+        };
+        if !manifest.chunks.iter().any(|chunk| chunk.hash == hash) {
+            return forbidden("chunk does not belong to this file");
+        }
+        owner_id = access.owner_id;
+    }
+    match state.vfs.read_chunk(owner_id, &hash).await {
         Ok(bytes) => {
             let mut response = Response::new(Body::from(bytes));
             response.headers_mut().insert(

@@ -162,6 +162,19 @@ pub fn build_app(state: AppState) -> Router {
             "/api/files/key",
             get(api_e2ee::get_file_key).put(api_e2ee::put_file_key),
         )
+        .route(
+            "/api/e2ee/identity",
+            get(api_e2ee::get_identity).put(api_e2ee::put_identity),
+        )
+        .route(
+            "/api/e2ee/identity/{username}",
+            get(api_e2ee::public_identity),
+        )
+        .route(
+            "/api/e2ee/share-key",
+            get(api_e2ee::get_share_key).put(api_e2ee::put_share_key),
+        )
+        .route("/api/sync/shared-tree", get(api_sync::shared_tree))
         .route("/api/files", axum::routing::put(api_sync::commit_file))
         .route(
             "/api/chunks/{hash}",

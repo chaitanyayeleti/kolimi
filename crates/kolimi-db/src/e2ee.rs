@@ -85,6 +85,103 @@ impl Db {
         )
     }
 
+    /// Stores (or replaces) a user's X25519 identity.
+    pub async fn set_identity(
+        &self,
+        user_id: i64,
+        public_key: &[u8],
+        wrapped_private: &[u8],
+    ) -> Result<(), DbError> {
+        if public_key.len() != 32 || wrapped_private.is_empty() || wrapped_private.len() > 1024 {
+            return Err(DbError::Conflict("identity size".to_string()));
+        }
+        sqlx::query(
+            "INSERT INTO e2ee_identities (user_id, public_key, wrapped_private, created_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(user_id) DO UPDATE SET public_key = excluded.public_key,
+                 wrapped_private = excluded.wrapped_private,
+                 created_at = excluded.created_at",
+        )
+        .bind(user_id)
+        .bind(public_key)
+        .bind(wrapped_private)
+        .bind(now_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A user's identity: (public key, wrapped private key).
+    pub async fn identity(&self, user_id: i64) -> Result<Option<(Vec<u8>, Vec<u8>)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT public_key, wrapped_private FROM e2ee_identities WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// A user's published public key.
+    pub async fn public_key(&self, user_id: i64) -> Result<Option<Vec<u8>>, DbError> {
+        Ok(
+            sqlx::query_scalar("SELECT public_key FROM e2ee_identities WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Stores (or replaces) a wrapped file key for one recipient.
+    pub async fn set_share_key(
+        &self,
+        node_id: i64,
+        recipient_id: i64,
+        wrapped_key: &[u8],
+    ) -> Result<(), DbError> {
+        if wrapped_key.is_empty() || wrapped_key.len() > 1024 {
+            return Err(DbError::Conflict("share key size".to_string()));
+        }
+        sqlx::query(
+            "INSERT INTO e2ee_share_keys (node_id, recipient_id, wrapped_key, created_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(node_id, recipient_id) DO UPDATE SET wrapped_key = excluded.wrapped_key,
+                 created_at = excluded.created_at",
+        )
+        .bind(node_id)
+        .bind(recipient_id)
+        .bind(wrapped_key)
+        .bind(now_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The wrapped file key stored for one recipient.
+    pub async fn share_key(
+        &self,
+        node_id: i64,
+        recipient_id: i64,
+    ) -> Result<Option<Vec<u8>>, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT wrapped_key FROM e2ee_share_keys WHERE node_id = ? AND recipient_id = ?",
+        )
+        .bind(node_id)
+        .bind(recipient_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Removes the share keys for one (node, recipient) pair.
+    pub async fn delete_share_keys(&self, node_id: i64, recipient_id: i64) -> Result<u64, DbError> {
+        let result =
+            sqlx::query("DELETE FROM e2ee_share_keys WHERE node_id = ? AND recipient_id = ?")
+                .bind(node_id)
+                .bind(recipient_id)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Whether a node is encrypted.
     pub async fn is_encrypted(&self, node_id: i64) -> Result<bool, DbError> {
         let exists: Option<i64> =

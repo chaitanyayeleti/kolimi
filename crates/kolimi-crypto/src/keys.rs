@@ -24,6 +24,8 @@ pub const RECOVERY_CODE_LEN: usize = 32;
 pub(crate) const FK_AAD: &[u8] = b"kolimi-fk-v1";
 /// Additional authenticated data for chunk ciphertexts.
 pub(crate) const CHUNK_AAD: &[u8] = b"kolimi-chunk-v1";
+/// Additional authenticated data for identity private-key wraps.
+pub(crate) const IDENTITY_AAD: &[u8] = b"kolimi-identity-v1";
 
 pub(crate) fn random<const N: usize>() -> Result<[u8; N], CryptoError> {
     let mut buffer = [0u8; N];
@@ -182,6 +184,20 @@ impl MasterKey {
     /// Unwraps a file key previously wrapped with [`Self::wrap_file_key`].
     pub fn unwrap_file_key(&self, wrapped: &[u8]) -> Result<FileKey, CryptoError> {
         Ok(FileKey::from_bytes(unwrap(&self.0, wrapped, FK_AAD)?))
+    }
+
+    /// Wraps an X25519 identity's private key for server-side storage.
+    pub fn wrap_identity(&self, identity: &crate::Identity) -> Result<Vec<u8>, CryptoError> {
+        wrap(&self.0, &identity.private_bytes(), IDENTITY_AAD)
+    }
+
+    /// Unwraps an identity private key.
+    pub fn unwrap_identity(&self, wrapped: &[u8]) -> Result<crate::Identity, CryptoError> {
+        Ok(crate::Identity::from_bytes(unwrap(
+            &self.0,
+            wrapped,
+            IDENTITY_AAD,
+        )?))
     }
 }
 

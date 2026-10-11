@@ -136,6 +136,24 @@ impl KolimiSync {
             .map_err(|error| FfiError::E2ee {
                 message: error.to_string(),
             })?;
+        // Publish the X25519 identity (unlocking with the fresh passphrase).
+        let mut identity_config = self.config.clone();
+        let roots = identity_config
+            .e2ee
+            .as_ref()
+            .map(|options| options.encrypted_roots.clone())
+            .unwrap_or_else(|| vec!["Private".to_string()]);
+        identity_config.e2ee = Some(E2eeOptions {
+            passphrase: Some(passphrase.clone()),
+            recovery_code: None,
+            prf_secret: None,
+            encrypted_roots: roots,
+        });
+        kolimi_sync::publish_identity(&identity_config)
+            .await
+            .map_err(|error| FfiError::E2ee {
+                message: error.to_string(),
+            })?;
         Ok(kolimi_crypto::recovery_code_display(&recovery))
     }
 }

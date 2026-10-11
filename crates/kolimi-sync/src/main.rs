@@ -6,7 +6,10 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use kolimi_crypto::recovery_code_display;
-use kolimi_sync::{E2eeOptions, SyncConfig, create_keyring, sync_once, upload_keyring};
+use kolimi_sync::{
+    E2eeOptions, SyncConfig, create_keyring, publish_identity, share_file, sync_once, unshare_file,
+    upload_keyring,
+};
 
 #[derive(Parser)]
 #[command(
@@ -53,6 +56,18 @@ struct Cli {
     /// shells usually pass this via the library API instead.
     #[arg(long, env = "KOLIMI_E2EE_PRF", hide_env_values = true)]
     e2ee_prf: Option<String>,
+
+    /// Share a path (relative to --local) with a user, wrapping E2EE keys.
+    #[arg(long)]
+    share: Option<String>,
+
+    /// Recipient for --share/--unshare.
+    #[arg(long)]
+    with: Option<String>,
+
+    /// Revoke the share of --share from --with instead of creating one.
+    #[arg(long)]
+    unshare: bool,
 }
 
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
@@ -92,6 +107,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         },
     };
 
+    if let Some(path) = cli.share.clone() {
+        let Some(recipient) = cli.with.clone() else {
+            return Err("--share requires --with <username>".into());
+        };
+        if cli.unshare {
+            unshare_file(&config, &path, &recipient).await?;
+            println!("revoked {path} for {recipient}");
+        } else {
+            let wrapped = share_file(&config, &path, &recipient).await?;
+            println!("shared {path} with {recipient} ({wrapped} encrypted file key(s) wrapped)");
+        }
+        return Ok(());
+    }
+
     if cli.e2ee_setup {
         let passphrase = match cli.e2ee_passphrase.clone() {
             Some(passphrase) => passphrase,
@@ -110,6 +139,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "keyring uploaded ({} unlock methods)",
             keyring.methods().len()
         );
+        // Publish the X25519 identity so others can share encrypted
+        // files with this account.
+        let mut identity_config = config.clone();
+        identity_config.e2ee = Some(E2eeOptions {
+            passphrase: Some(passphrase.clone()),
+            recovery_code: None,
+            prf_secret: None,
+            encrypted_roots: vec!["Private".to_string()],
+        });
+        publish_identity(&identity_config).await?;
+        println!("identity published");
         println!();
         println!("Recovery code (store it somewhere safe, it is shown once):");
         println!("  {}", recovery_code_display(&recovery));

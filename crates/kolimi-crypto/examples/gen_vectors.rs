@@ -6,8 +6,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use kolimi_crypto::{
-    Argon2Params, FileKey, kek_from_passphrase, kek_from_prf, kek_from_recovery_code,
-    wrap_with_nonce,
+    Argon2Params, FileKey, Identity, kek_from_passphrase, kek_from_prf, kek_from_recovery_code,
+    wrap_with_ephemeral_nonce, wrap_with_nonce,
 };
 
 fn hex(bytes: &[u8]) -> String {
@@ -43,6 +43,20 @@ fn main() {
     let plaintext = b"kolimi end-to-end encryption test vector";
     let ciphertext = file_key.encrypt_chunk(plaintext).unwrap();
 
+    // Share-key wrap: fixed ephemeral secret + nonce for reproducibility.
+    let recipient_secret: [u8; 32] = ramp(0xd0, 32).try_into().unwrap();
+    let recipient_public = Identity::from_bytes(recipient_secret).public_key();
+    let ephemeral_secret: [u8; 32] = ramp(0xf0, 32).try_into().unwrap();
+    let share_nonce: [u8; 24] = ramp(0x11, 24).try_into().unwrap();
+    let shared_file_key: [u8; 32] = ramp(0x33, 32).try_into().unwrap();
+    let share_wrapped = wrap_with_ephemeral_nonce(
+        &ephemeral_secret,
+        &recipient_public,
+        &shared_file_key,
+        &share_nonce,
+    )
+    .unwrap();
+
     let vectors = serde_json::json!({
         "version": 1,
         "kek_passphrase": {
@@ -67,6 +81,14 @@ fn main() {
             "nonce": hex(&nonce),
             "aad": "kolimi-keyring-v1:recovery",
             "wrapped": hex(&wrapped),
+        },
+        "share_wrap": {
+            "recipient_secret": hex(&recipient_secret),
+            "recipient_public": hex(&recipient_public),
+            "ephemeral_secret": hex(&ephemeral_secret),
+            "nonce": hex(&share_nonce),
+            "file_key": hex(&shared_file_key),
+            "wrapped": hex(&share_wrapped),
         },
         "chunk": {
             "file_key": hex(file_key.as_bytes()),

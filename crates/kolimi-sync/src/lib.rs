@@ -24,10 +24,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use kolimi_chunk::{ChunkRef, Manifest, chunker};
 use kolimi_crypto::{
-    Argon2Params, FileKey, Keyring, MasterKey, generate_recovery_code, recovery_code_parse,
+    Argon2Params, FileKey, Identity, Keyring, MasterKey, generate_recovery_code,
+    recovery_code_parse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Local directory mirroring files shared with this user.
+pub const SHARED_MOUNT: &str = "Shared with me";
 
 /// Configuration for one sync root.
 #[derive(Debug, Clone)]
@@ -129,6 +133,10 @@ struct StateFile {
     /// pull pass must not resurrect it, and push propagates the deletion.
     #[serde(default)]
     deleted: bool,
+    /// True for files that live under `Shared with me/` (read-only here;
+    /// push never uploads or deletes them).
+    #[serde(default)]
+    shared: bool,
 }
 
 impl State {
@@ -174,6 +182,7 @@ pub async fn sync_once(config: &SyncConfig) -> Result<SyncReport, SyncError> {
 /// Unlocked E2EE session state.
 struct E2ee {
     master: MasterKey,
+    identity: Identity,
     options: E2eeOptions,
 }
 
@@ -223,10 +232,46 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
                 .to_string(),
         ));
     };
+    let identity = ensure_identity(http, &master).await?;
     Ok(Some(E2ee {
         master,
+        identity,
         options: options.clone(),
     }))
+}
+
+/// Loads the user's X25519 identity, creating and publishing one on first
+/// use (the private key is wrapped under the master key).
+async fn ensure_identity(http: &Http, master: &MasterKey) -> Result<Identity, SyncError> {
+    let (status, body) = http.get_json("/api/e2ee/identity").await?;
+    match status {
+        200 => {
+            let wrapped = STANDARD
+                .decode(body["wrapped_private"].as_str().unwrap_or_default())
+                .map_err(|error| SyncError::E2ee(format!("identity: {error}")))?;
+            Ok(master.unwrap_identity(&wrapped)?)
+        }
+        404 => {
+            let identity = Identity::generate()?;
+            let wrapped = master.wrap_identity(&identity)?;
+            let payload = serde_json::json!({
+                "public_key": STANDARD.encode(identity.public_key()),
+                "wrapped_private": STANDARD.encode(&wrapped),
+            });
+            let (status, _) = http.put_json("/api/e2ee/identity", &payload).await?;
+            if status != 204 {
+                return Err(SyncError::Server {
+                    status,
+                    path: "/api/e2ee/identity".to_string(),
+                });
+            }
+            Ok(identity)
+        }
+        status => Err(SyncError::Server {
+            status,
+            path: "/api/e2ee/identity".to_string(),
+        }),
+    }
 }
 
 /// Creates a keyring (setup side); returns it plus the recovery code.
@@ -243,6 +288,152 @@ pub fn create_keyring_with_params(
     let recovery = generate_recovery_code()?;
     let keyring = Keyring::create(&master, passphrase, params, &recovery)?;
     Ok((keyring, recovery))
+}
+
+/// Shares a path (relative to the local dir) with a user, wrapping the
+/// file keys of every encrypted file under it for the recipient.
+///
+/// Returns how many file keys were wrapped. Plaintext files are shared
+/// through the normal ACL path and need no keys.
+pub async fn share_file(
+    config: &SyncConfig,
+    rel_path: &str,
+    recipient: &str,
+) -> Result<u64, SyncError> {
+    let http = Http::new(config)?;
+    let Some(e2ee) = unlock_e2ee(&http, config).await? else {
+        return Err(SyncError::E2ee(
+            "sharing encrypted files requires e2ee options".to_string(),
+        ));
+    };
+    let rel_path = rel_path.trim_start_matches('/');
+    let server_path = format!("/{rel_path}");
+
+    let identity_path = format!("/api/e2ee/identity/{}", encode(recipient));
+    let (status, body) = http.get_json(&identity_path).await?;
+    if status != 200 {
+        return Err(SyncError::E2ee(format!(
+            "{recipient} has no E2EE identity (they must unlock E2EE once first)"
+        )));
+    }
+    let public_key: [u8; 32] = STANDARD
+        .decode(body["public_key"].as_str().unwrap_or_default())
+        .map_err(|error| SyncError::E2ee(format!("recipient key: {error}")))?
+        .try_into()
+        .map_err(|_| SyncError::E2ee("recipient key must be 32 bytes".to_string()))?;
+
+    let (status, _) = http
+        .post_json(
+            "/api/shares",
+            &serde_json::json!({
+                "path": server_path,
+                "kind": "user",
+                "recipient": recipient,
+                "permission": "read",
+            }),
+        )
+        .await?;
+    if status != 201 && status != 409 {
+        return Err(SyncError::Server {
+            status,
+            path: "/api/shares".to_string(),
+        });
+    }
+
+    let local_root = config.local_dir.join(rel_path);
+    let mut files = Vec::new();
+    if local_root.is_file() {
+        files.push(rel_path.to_string());
+    } else if local_root.is_dir() {
+        collect_files(&config.local_dir, &local_root, &mut files)?;
+    } else {
+        return Err(SyncError::E2ee(format!(
+            "{rel_path} does not exist locally"
+        )));
+    }
+
+    let mut wrapped_count = 0u64;
+    for rel in files {
+        let key_path = format!("/api/files/key?path={}", encode(&format!("/{rel}")));
+        let (status, body) = http.get_json(&key_path).await?;
+        if status == 404 {
+            continue; // plaintext file
+        }
+        if status != 200 {
+            return Err(SyncError::Server {
+                status,
+                path: key_path,
+            });
+        }
+        let wrapped = STANDARD
+            .decode(body["wrapped_key"].as_str().unwrap_or_default())
+            .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
+        let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
+        let share_key = e2ee.identity.wrap_file_key_for(&public_key, &file_key)?;
+        let path = format!(
+            "/api/e2ee/share-key?path={}&recipient={}",
+            encode(&format!("/{rel}")),
+            encode(recipient)
+        );
+        let status = http.put_bytes(&path, &share_key).await?;
+        if status != 204 {
+            return Err(SyncError::Server { status, path });
+        }
+        wrapped_count += 1;
+    }
+    Ok(wrapped_count)
+}
+
+/// Revokes a user share of `rel_path` (the server also drops the
+/// recipient's wrapped keys).
+pub async fn unshare_file(
+    config: &SyncConfig,
+    rel_path: &str,
+    recipient: &str,
+) -> Result<(), SyncError> {
+    let http = Http::new(config)?;
+    let server_path = format!("/{}", rel_path.trim_start_matches('/'));
+    let list_path = format!("/api/shares?path={}", encode(&server_path));
+    let (status, body) = http.get_json(&list_path).await?;
+    if status != 200 {
+        return Err(SyncError::Server {
+            status,
+            path: list_path,
+        });
+    }
+    let share_id = body["shares"]
+        .as_array()
+        .and_then(|shares| {
+            shares.iter().find(|share| {
+                share["kind"] == "user" && share["recipient"].as_str() == Some(recipient)
+            })
+        })
+        .and_then(|share| share["id"].as_i64());
+    let Some(share_id) = share_id else {
+        return Err(SyncError::E2ee(format!(
+            "no share of {server_path} with {recipient}"
+        )));
+    };
+    let path = format!("/api/shares/{share_id}");
+    let status = http.delete(&path).await?;
+    if status != 204 {
+        return Err(SyncError::Server { status, path });
+    }
+    Ok(())
+}
+
+/// Publishes this user's X25519 identity, creating it on first use.
+///
+/// Part of E2EE setup: after this, other users can wrap file keys for
+/// this account. Requires unlocked E2EE options (passphrase/recovery).
+pub async fn publish_identity(config: &SyncConfig) -> Result<(), SyncError> {
+    let http = Http::new(config)?;
+    if unlock_e2ee(&http, config).await?.is_none() {
+        return Err(SyncError::E2ee(
+            "identity setup requires e2ee options".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Uploads a keyring to the server (setup side).
@@ -323,6 +514,24 @@ impl Http {
         Ok(response.status().as_u16())
     }
 
+    async fn post_json(&self, path: &str, value: &Value) -> Result<(u16, Value), SyncError> {
+        let response = self
+            .client
+            .post(self.url(path))
+            .basic_auth(&self.username, Some(&self.password))
+            .json(value)
+            .send()
+            .await?;
+        let status = response.status().as_u16();
+        let bytes = response.bytes().await?.to_vec();
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        Ok((status, value))
+    }
+
     async fn put_json(&self, path: &str, value: &Value) -> Result<(u16, Value), SyncError> {
         let response = self
             .client
@@ -373,6 +582,8 @@ struct RemoteFile {
     content_id: String,
     /// Whether the server holds this file encrypted (RFC 0007).
     encrypted: bool,
+    /// True for entries under `Shared with me/`.
+    shared: bool,
 }
 
 async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncError> {
@@ -409,12 +620,38 @@ async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncE
                         path: server_path.to_string(),
                         content_id: content_id.to_string(),
                         encrypted: entry["encrypted"].as_bool().unwrap_or(false),
+                        shared: false,
                     },
                 );
             }
         }
         if !body["has_more"].as_bool().unwrap_or(false) || !advanced {
             break;
+        }
+    }
+
+    // Files shared with the user (read-only mirror under `Shared with me/`).
+    let (status, body) = http.get_json("/api/sync/shared-tree").await?;
+    if status == 200
+        && let Some(entries) = body["entries"].as_array()
+    {
+        for entry in entries {
+            let Some(server_path) = entry["path"].as_str() else {
+                continue;
+            };
+            let Some(content_id) = entry["content_id"].as_str() else {
+                continue;
+            };
+            let rel = server_path.trim_start_matches('/').to_string();
+            remote.insert(
+                rel,
+                RemoteFile {
+                    path: server_path.to_string(),
+                    content_id: content_id.to_string(),
+                    encrypted: entry["encrypted"].as_bool().unwrap_or(false),
+                    shared: true,
+                },
+            );
         }
     }
     Ok(remote)
@@ -469,18 +706,25 @@ async fn pull(
                     "remote file /{rel} is encrypted but no e2ee roots are configured"
                 )));
             };
-            if !e2ee.options.covers(rel) {
+            // Shared files are encrypted by their owner; local roots only
+            // govern which of *our* files we encrypt.
+            if !file.shared && !e2ee.options.covers(rel) {
                 return Err(SyncError::E2ee(format!(
                     "remote file /{rel} is encrypted but not under a configured e2ee root"
                 )));
             }
-            Some(load_file_key(http, state, e2ee, rel).await?)
+            if file.shared {
+                Some(load_shared_file_key(http, e2ee, &file.path).await?)
+            } else {
+                Some(load_file_key(http, state, e2ee, rel).await?)
+            }
         } else {
             None
         };
         let mut data = Vec::with_capacity(manifest.size as usize);
+        let chunk_context = file.shared.then_some(file.path.as_str());
         for chunk in &manifest.chunks {
-            let bytes = chunk_bytes(http, config, &chunk.hash.to_hex()).await?;
+            let bytes = chunk_bytes(http, config, &chunk.hash.to_hex(), chunk_context).await?;
             match &file_key {
                 Some(key) => data.extend_from_slice(&key.decrypt_chunk(&bytes)?),
                 None => data.extend_from_slice(&bytes),
@@ -502,6 +746,7 @@ async fn pull(
                 size: data.len() as u64,
                 mtime_ns: mtime_ns(&local)?,
                 deleted: false,
+                shared: file.shared,
             },
         );
         report.pulled += 1;
@@ -559,6 +804,25 @@ async fn load_file_key(
 /// Returns the key plus, for new files, the wrapped blob to upload after
 /// the manifest commit has created the node (the server stores keys per
 /// node, so the node must exist first).
+/// Fetches and unwraps the share key for a file shared with this user.
+async fn load_shared_file_key(
+    http: &Http,
+    e2ee: &E2ee,
+    server_path: &str,
+) -> Result<FileKey, SyncError> {
+    let path = format!("/api/e2ee/share-key?path={}", encode(server_path));
+    let (status, body) = http.get_json(&path).await?;
+    if status != 200 {
+        return Err(SyncError::E2ee(format!(
+            "no share key for {server_path}; ask the owner to re-share it"
+        )));
+    }
+    let wrapped = STANDARD
+        .decode(body["wrapped_key"].as_str().unwrap_or_default())
+        .map_err(|error| SyncError::E2ee(format!("share key: {error}")))?;
+    Ok(e2ee.identity.unwrap_file_key(&wrapped)?)
+}
+
 async fn fetch_or_create_file_key(
     http: &Http,
     state: &mut State,
@@ -594,7 +858,12 @@ async fn fetch_or_create_file_key(
     }
 }
 
-async fn chunk_bytes(http: &Http, config: &SyncConfig, hash: &str) -> Result<Vec<u8>, SyncError> {
+async fn chunk_bytes(
+    http: &Http,
+    config: &SyncConfig,
+    hash: &str,
+    context: Option<&str>,
+) -> Result<Vec<u8>, SyncError> {
     let cached = config
         .local_dir
         .join(".kolimi")
@@ -604,7 +873,10 @@ async fn chunk_bytes(http: &Http, config: &SyncConfig, hash: &str) -> Result<Vec
     if let Ok(bytes) = std::fs::read(&cached) {
         return Ok(bytes);
     }
-    let path = format!("/api/chunks/{hash}");
+    let path = match context {
+        Some(context) => format!("/api/chunks/{hash}?path={}", encode(context)),
+        None => format!("/api/chunks/{hash}"),
+    };
     let (status, bytes) = http.get(&path).await?;
     if status != 200 {
         return Err(SyncError::Server { status, path });
@@ -724,6 +996,7 @@ async fn push(
                         size: metadata.len(),
                         mtime_ns: mtime,
                         deleted: false,
+                        shared: false,
                     },
                 );
                 report.pushed += 1;
@@ -744,9 +1017,9 @@ async fn push(
     // was not already removed by pull) is deleted remotely.
     let deleted: Vec<String> = state
         .files
-        .keys()
-        .filter(|rel| !config.local_dir.join(rel.as_str()).exists())
-        .cloned()
+        .iter()
+        .filter(|(rel, known)| !known.shared && !config.local_dir.join(rel.as_str()).exists())
+        .map(|(rel, _)| rel.clone())
         .collect();
     for rel in deleted {
         let path = format!("/dav{}", encode_path(&format!("/{rel}")));
@@ -799,6 +1072,10 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), S
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if name == ".kolimi" {
+            continue;
+        }
+        // Shared files are read-only mirrors of someone else's tree.
+        if name == SHARED_MOUNT && dir == root {
             continue;
         }
         if path.is_dir() {

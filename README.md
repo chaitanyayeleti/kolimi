@@ -148,8 +148,21 @@ KOLIMI_E2EE_PASSPHRASE=... kolimi-sync --server ... --user alice \
     --local ~/Kolimi --e2ee-root Private
 ```
 
-Unlock works with the passphrase, the recovery code, or (designed,
-RFC 0007) a passkey PRF. The server never indexes or previews encrypted
+Sharing encrypted files with named users:
+
+```sh
+# the recipient must have set up E2EE once (--e2ee-setup)
+kolimi-sync --server ... --user alice --password ... --local ~/Kolimi \
+    --e2ee-root Private --share Private/doc.txt --with bob
+```
+
+The owner's client wraps the file keys for bob (X25519); bob's next
+sync pulls the file decrypted into `Shared with me/` (read-only).
+`--unshare` revokes it. Group/link shares of encrypted files are
+refused (no per-member keys yet).
+
+Unlock works with the passphrase, the recovery code, or a passkey PRF
+(platform shells supply the PRF output; RFC 0007). The server never indexes or previews encrypted
 content, and sharing encrypted files is disabled in v1. Test vectors
 are committed (`crates/kolimi-crypto/tests/vectors.json`) for other
 implementations; `crates/kolimi-crypto` holds the primitives.
@@ -315,8 +328,21 @@ KOLIMI_E2EE_PASSPHRASE=... kolimi-sync --server ... --user alice \
     --local ~/Kolimi --e2ee-root Private
 ```
 
-Unlock works with the passphrase, the recovery code, or (designed,
-RFC 0007) a passkey PRF. The server never indexes or previews encrypted
+Sharing encrypted files with named users:
+
+```sh
+# the recipient must have set up E2EE once (--e2ee-setup)
+kolimi-sync --server ... --user alice --password ... --local ~/Kolimi \
+    --e2ee-root Private --share Private/doc.txt --with bob
+```
+
+The owner's client wraps the file keys for bob (X25519); bob's next
+sync pulls the file decrypted into `Shared with me/` (read-only).
+`--unshare` revokes it. Group/link shares of encrypted files are
+refused (no per-member keys yet).
+
+Unlock works with the passphrase, the recovery code, or a passkey PRF
+(platform shells supply the PRF output; RFC 0007). The server never indexes or previews encrypted
 content, and sharing encrypted files is disabled in v1. Test vectors
 are committed (`crates/kolimi-crypto/tests/vectors.json`) for other
 implementations; `crates/kolimi-crypto` holds the primitives.

@@ -396,12 +396,16 @@ impl Vfs {
         user_id: i64,
         raw: &str,
     ) -> Result<kolimi_chunk::Manifest, VfsError> {
-        let node = self.resolve(user_id, raw).await?;
-        if node.is_dir() {
+        // Mount-aware: shared files live in the owner's store.
+        let access = self.resolve_access(user_id, raw).await?;
+        if access.node.is_dir() {
             return Err(VfsError::IsCollection);
         }
-        let content_id = node.content_id.ok_or(VfsError::NotFound)?;
-        Ok(self.store.get_manifest(user_id, &content_id).await?)
+        let content_id = access.node.content_id.ok_or(VfsError::NotFound)?;
+        Ok(self
+            .store
+            .get_manifest(access.owner_id, &content_id)
+            .await?)
     }
 
     /// Returns a manifest by content id (for delta download).

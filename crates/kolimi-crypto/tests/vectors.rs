@@ -7,8 +7,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use kolimi_crypto::{
-    Argon2Params, FileKey, kek_from_passphrase, kek_from_prf, kek_from_recovery_code,
-    wrap_with_nonce,
+    Argon2Params, FileKey, Identity, kek_from_passphrase, kek_from_prf, kek_from_recovery_code,
+    wrap_with_ephemeral_nonce, wrap_with_nonce,
 };
 use serde_json::Value;
 
@@ -68,6 +68,38 @@ fn key_wrap_matches_committed_vector() {
     let aad = case["aad"].as_str().unwrap().as_bytes();
     let wrapped = wrap_with_nonce(&kek, &key, aad, &nonce).unwrap();
     assert_eq!(hex(&wrapped), case["wrapped"].as_str().unwrap());
+}
+
+#[test]
+fn share_key_wrap_matches_committed_vector() {
+    let vectors = vectors();
+    let case = &vectors["share_wrap"];
+    let recipient_secret: [u8; 32] = unhex(case["recipient_secret"].as_str().unwrap())
+        .try_into()
+        .unwrap();
+    let recipient = Identity::from_bytes(recipient_secret);
+    assert_eq!(
+        hex(&recipient.public_key()),
+        case["recipient_public"].as_str().unwrap()
+    );
+    let ephemeral_secret: [u8; 32] = unhex(case["ephemeral_secret"].as_str().unwrap())
+        .try_into()
+        .unwrap();
+    let nonce: [u8; 24] = unhex(case["nonce"].as_str().unwrap()).try_into().unwrap();
+    let file_key: [u8; 32] = unhex(case["file_key"].as_str().unwrap())
+        .try_into()
+        .unwrap();
+    let wrapped = wrap_with_ephemeral_nonce(
+        &ephemeral_secret,
+        &recipient.public_key(),
+        &file_key,
+        &nonce,
+    )
+    .unwrap();
+    assert_eq!(hex(&wrapped), case["wrapped"].as_str().unwrap());
+    // The recipient can unwrap it back to the file key.
+    let unwrapped = recipient.unwrap_file_key(&wrapped).unwrap();
+    assert_eq!(unwrapped.as_bytes(), &file_key);
 }
 
 #[test]

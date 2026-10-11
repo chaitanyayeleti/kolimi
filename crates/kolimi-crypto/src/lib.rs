@@ -24,11 +24,13 @@
 
 mod error;
 mod file;
+mod identity;
 mod keyring;
 mod keys;
 
 pub use error::CryptoError;
 pub use file::FileKey;
+pub use identity::{Identity, SHARE_KEY_LEN, wrap_with_ephemeral, wrap_with_ephemeral_nonce};
 pub use keyring::{
     Keyring, Wrap, generate_recovery_code, recovery_code_display, recovery_code_parse,
 };

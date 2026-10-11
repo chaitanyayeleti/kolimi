@@ -141,6 +141,172 @@ pub async fn put_file_key(
     }
 }
 
+/// `GET /api/e2ee/identity` — the caller's identity (private key wrapped).
+pub async fn get_identity(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    match state.db.identity(user.user_id).await {
+        Ok(Some((public_key, wrapped_private))) => Json(json!({
+            "public_key": STANDARD.encode(&public_key),
+            "wrapped_private": STANDARD.encode(&wrapped_private),
+        }))
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no E2EE identity" })),
+        )
+            .into_response(),
+        Err(_) => api::internal_error(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct IdentityRequest {
+    public_key: String,
+    wrapped_private: String,
+}
+
+/// `PUT /api/e2ee/identity` — publish an identity (opaque private key).
+pub async fn put_identity(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(req): Json<IdentityRequest>,
+) -> Response {
+    let (Ok(public_key), Ok(wrapped_private)) = (
+        STANDARD.decode(&req.public_key),
+        STANDARD.decode(&req.wrapped_private),
+    ) else {
+        return api::bad_request("keys must be base64");
+    };
+    if public_key.len() != 32 {
+        return api::bad_request("public key must be 32 bytes");
+    }
+    match state
+        .db
+        .set_identity(user.user_id, &public_key, &wrapped_private)
+        .await
+    {
+        Ok(()) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "e2ee.identity_set",
+                &user.username,
+                json!({}),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `GET /api/e2ee/identity/{username}` — a user's published public key.
+pub async fn public_identity(
+    State(state): State<AppState>,
+    Extension(_user): Extension<CurrentUser>,
+    axum::extract::Path(username): axum::extract::Path<String>,
+) -> Response {
+    let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
+        return api::not_found();
+    };
+    match state.db.public_key(target.id).await {
+        Ok(Some(public_key)) => {
+            Json(json!({ "public_key": STANDARD.encode(&public_key) })).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "user has no E2EE identity" })),
+        )
+            .into_response(),
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// Query for share-key requests.
+#[derive(Deserialize)]
+pub struct ShareKeyQuery {
+    path: String,
+    #[serde(default)]
+    recipient: Option<String>,
+}
+
+/// `GET /api/e2ee/share-key?path=` — the caller's wrapped key for a
+/// shared encrypted file (any access level; only the recipient has one).
+pub async fn get_share_key(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<ShareKeyQuery>,
+) -> Response {
+    let access = match state.vfs.resolve_access(user.user_id, &query.path).await {
+        Ok(access) => access,
+        Err(kolimi_vfs::VfsError::NotFound) => return api::not_found(),
+        Err(_) => return api::internal_error(),
+    };
+    match state.db.share_key(access.node.id, user.user_id).await {
+        Ok(Some(wrapped)) => {
+            Json(json!({ "wrapped_key": STANDARD.encode(&wrapped) })).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no share key for this file" })),
+        )
+            .into_response(),
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `PUT /api/e2ee/share-key?path=&recipient=` — the owner wraps a file
+/// key for a recipient (ECIES; the server stores it opaquely).
+pub async fn put_share_key(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<ShareKeyQuery>,
+    body: Body,
+) -> Response {
+    let Some(recipient) = query.recipient.as_deref() else {
+        return api::bad_request("recipient is required");
+    };
+    let node = match owned_file(&state, &user, &query.path).await {
+        Ok(node) => node,
+        Err(response) => return response,
+    };
+    let Some(target) = state.db.find_user(recipient).await.ok().flatten() else {
+        return api::bad_request("no such user");
+    };
+    if state
+        .db
+        .public_key(target.id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return api::bad_request("recipient has no E2EE identity");
+    }
+    let wrapped = match read_body(body, MAX_KEY_BODY).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    match state.db.set_share_key(node.id, target.id, &wrapped).await {
+        Ok(()) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "e2ee.share_key_set",
+                &query.path,
+                json!({ "recipient": recipient }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
 async fn owned_file(
     state: &AppState,
     user: &CurrentUser,

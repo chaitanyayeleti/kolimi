@@ -59,8 +59,14 @@ pub async fn create(
     if access.node.parent_id.is_none() {
         return api::bad_request("the root cannot be shared");
     }
-    if state.db.is_encrypted(access.node.id).await.unwrap_or(false) {
-        return api::bad_request("encrypted files cannot be shared yet (RFC 0007 v1)");
+    // Encrypted content can only be shared with named users: the owner's
+    // client wraps file keys per recipient (RFC 0007 v2). Group and link
+    // shares would hand out ciphertext nobody can read, so refuse them
+    // for encrypted subtrees.
+    if req.kind != "user" && subtree_has_encrypted(&state, access.owner_id, access.node.id).await {
+        return api::bad_request(
+            "encrypted files can only be shared with named users (RFC 0007 v2)",
+        );
     }
 
     let (result, generated): (Result<ShareRow, DbError>, Option<String>) = match req.kind.as_str() {
@@ -416,6 +422,11 @@ pub async fn delete(
     }
     match state.db.delete_share(share_id).await {
         Ok(true) => {
+            if share.kind == "user"
+                && let Some(recipient) = share.recipient_user_id
+            {
+                let _ = state.db.delete_share_keys(share.node_id, recipient).await;
+            }
             audit(
                 &state,
                 Some(user.user_id),
@@ -827,6 +838,35 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 
 fn not_found() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response()
+}
+
+/// Whether `node_id` or any descendant of it is encrypted.
+async fn subtree_has_encrypted(state: &AppState, owner_id: i64, node_id: i64) -> bool {
+    let Ok(encrypted) = state.db.encrypted_node_ids(owner_id).await else {
+        return false;
+    };
+    if encrypted.is_empty() {
+        return false;
+    }
+    let set: std::collections::HashSet<i64> = encrypted.into_iter().collect();
+    if set.contains(&node_id) {
+        return true;
+    }
+    let Ok(nodes) = state.db.all_live_nodes(owner_id).await else {
+        return false;
+    };
+    let parents: std::collections::HashMap<i64, Option<i64>> =
+        nodes.iter().map(|node| (node.id, node.parent_id)).collect();
+    for id in &set {
+        let mut current = parents.get(id).copied().flatten();
+        while let Some(parent) = current {
+            if parent == node_id {
+                return true;
+            }
+            current = parents.get(&parent).copied().flatten();
+        }
+    }
+    false
 }
 
 fn forbidden(message: &str) -> Response {
