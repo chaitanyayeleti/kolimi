@@ -28,8 +28,8 @@ matches your environment; all of them run the same program.
 
 For a systemd host (VPS, home server, Raspberry Pi). Downloads the
 signed release, verifies the checksum (and cosign signature when
-`cosign` is installed), installs the systemd unit, creates the admin
-account and prints the generated password once:
+`cosign` is installed), installs `kolimi-server` + `kolimi-sync`,
+creates the admin account and prints the generated password once:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/chaitanyayeleti/kolimi/main/scripts/install.sh | sh
@@ -47,11 +47,25 @@ Useful flags:
   --no-systemd                 # containers / non-systemd hosts
 ```
 
-Then:
+Then install the systemd unit template + env file and enable it:
 
 ```sh
+sudo install -Dm644 packaging/systemd/kolimi.service /etc/systemd/system/kolimi.service
+sudo install -Dm644 packaging/systemd/kolimi.env.example /etc/kolimi/kolimi.env
 sudoedit /etc/kolimi/kolimi.env     # set KOLIMI_ORIGIN to your URL
+sudo systemctl daemon-reload
 sudo systemctl enable --now kolimi
+```
+
+If you only used the one-liner (no local checkout), fetch the same
+files from GitHub first:
+
+```sh
+sudo install -d /etc/kolimi
+sudo curl -fsSL https://raw.githubusercontent.com/chaitanyayeleti/kolimi/main/packaging/systemd/kolimi.service \
+  -o /etc/systemd/system/kolimi.service
+sudo curl -fsSL https://raw.githubusercontent.com/chaitanyayeleti/kolimi/main/packaging/systemd/kolimi.env.example \
+  -o /etc/kolimi/kolimi.env
 ```
 
 ## Arch Linux (AUR)
