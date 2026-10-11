@@ -94,6 +94,9 @@ docker run -d --name kolimi \
 
 - The image is distroless and runs as nonroot (uid 65532); the `/data`
   volume is pre-owned so named volumes inherit the right ownership.
+- The build compiles the web UI to WebAssembly and embeds it in the
+  binary, so the first `docker build` takes a few minutes (it installs
+  `wasm-bindgen-cli` and builds `kolimi-ui`).
 - Compose examples: `packaging/docker/compose.yaml` (direct port) and
   `packaging/docker/compose.traefik.yaml` (TLS via Traefik, below).
 - Create the first admin inside the container:

@@ -27,12 +27,17 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }},wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake musl-tools
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+      - name: Stage the web UI (embedded into the server binary)
+        run: chmod +x scripts/build-ui.sh && scripts/build-ui.sh
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p kolimi-server -p kolimi-sync
       - name: Package

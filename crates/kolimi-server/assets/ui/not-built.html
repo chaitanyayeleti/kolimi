@@ -5,13 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>Kolimi</title>
-    <link rel="stylesheet" href="/app/style.css" />
+    <style>
+      body {
+        font: 15px/1.6 system-ui, sans-serif;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+      }
+      main {
+        max-width: 34rem;
+        padding: 2rem;
+      }
+      code {
+        background: #8883;
+        padding: 0.1em 0.35em;
+        border-radius: 0.25em;
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module">
-      import init from "/app/app.js";
-      init();
-    </script>
+    <main>
+      <h1>Kolimi</h1>
+      <p>The web UI was not built into this binary.</p>
+      <p>
+        Rebuild with <code>scripts/build-ui.sh</code> before
+        <code>cargo build</code> (or use the official image/release), then
+        reload this page.
+      </p>
+    </main>
   </body>
 </html>

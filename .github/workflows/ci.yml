@@ -137,7 +137,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+      - name: Stage the web UI (embedded into the server binary)
+        run: chmod +x scripts/build-ui.sh && scripts/build-ui.sh
       - name: Build release binaries
         run: cargo build --release --locked -p kolimi-server -p kolimi-sync
       - name: One-command install to a working share link
@@ -151,6 +158,9 @@ jobs:
             --bind 127.0.0.1:18080 --origin http://localhost:18080 &
           sleep 2
           curl -fsS http://127.0.0.1:18080/healthz
+          # The install must ship a usable UI, not just the placeholder.
+          curl -fsS -o /dev/null -w '%{content_type}' \
+            http://127.0.0.1:18080/app/app_bg.wasm | grep -q application/wasm
           printf 'shared via one-command install' > "$RUNNER_TEMP/doc.txt"
           curl -fsS -u admin:install-smoke-pass-123 -T "$RUNNER_TEMP/doc.txt" \
             http://127.0.0.1:18080/dav/doc.txt -o /dev/null
@@ -181,7 +191,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+      - name: Stage the web UI (so the size gate measures the shipped binary)
+        run: chmod +x scripts/build-ui.sh && scripts/build-ui.sh
       - name: Load gates (release)
         run: cargo test --release --locked -p kolimi-server --test load -- --ignored --nocapture
       - name: Binary size gate (< 50 MB)

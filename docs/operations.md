@@ -160,6 +160,7 @@ See [install.md](install.md#upgrading). Migrations are forward-only.
 
 | Symptom | Likely cause / fix |
 | --- | --- |
+| Blank page at `/app/` | The binary was built without the web UI. Run `scripts/build-ui.sh` before `cargo build`, or use the official image/release (which stage it automatically). |
 | Passkey registration fails | `KOLIMI_ORIGIN` does not match the URL you visit (scheme + host + port). Fix and restart. |
 | Cookies not sent over HTTPS | Set `KOLIMI_SECURE_COOKIES=true` (and ensure the proxy forwards https). |
 | 413 on uploads | The reverse proxy's body limit; set `client_max_body_size 0` (nginx) and `proxy_request_buffering off`. |
