@@ -89,6 +89,14 @@ request counts and latency histograms by route template, uploads,
 preview outcomes, login failures. Labels never contain paths, file
 names, or user identifiers. `/healthz` is the liveness endpoint.
 
+The endpoint itself is unauthenticated, so it must not be published
+directly. The sample `packaging/docker/compose.traefik.yaml` puts
+`/metrics` on its own router behind basic auth (and excludes it from the
+public router); services on the compose network can still scrape
+`http://kolimi:8080/metrics` without credentials. If you front Kolimi
+with your own proxy, do the same — basic auth, an IP allowlist, or keep
+it on the internal interface only.
+
 Scrape example:
 
 ```yaml

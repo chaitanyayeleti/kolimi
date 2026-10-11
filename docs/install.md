@@ -120,12 +120,20 @@ Docker labels, and the app publishes no ports at all.
 
 ```sh
 cd packaging/docker
-cp .env.example .env         # set KOLIMI_DOMAIN and ACME_EMAIL
+cp .env.example .env         # set KOLIMI_DOMAIN, ACME_EMAIL, KOLIMI_METRICS_USERS
 docker compose -f compose.traefik.yaml up -d
 
 # create the first admin inside the container
 docker compose -f compose.traefik.yaml exec kolimi \
   kolimi-server user add admin
+```
+
+Generate the metrics basic-auth line (the app serves `/metrics` without
+auth, so Traefik guards it) and put the output in `.env` unchanged:
+
+```sh
+docker run --rm httpd:2.4-alpine htpasswd -nbB metrics 'change-me'
+# metrics:$2y$05$...   →  KOLIMI_METRICS_USERS=metrics:$2y$05$...
 ```
 
 What the compose file sets up:
@@ -136,8 +144,19 @@ What the compose file sets up:
 - HTTP→HTTPS redirect on port 80; the ACME account and certificates live
   in the `traefik-acme` volume.
 - The Docker socket is mounted read-only (Traefik only watches labels).
+- `/metrics` is served by a **separate router behind basic auth**, and is
+  excluded from the public router. `https://$KOLIMI_DOMAIN/metrics` then
+  returns `401` without credentials. (Services on the compose network can
+  still scrape `http://kolimi:8080/metrics` directly, without auth.)
 - `kolimi-data` holds the database and blobs; back it up as described in
   [operations.md](operations.md#backup-and-restore).
+
+Confirm the hash reached the container as a single `$` (not `$$`):
+
+```sh
+docker inspect docker-kolimi-1 --format \
+  '{{ index .Config.Labels "traefik.http.middlewares.kolimi-metrics-auth.basicauth.users" }}'
+```
 
 Requirements: DNS for `KOLIMI_DOMAIN` already pointing at the host, and
 ports 80/443 reachable (the TLS challenge needs port 443). WebDAV,

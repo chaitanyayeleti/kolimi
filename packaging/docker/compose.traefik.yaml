@@ -1,6 +1,7 @@
 # Kolimi behind Traefik with automatic HTTPS (Let's Encrypt).
 #
-#   1. cp .env.example .env  and set KOLIMI_DOMAIN + ACME_EMAIL
+#   1. cp .env.example .env  and set KOLIMI_DOMAIN + ACME_EMAIL +
+#      KOLIMI_METRICS_USERS  (see .env.example; /metrics is behind basic auth)
 #   2. docker compose -f compose.traefik.yaml up -d
 #   3. open https://$KOLIMI_DOMAIN/app/ and create the admin:
 #        docker compose -f compose.traefik.yaml exec kolimi \
@@ -49,10 +50,22 @@ services:
       - kolimi-data:/data
     labels:
       - traefik.enable=true
-      - traefik.http.routers.kolimi.rule=Host(`${KOLIMI_DOMAIN}`)
+      # Main application router: everything except /metrics.
+      - traefik.http.routers.kolimi.rule=Host(`${KOLIMI_DOMAIN}`) && !Path(`/metrics`)
       - traefik.http.routers.kolimi.entrypoints=websecure
       - traefik.http.routers.kolimi.tls.certresolver=le
+      - traefik.http.routers.kolimi.priority=1
       - traefik.http.services.kolimi.loadbalancer.server.port=8080
+      # /metrics is unauthenticated in the app, so it gets its own
+      # higher-priority router behind basic auth. Generate the users line
+      # with: docker run --rm httpd:2.4-alpine htpasswd -nbB metrics 'pw'
+      - traefik.http.routers.kolimi-metrics.rule=Host(`${KOLIMI_DOMAIN}`) && Path(`/metrics`)
+      - traefik.http.routers.kolimi-metrics.entrypoints=websecure
+      - traefik.http.routers.kolimi-metrics.tls.certresolver=le
+      - traefik.http.routers.kolimi-metrics.priority=10
+      - traefik.http.routers.kolimi-metrics.service=kolimi
+      - traefik.http.routers.kolimi-metrics.middlewares=kolimi-metrics-auth
+      - traefik.http.middlewares.kolimi-metrics-auth.basicauth.users=${KOLIMI_METRICS_USERS:?set KOLIMI_METRICS_USERS in .env}
     networks:
       - kolimi
 
