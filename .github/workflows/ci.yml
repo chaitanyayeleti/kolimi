@@ -129,6 +129,61 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: cargo build --manifest-path apps/kolimi-tray/Cargo.toml
 
+  packaging:
+    name: packaging (deb, helm, install smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --release --locked -p kolimi-server -p kolimi-sync
+      - name: One-command install to a working share link
+        run: |
+          chmod +x scripts/install.sh
+          ./scripts/install.sh --binary target/release/kolimi-server \
+            --sync target/release/kolimi-sync \
+            --prefix "$RUNNER_TEMP/kolimi/usr" --data-dir "$RUNNER_TEMP/kolimi/data" \
+            --no-systemd --admin admin --password install-smoke-pass-123
+          KOLIMI_DATA="$RUNNER_TEMP/kolimi/data" "$RUNNER_TEMP/kolimi/usr/bin/kolimi-server" serve \
+            --bind 127.0.0.1:18080 --origin http://localhost:18080 &
+          sleep 2
+          curl -fsS http://127.0.0.1:18080/healthz
+          printf 'shared via one-command install' > "$RUNNER_TEMP/doc.txt"
+          curl -fsS -u admin:install-smoke-pass-123 -T "$RUNNER_TEMP/doc.txt" \
+            http://127.0.0.1:18080/dav/doc.txt -o /dev/null
+          LINK=$(curl -fsS -u admin:install-smoke-pass-123 -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"path":"/doc.txt","kind":"link"}' \
+            http://127.0.0.1:18080/api/shares)
+          URL=$(echo "$LINK" | python3 -c 'import sys,json; print(json.load(sys.stdin)["url"])')
+          PW=$(echo "$LINK" | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
+          TOKEN=${URL#/s/}
+          JAR="$RUNNER_TEMP/cookies.txt"
+          curl -fsS -c "$JAR" -X POST -H 'Content-Type: application/json' \
+            -d "{\"password\":\"$PW\"}" "http://127.0.0.1:18080/public/$TOKEN/unlock" -o /dev/null
+          curl -fsS -b "$JAR" "http://127.0.0.1:18080/public/$TOKEN/download" | grep -q 'one-command install'
+          kill %1
+      - name: Build .deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb -p kolimi-server --no-build
+          ls target/debian/*.deb
+      - name: Lint Helm chart
+        uses: azure/setup-helm@v4
+      - run: helm lint packaging/helm/kolimi && helm template packaging/helm/kolimi > /dev/null
+
+  vet:
+    name: cargo-vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: true
+      - run: cargo install cargo-vet --locked
+      - run: cargo vet --locked
+
   litmus:
     name: litmus (WebDAV compliance)
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'

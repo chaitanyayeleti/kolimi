@@ -183,6 +183,33 @@ kolimi-sync --server https://cloud.example.com --user alice \
 Run it from a timer or file watcher; the Tauri/mobile shells will wrap
 this core (uniffi bindings are the planned mobile path).
 
+## Install
+
+**One command** (downloads the signed release, installs the systemd
+unit, creates the admin account, prints your password once):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/chaitanyayeleti/kolimi/main/scripts/install.sh | sh
+```
+
+Other paths:
+
+- **Arch (AUR)**: `packaging/arch/PKGBUILD` — builds from source, ships
+  the systemd unit and sysusers/tmpfiles.
+- **Debian/Ubuntu**: `.deb` built with `cargo deb -p kolimi-server`
+  (postinst creates the `kolimi` user and state dir).
+- **Docker**: `docker build -f packaging/docker/Dockerfile -t kolimi .`
+  then `docker run -d -p 8080:8080 -v kolimi-data:/data kolimi`
+  (distroless, nonroot). Compose example in `packaging/docker/`.
+- **Kubernetes**: `helm install kolimi packaging/helm/kolimi`
+  (PVC, probes, nonroot, ingress values included).
+- **systemd**: `packaging/systemd/kolimi.service` with hardening
+  (strict filesystem protection, syscall filter, private tmp, umask 077).
+
+Release artifacts are signed with cosign (keyless, GitHub OIDC) and
+shipped with a CycloneDX SBOM; `install.sh` verifies checksums and, when
+`cosign` is installed, the signature.
+
 ## Web UI
 
 The Leptos (WASM) app is served from the binary at `/app/` (public share
@@ -289,6 +316,10 @@ and an independent decoder test. M5 clients complete: Tauri tray shell
 and UniFFI bindings (Kotlin/Swift/Python verified; Python exercised
 end-to-end). M2 scrub landed: the janitor re-verifies blobs
 incrementally with an audited cursor. Internal crypto review written
-(`docs/crypto-review.md`); external audit, E2EE sharing, and the
-wasm plugin host (M7) remain. 250+ tests; litmus 100%; rclone
-byte-identical.
+(`docs/crypto-review.md`). M7 packaging landed: install script (one
+command to a working, password-protected share link), AUR PKGBUILD,
+.deb, distroless Docker + compose, hardened systemd unit, Helm chart,
+tag-triggered release workflow (gnu + musl tarballs, sha256, cosign
+signatures, CycloneDX SBOM), and cargo-vet infrastructure in CI.
+External audit, E2EE sharing, and the wasm plugin host remain. 250+
+tests; litmus 100%; rclone byte-identical.

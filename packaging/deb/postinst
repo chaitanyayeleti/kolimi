@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+if ! getent group kolimi >/dev/null; then
+    addgroup --system kolimi
+fi
+if ! getent passwd kolimi >/dev/null; then
+    adduser --system --group --home /var/lib/kolimi --no-create-home \
+        --disabled-login --gecos "Kolimi server" kolimi
+fi
+install -d -o kolimi -g kolimi -m 700 /var/lib/kolimi
+
+#DEBHELPER#
+
+exit 0

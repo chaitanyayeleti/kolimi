@@ -47,3 +47,22 @@ tempfile.workspace = true
 tower.workspace = true
 url.workspace = true
 webauthn-authenticator-rs = { version = "0.5", default-features = false, features = ["softpasskey"] }
+
+[package.metadata.deb]
+name = "kolimi-server"
+maintainer = "Kolimi contributors <chaitanyachowdary125@live.com>"
+copyright = "2026 Kolimi contributors"
+section = "net"
+priority = "optional"
+depends = "$auto"
+recommends = "systemd"
+assets = [
+    ["target/release/kolimi-server", "usr/bin/", "755"],
+    ["target/release/kolimi-sync", "usr/bin/", "755"],
+    ["../../packaging/systemd/kolimi.service", "usr/lib/systemd/system/kolimi.service", "644"],
+    ["../../packaging/systemd/kolimi.sysusers", "usr/lib/sysusers.d/kolimi.conf", "644"],
+    ["../../packaging/systemd/kolimi.tmpfiles", "usr/lib/tmpfiles.d/kolimi.conf", "644"],
+    ["../../packaging/systemd/kolimi.env.example", "etc/kolimi/kolimi.env.example", "644"],
+    ["../../README.md", "usr/share/doc/kolimi-server/README.md", "644"],
+]
+maintainer-scripts = "../../packaging/deb"

@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+apps/kolimi-tray/target/
+crates/kolimi-server/assets/ui/
+!crates/kolimi-server/assets/ui/not-built.html
+/tmp/

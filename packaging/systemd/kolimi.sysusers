@@ -1,0 +1,2 @@
+# System user for the Kolimi server (used by the systemd unit).
+u kolimi - "Kolimi server" /var/lib/kolimi

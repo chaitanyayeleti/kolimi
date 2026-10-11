@@ -1,0 +1,42 @@
+[Unit]
+Description=Kolimi server — self-hosted files, calendars, and contacts
+Documentation=https://github.com/chaitanyayeleti/kolimi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kolimi
+Group=kolimi
+EnvironmentFile=-/etc/kolimi/kolimi.env
+ExecStart=/usr/local/bin/kolimi-server serve
+Restart=on-failure
+RestartSec=2s
+
+# Hardening: the server only needs its state directory and the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+StateDirectory=kolimi
+CacheDirectory=kolimi
+ReadWritePaths=/var/lib/kolimi
+LimitNOFILE=65536
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

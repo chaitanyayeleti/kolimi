@@ -1,0 +1,59 @@
+# Default values for the Kolimi chart.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/chaitanyayeleti/kolimi
+  tag: "" # defaults to .Chart.appVersion
+  pullPolicy: IfNotPresent
+
+# Public origin users visit; must match for passkeys (WebAuthn).
+origin: http://localhost:8080
+# Set true when the ingress terminates TLS.
+secureCookies: false
+
+service:
+  type: ClusterIP
+  port: 8080
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: kolimi.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Extra environment for the server (KOLIMI_TLS_CERT, RUST_LOG, ...).
+extraEnv: []
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
