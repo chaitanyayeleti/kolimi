@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2]
+
+### Added
+- Web UI **admin panel**: per-user storage quota editor, admin role
+  changes, enable/disable, delete, and a usage recheck (backed by the
+  admin quota/usage API).
+
 ## [0.1.1]
 
 ### Added
