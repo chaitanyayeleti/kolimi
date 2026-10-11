@@ -189,14 +189,19 @@ pub async fn handler(
             };
             match run_worker(&state, "image", &data, size).await {
                 Ok(png) => {
+                    state.metrics.preview("ok");
                     let mut response = Response::new(axum::body::Body::from(png));
                     response
                         .headers_mut()
                         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
                     response
                 }
-                Err(WorkerError::TooLarge) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+                Err(WorkerError::TooLarge) => {
+                    state.metrics.preview("unsupported");
+                    StatusCode::PAYLOAD_TOO_LARGE.into_response()
+                }
                 Err(WorkerError::Failed(_)) => {
+                    state.metrics.preview("error");
                     (StatusCode::UNPROCESSABLE_ENTITY, "preview failed").into_response()
                 }
             }

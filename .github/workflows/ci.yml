@@ -173,6 +173,22 @@ jobs:
         uses: azure/setup-helm@v4
       - run: helm lint packaging/helm/kolimi && helm template packaging/helm/kolimi > /dev/null
 
+  perf:
+    name: perf (load gates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Load gates (release)
+        run: cargo test --release --locked -p kolimi-server --test load -- --ignored --nocapture
+      - name: Binary size gate (< 50 MB)
+        run: |
+          cargo build --release --locked -p kolimi-server
+          size=$(stat -c%s target/release/kolimi-server)
+          echo "kolimi-server: $((size / 1024 / 1024)) MiB"
+          test "$size" -lt 52428800
+
   vet:
     name: cargo-vet
     runs-on: ubuntu-latest

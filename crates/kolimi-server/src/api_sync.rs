@@ -319,14 +319,17 @@ pub async fn commit_file(
         )
         .await
     {
-        Ok(Some(node)) => json_response(
-            StatusCode::OK,
-            json!({
-                "content_id": node.content_id.map(|hash| hash.to_hex()),
-                "size": node.size,
-                "etag": node.etag(),
-            }),
-        ),
+        Ok(Some(node)) => {
+            state.metrics.upload();
+            json_response(
+                StatusCode::OK,
+                json!({
+                    "content_id": node.content_id.map(|hash| hash.to_hex()),
+                    "size": node.size,
+                    "etag": node.etag(),
+                }),
+            )
+        }
         Ok(None) => {
             let current = state
                 .vfs

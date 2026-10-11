@@ -56,6 +56,7 @@ kolimi-vfs = { version = "0.0.1", path = "crates/kolimi-vfs" }
 kolimi-webdav = { version = "0.0.1", path = "crates/kolimi-webdav" }
 mime_guess = "2"
 percent-encoding = "2"
+prometheus = "0.14"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 quick-xml = "0.42"
 rpassword = "7"

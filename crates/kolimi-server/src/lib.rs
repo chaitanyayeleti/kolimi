@@ -12,6 +12,7 @@ pub mod api_shares;
 pub mod api_sync;
 pub mod auth;
 pub mod janitor;
+pub mod metrics;
 pub mod preview;
 pub mod search_indexer;
 pub mod ui;
@@ -60,6 +61,9 @@ pub enum InitError {
     /// Search index initialization failure.
     #[error("search index: {0}")]
     Search(#[from] kolimi_search::SearchError),
+    /// Metrics registration failure.
+    #[error("metrics: {0}")]
+    Metrics(#[from] prometheus::Error),
 }
 
 /// Shared application state.
@@ -85,6 +89,8 @@ pub struct AppState {
     pub preview_worker: PathBuf,
     /// Limits concurrent preview workers.
     pub preview_permits: Arc<tokio::sync::Semaphore>,
+    /// Prometheus metrics.
+    pub metrics: Arc<metrics::Metrics>,
 }
 
 impl AppState {
@@ -117,6 +123,7 @@ impl AppState {
             data_dir: data_dir.to_path_buf(),
             preview_worker,
             preview_permits: Arc::new(tokio::sync::Semaphore::new(preview::MAX_CONCURRENT_WORKERS)),
+            metrics: Arc::new(metrics::Metrics::new()?),
         })
     }
 }
@@ -189,6 +196,7 @@ pub fn build_app(state: AppState) -> Router {
 
     let public = Router::new()
         .route("/healthz", get(api::healthz))
+        .route("/metrics", get(metrics::handler))
         .route("/version", get(api::version))
         .route("/", get(ui::root))
         .route("/.well-known/caldav", get(ui::well_known))
@@ -217,9 +225,14 @@ pub fn build_app(state: AppState) -> Router {
         );
 
     let vfs = state.vfs.clone();
+    let metrics_state = state.clone();
     Router::new()
         .merge(public)
         .merge(protected)
+        .layer(axum::middleware::from_fn_with_state(
+            metrics_state,
+            metrics::record,
+        ))
         .layer(Extension(vfs))
         .layer(TraceLayer::new_for_http())
         .with_state(state)

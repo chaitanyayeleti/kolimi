@@ -58,6 +58,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
 
     let Some(user) = state.db.find_user(&req.username).await.ok().flatten() else {
         state.lockout.record_failure(&req.username);
+        state.metrics.login_failure();
         audit(
             &state,
             None,
@@ -71,6 +72,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     };
     if user.disabled {
         state.lockout.record_failure(&req.username);
+        state.metrics.login_failure();
         audit(
             &state,
             None,
@@ -84,6 +86,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     }
     if user.password_hash.is_empty() {
         state.lockout.record_failure(&req.username);
+        state.metrics.login_failure();
         audit(
             &state,
             None,
@@ -105,6 +108,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     .unwrap_or(false);
     if !verified {
         state.lockout.record_failure(&req.username);
+        state.metrics.login_failure();
         audit(
             &state,
             None,
@@ -148,6 +152,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
                 .unwrap_or(false)
             {
                 state.lockout.record_failure(&req.username);
+                state.metrics.login_failure();
                 audit(
                     &state,
                     None,
@@ -169,6 +174,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
             "recovery_code"
         } else {
             state.lockout.record_failure(&req.username);
+            state.metrics.login_failure();
             audit(
                 &state,
                 None,

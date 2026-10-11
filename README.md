@@ -254,6 +254,19 @@ TOTP (RFC 6238, 6 digits, 30 s) plus ten one-time recovery codes:
 All events (`totp.enable`, `totp.disable`, `auth.totp_required`,
 `totp.admin_disable`) land in the audit log.
 
+## Metrics and performance gates
+
+`GET /metrics` exposes Prometheus text metrics: request counts and
+latency histograms by route template, file uploads, preview outcomes,
+and login failures. Labels never contain paths, file names, or user
+identifiers.
+
+Performance gates run in CI on every push (`cargo test --release -p
+kolimi-server --test load -- --ignored`): 10k-file tree walk and change
+feed each under 5 s, metadata p95 within budget, and the release binary
+under 50 MB. Current numbers on a laptop: tree walk ~0.6 s, delta feed
+~0.1 s, browse p95 ~12 ms.
+
 ## Audit log
 
 Every security-relevant action (logins and failures, logouts, passkey

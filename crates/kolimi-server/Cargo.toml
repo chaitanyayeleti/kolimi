@@ -26,6 +26,7 @@ kolimi-vfs.workspace = true
 kolimi-webdav.workspace = true
 mime_guess.workspace = true
 percent-encoding.workspace = true
+prometheus.workspace = true
 qrcode.workspace = true
 rpassword.workspace = true
 rust-embed = "8"
