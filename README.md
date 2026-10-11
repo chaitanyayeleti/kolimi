@@ -237,6 +237,23 @@ implemented yet).
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE).
 
+## Two-factor authentication
+
+TOTP (RFC 6238, 6 digits, 30 s) plus ten one-time recovery codes:
+
+- **Web UI**: sign in, open **Passkeys** in the toolbar, enable
+  two-factor — scan the QR with any authenticator app, confirm a code,
+  and store the recovery codes shown once.
+- **Login**: the sign-in form asks for the code when the account has
+  two-factor enabled; a recovery code works in the same field and is
+  consumed on use.
+- Replays inside the validity window are refused (the consumed time
+  step is recorded), and lost devices can be recovered with a recovery
+  code or by an administrator: `kolimi-server user totp-disable alice`.
+
+All events (`totp.enable`, `totp.disable`, `auth.totp_required`,
+`totp.admin_disable`) land in the audit log.
+
 ## Audit log
 
 Every security-relevant action (logins and failures, logouts, passkey

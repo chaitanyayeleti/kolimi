@@ -252,6 +252,107 @@ impl Db {
         &self.pool
     }
 
+    /// Stores (or replaces) a user's TOTP secret, resetting replay state.
+    pub async fn set_totp_secret(&self, user_id: i64, secret: &str) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO totp_secrets (user_id, secret, created_at, last_step)
+             VALUES (?, ?, ?, NULL)
+             ON CONFLICT(user_id) DO UPDATE SET secret = excluded.secret,
+                 created_at = excluded.created_at, last_step = NULL",
+        )
+        .bind(user_id)
+        .bind(secret)
+        .bind(now_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The user's TOTP secret and last consumed step, if enrolled.
+    pub async fn totp_secret(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<(String, Option<i64>)>, DbError> {
+        Ok(
+            sqlx::query_as("SELECT secret, last_step FROM totp_secrets WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Consumes a TOTP time step; returns false if it was already used.
+    pub async fn consume_totp_step(&self, user_id: i64, step: u64) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE totp_secrets SET last_step = ?
+             WHERE user_id = ? AND (last_step IS NULL OR last_step < ?)",
+        )
+        .bind(step as i64)
+        .bind(user_id)
+        .bind(step as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Disables TOTP: removes the secret and all recovery codes.
+    pub async fn clear_totp(&self, user_id: i64) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM totp_secrets WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Replaces all recovery codes with a fresh set of hashes.
+    pub async fn replace_recovery_codes(
+        &self,
+        user_id: i64,
+        hashes: &[Vec<u8>],
+    ) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        for hash in hashes {
+            sqlx::query(
+                "INSERT INTO recovery_codes (user_id, code_hash, created_at) VALUES (?, ?, ?)",
+            )
+            .bind(user_id)
+            .bind(hash)
+            .bind(now_millis())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Number of unused recovery codes.
+    pub async fn count_recovery_codes(&self, user_id: i64) -> Result<i64, DbError> {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM recovery_codes WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count)
+    }
+
+    /// Consumes one recovery code by hash; returns false if unknown/used.
+    pub async fn consume_recovery_code(&self, user_id: i64, hash: &[u8]) -> Result<bool, DbError> {
+        let result = sqlx::query("DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?")
+            .bind(user_id)
+            .bind(hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// The scrub cursor for a user (`None` = cycle finished / not started).
     pub async fn scrub_cursor(&self, user_id: i64) -> Result<Option<String>, DbError> {
         Ok(

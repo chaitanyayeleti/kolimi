@@ -28,7 +28,6 @@ rust-version = "1.89"
 argon2 = "0.6"
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
-sha2 = "0.10"
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.23"
@@ -39,6 +38,7 @@ fastcdc = "3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.4"
 hex = "0.4"
+hmac = "0.12"
 http-body-util = "0.1"
 httpdate = "1"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
@@ -56,12 +56,16 @@ kolimi-vfs = { version = "0.0.1", path = "crates/kolimi-vfs" }
 kolimi-webdav = { version = "0.0.1", path = "crates/kolimi-webdav" }
 mime_guess = "2"
 percent-encoding = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 quick-xml = "0.42"
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
+sha1 = "0.10"
+sha2 = "0.10"
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 tempfile = "3"
+subtle = "2"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
 zeroize = "1"

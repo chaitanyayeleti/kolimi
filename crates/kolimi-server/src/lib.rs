@@ -4,6 +4,7 @@
 //! into a single axum application. TLS termination lives in the binary.
 
 pub mod api;
+pub mod api_2fa;
 pub mod api_browse;
 pub mod api_e2ee;
 pub mod api_passkey;
@@ -142,6 +143,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/sync/events", get(api_sync::events))
         .route("/api/manifests/{content_id}", get(api_sync::manifest_by_id))
         .route("/api/files/manifest", get(api_sync::file_manifest))
+        .route("/api/totp", get(api_2fa::status))
+        .route("/api/totp/begin", post(api_2fa::begin))
+        .route("/api/totp/enable", post(api_2fa::enable))
+        .route("/api/totp/disable", post(api_2fa::disable))
         .route(
             "/api/e2ee/keyring",
             get(api_e2ee::get_keyring).put(api_e2ee::put_keyring),

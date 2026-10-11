@@ -22,9 +22,7 @@ wildcards = "deny"
 deny = [
     { crate = "libssh2-sys" },
 ]
-skip = [
-    { crate = "openssl", reason = "forced by webauthn-rs-core for WebAuthn signature verification only; not used for TLS or hashing (rustls/RustCrypto). Prefer rustls for any new dependency; revisit when upstream offers a pure-Rust backend" },
-]
+skip = []
 
 [sources]
 unknown-registry = "deny"

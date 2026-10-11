@@ -293,3 +293,28 @@ button.active {
   border-radius: 4px;
   border: 1px solid var(--border);
 }
+
+/* TOTP enrollment */
+.totp-enroll {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    align-items: flex-start;
+    margin: 0.5rem 0 1rem;
+}
+.totp-enroll .qr svg {
+    background: #fff;
+    padding: 8px;
+    border-radius: 8px;
+}
+.totp-enroll code {
+    font-size: 1.05rem;
+    letter-spacing: 0.08em;
+}
+.recovery-codes ul {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.25rem 1rem;
+    font-family: ui-monospace, monospace;
+    margin: 0.25rem 0 0.75rem;
+}

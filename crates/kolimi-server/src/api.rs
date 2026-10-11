@@ -29,6 +29,9 @@ pub async fn version() -> Json<Value> {
 pub struct LoginRequest {
     username: String,
     password: String,
+    /// TOTP or recovery code, when two-factor is enrolled.
+    #[serde(default)]
+    code: Option<String>,
 }
 
 /// `POST /api/session` — exchanges credentials for a session cookie.
@@ -113,6 +116,83 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
         .await;
         return unauthorized("invalid credentials");
     }
+    // Second factor, when enrolled.
+    if let Some((secret_b32, last_step)) = state.db.totp_secret(user.id).await.ok().flatten() {
+        let Some(code) = req.code.as_deref() else {
+            audit(
+                &state,
+                Some(user.id),
+                Some(&user.username),
+                "auth.totp_required",
+                &user.username,
+                json!({}),
+            )
+            .await;
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "two-factor code required", "totp_required": true })),
+            )
+                .into_response();
+        };
+        let Ok(secret) = kolimi_auth::totp::TotpSecret::from_base32(&secret_b32) else {
+            return internal_error();
+        };
+        let now_secs = (kolimi_db::now_millis() / 1000) as u64;
+        let matched =
+            kolimi_auth::totp::verify(&secret, code, now_secs, last_step.map(|s| s as u64));
+        let method = if let Some(step) = matched {
+            if !state
+                .db
+                .consume_totp_step(user.id, step)
+                .await
+                .unwrap_or(false)
+            {
+                state.lockout.record_failure(&req.username);
+                audit(
+                    &state,
+                    None,
+                    None,
+                    "auth.login_failed",
+                    &req.username,
+                    json!({ "reason": "totp_replayed" }),
+                )
+                .await;
+                return unauthorized("invalid credentials");
+            }
+            "password+totp"
+        } else if state
+            .db
+            .consume_recovery_code(user.id, &kolimi_auth::totp::hash_recovery_code(code))
+            .await
+            .unwrap_or(false)
+        {
+            "recovery_code"
+        } else {
+            state.lockout.record_failure(&req.username);
+            audit(
+                &state,
+                None,
+                None,
+                "auth.login_failed",
+                &req.username,
+                json!({ "reason": "bad_totp" }),
+            )
+            .await;
+            return unauthorized("invalid credentials");
+        };
+        state.lockout.record_success(&req.username);
+        audit(
+            &state,
+            Some(user.id),
+            Some(&user.username),
+            "auth.login",
+            &user.username,
+            json!({ "method": method }),
+        )
+        .await;
+        return start_session(&state, &user).await;
+    }
+
     state.lockout.record_success(&req.username);
     audit(
         &state,

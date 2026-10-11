@@ -116,6 +116,8 @@ enum UserCommand {
     List,
     /// Make a user passkey-only (requires at least one registered passkey).
     PasskeyOnly { username: String },
+    /// Disable TOTP for a user (admin escape hatch when codes are lost).
+    TotpDisable { username: String },
 }
 
 #[derive(Subcommand)]
@@ -289,6 +291,22 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             )
             .await?;
             println!("{username} is now passkey-only ({passkeys} passkeys)");
+        }
+        UserCommand::TotpDisable { username } => {
+            let user = db
+                .find_user(&username)
+                .await?
+                .ok_or_else(|| format!("no such user: {username}"))?;
+            db.clear_totp(user.id).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "totp.admin_disable",
+                &username,
+                &serde_json::json!({}),
+            )
+            .await?;
+            println!("two-factor disabled for {username}");
         }
         UserCommand::List => {
             for user in db.list_users().await? {

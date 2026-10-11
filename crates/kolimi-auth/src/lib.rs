@@ -2,6 +2,7 @@
 //!
 //! - [`password`]: Argon2id hashing and verification
 //! - [`token`]: random session tokens, stored only as BLAKE3 hashes
+//! - [`totp`]: RFC 6238 two-factor codes and one-time recovery codes
 //! - [`lockout`]: in-memory failed-login tracking with lockout
 //! - [`cache`]: short-TTL cache for expensive Basic-auth verification
 //! - [`CurrentUser`]: the authenticated principal attached to requests
@@ -11,6 +12,7 @@ pub mod lockout;
 pub mod passkey;
 pub mod password;
 pub mod token;
+pub mod totp;
 mod user;
 
 pub use user::CurrentUser;
@@ -37,4 +39,7 @@ pub enum AuthError {
     /// belongs to a different user.
     #[error("passkey challenge is unknown, expired, already used, or belongs to a different user")]
     PasskeyChallenge,
+    /// TOTP secret or code problem.
+    #[error("totp error: {0}")]
+    Totp(String),
 }
