@@ -89,21 +89,24 @@ request counts and latency histograms by route template, uploads,
 preview outcomes, login failures. Labels never contain paths, file
 names, or user identifiers. `/healthz` is the liveness endpoint.
 
-The endpoint itself is unauthenticated, so it must not be published
-directly. The sample `packaging/docker/compose.traefik.yaml` puts
-`/metrics` on its own router behind basic auth (and excludes it from the
-public router); services on the compose network can still scrape
-`http://kolimi:8080/metrics` without credentials. If you front Kolimi
-with your own proxy, do the same — basic auth, an IP allowlist, or keep
-it on the internal interface only.
+`/metrics` is **administrators only**. A signed-in admin can open it in
+the browser (the session cookie is enough — no separate credential), and
+a scraper authenticates with HTTP Basic using an admin's username and
+password. Non-admins get `403`, anonymous requests `401`. A
+passkey-only (passwordless) admin cannot scrape, so point Prometheus at
+an admin account that still has a password.
 
 Scrape example:
 
 ```yaml
 scrape_configs:
   - job_name: kolimi
+    scheme: https
+    basic_auth:
+      username: admin
+      password: <admin password>
     static_configs:
-      - targets: ["127.0.0.1:8080"]
+      - targets: ["cloud.example.com"]
 ```
 
 ## E2EE operations

@@ -332,10 +332,10 @@ test fixtures.
 
 ## Metrics and performance gates
 
-`GET /metrics` exposes Prometheus text metrics: request counts and
-latency histograms by route template, file uploads, preview outcomes,
-and login failures. Labels never contain paths, file names, or user
-identifiers.
+`GET /metrics` exposes Prometheus text metrics (administrators only —
+session or HTTP Basic): request counts and latency histograms by route
+template, file uploads, preview outcomes, and login failures. Labels
+never contain paths, file names, or user identifiers.
 
 Performance gates run in CI on every push (`cargo test --release -p
 kolimi-server --test load -- --ignored`): 10k-file tree walk and change

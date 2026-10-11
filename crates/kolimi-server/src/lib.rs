@@ -219,6 +219,8 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/shareable", get(api_shares::shareable))
         .route("/api/groups/{name}/members", get(api_shares::group_members))
+        // Admin-only; the handler checks is_admin (401 when anonymous).
+        .route("/metrics", get(metrics::handler))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -226,7 +228,6 @@ pub fn build_app(state: AppState) -> Router {
 
     let public = Router::new()
         .route("/healthz", get(api::healthz))
-        .route("/metrics", get(metrics::handler))
         .route("/version", get(api::version))
         .route("/", get(ui::root))
         .route("/.well-known/caldav", get(ui::well_known))

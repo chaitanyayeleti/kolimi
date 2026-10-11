@@ -8,13 +8,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{MatchedPath, Request, State},
+    extract::{Extension, MatchedPath, Request, State},
+    http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, Opts, Registry, TextEncoder,
 };
+
+use kolimi_auth::CurrentUser;
 
 use crate::AppState;
 
@@ -134,8 +137,17 @@ pub async fn record(State(state): State<AppState>, request: Request, next: Next)
     response
 }
 
-/// `GET /metrics` — Prometheus scrape endpoint.
-pub async fn handler(State(state): State<AppState>) -> Response {
+/// `GET /metrics` — Prometheus scrape endpoint, administrators only.
+///
+/// Authenticate with an admin session (browser) or HTTP Basic with an
+/// admin's credentials (a scraper).
+pub async fn handler(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    if !user.is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     (
         [(
             axum::http::header::CONTENT_TYPE,
