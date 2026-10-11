@@ -39,7 +39,9 @@ services:
     build:
       context: ../..
       dockerfile: packaging/docker/Dockerfile
-    image: kolimi:latest
+    # Pull the published image (`docker compose pull`), or build locally
+    # (`docker compose up --build`).
+    image: ghcr.io/chaitanyayeleti/kolimi:0.1.0
     restart: unless-stopped
     environment:
       KOLIMI_ORIGIN: https://${KOLIMI_DOMAIN:?set KOLIMI_DOMAIN in .env}

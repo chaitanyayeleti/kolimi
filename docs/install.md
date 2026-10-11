@@ -97,14 +97,18 @@ Enable the unit as usual (`/etc/kolimi/kolimi.env`).
 
 ## Docker / Podman
 
+**Pull the published image** (no build needed):
+
 ```sh
-docker build -f packaging/docker/Dockerfile -t kolimi .
 docker run -d --name kolimi \
   -p 127.0.0.1:8080:8080 \
   -v kolimi-data:/data \
   -e KOLIMI_ORIGIN=http://localhost:8080 \
-  kolimi
+  ghcr.io/chaitanyayeleti/kolimi:0.1.0
 ```
+
+Tags: `0.1.0` (release), `0.1`, `latest`. Images are `linux/amd64`.
+Or build locally with `docker build -f packaging/docker/Dockerfile -t kolimi .`.
 
 - The image is distroless and runs as nonroot (uid 65532); the `/data`
   volume is pre-owned so named volumes inherit the right ownership.
