@@ -2,12 +2,8 @@
 # (it must match for passkeys).
 services:
   kolimi:
-    build:
-      context: ../..
-      dockerfile: packaging/docker/Dockerfile
-    # Pull the published image (`docker compose pull`), or build locally
-    # (`docker compose up --build`).
-    image: ghcr.io/chaitanyayeleti/kolimi:0.1.0
+    # Prebuilt image from GitHub Container Registry — no local build.
+    image: ghcr.io/chaitanyayeleti/kolimi:0.1.1
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"
