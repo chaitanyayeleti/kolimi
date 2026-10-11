@@ -1,0 +1,237 @@
+# Installing Kolimi
+
+Kolimi ships as a single server binary. Pick whichever deployment
+matches your environment; all of them run the same program.
+
+- [One-command install (systemd host)](#one-command-install)
+- [Arch Linux (AUR)](#arch-linux-aur)
+- [Debian / Ubuntu (.deb)](#debian--ubuntu-deb)
+- [Docker / Podman](#docker--podman)
+- [Kubernetes (Helm)](#kubernetes-helm)
+- [Manual / from source](#manual--from-source)
+- [TLS and reverse proxies](#tls-and-reverse-proxies)
+- [First run](#first-run)
+- [Upgrading](#upgrading)
+- [Uninstalling](#uninstalling)
+
+## Requirements
+
+- Linux (x86_64; aarch64 builds from source). Kernels with Landlock
+  (5.13+) get the strongest preview sandbox; older kernels fall back to
+  seccomp + rlimits only.
+- ~50 MB disk for the binary; data grows with your files.
+- No database server, no Redis, no PHP: SQLite (WAL) and the filesystem
+  are embedded.
+
+## One-command install
+
+For a systemd host (VPS, home server, Raspberry Pi). Downloads the
+signed release, verifies the checksum (and cosign signature when
+`cosign` is installed), installs the systemd unit, creates the admin
+account and prints the generated password once:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/chaitanyayeleti/kolimi/main/scripts/install.sh | sh
+```
+
+Useful flags:
+
+```sh
+./install.sh \
+  --prefix /usr/local \        # where binaries go
+  --data-dir /var/lib/kolimi \ # server state
+  --admin alice \              # first admin username
+  --password '…' \             # skip the generated password
+  --version v0.1.0 \           # pin a release
+  --no-systemd                 # containers / non-systemd hosts
+```
+
+Then:
+
+```sh
+sudoedit /etc/kolimi/kolimi.env     # set KOLIMI_ORIGIN to your URL
+sudo systemctl enable --now kolimi
+```
+
+## Arch Linux (AUR)
+
+```sh
+git clone https://aur.archlinux.org/kolimi-server.git
+cd kolimi-server && makepkg -si
+sudoedit /etc/kolimi/kolimi.env
+sudo systemctl enable --now kolimi
+```
+
+The package builds from source and installs the systemd unit,
+sysusers/tmpfiles entries, and the example environment file. The
+PKGBUILD lives in `packaging/arch/PKGBUILD` in the repository.
+
+## Debian / Ubuntu (.deb)
+
+The release job builds a `.deb`; you can also build one locally:
+
+```sh
+cargo install cargo-deb --locked
+cargo build --release -p kolimi-server -p kolimi-sync
+cargo deb -p kolimi-server --no-build
+sudo dpkg -i target/debian/kolimi-server_*.deb
+```
+
+The postinst creates the `kolimi` system user and `/var/lib/kolimi`.
+Enable the unit as usual (`/etc/kolimi/kolimi.env`).
+
+## Docker / Podman
+
+```sh
+docker build -f packaging/docker/Dockerfile -t kolimi .
+docker run -d --name kolimi \
+  -p 127.0.0.1:8080:8080 \
+  -v kolimi-data:/data \
+  -e KOLIMI_ORIGIN=http://localhost:8080 \
+  kolimi
+```
+
+- The image is distroless and runs as nonroot (uid 65532); the `/data`
+  volume is pre-owned so named volumes inherit the right ownership.
+- Compose example: `packaging/docker/compose.yaml`.
+- Create the first admin inside the container:
+
+```sh
+docker exec kolimi kolimi-server user add admin --password '…'
+```
+
+Podman works identically (`podman build`, `podman run`).
+
+## Kubernetes (Helm)
+
+```sh
+helm install kolimi packaging/helm/kolimi \
+  --set origin=https://cloud.example.com \
+  --set secureCookies=true \
+  --set persistence.size=50Gi \
+  --set ingress.enabled=true \
+  --set ingress.hosts[0].host=cloud.example.com
+```
+
+Key values (`packaging/helm/kolimi/values.yaml`): `image.repository/tag`,
+`origin` (must be the URL users visit — passkeys depend on it),
+`secureCookies`, `persistence.*`, `ingress.*`, `resources`, `extraEnv`.
+The deployment runs non-root with a read-only root filesystem, probes
+`/healthz`, and uses a `Recreate` strategy (SQLite on a RWO volume).
+
+Build and push the image first, e.g.:
+
+```sh
+docker build -f packaging/docker/Dockerfile -t ghcr.io/you/kolimi:0.1.0 .
+docker push ghcr.io/you/kolimi:0.1.0
+```
+
+## Manual / from source
+
+```sh
+git clone https://github.com/chaitanyayeleti/kolimi
+cd kolimi
+cargo build --release --locked -p kolimi-server -p kolimi-sync
+install -Dm755 target/release/kolimi-server ~/.local/bin/kolimi-server
+install -Dm755 target/release/kolimi-sync ~/.local/bin/kolimi-sync
+```
+
+Run it (all flags also have environment variables):
+
+```sh
+KOLIMI_DATA=./kolimi-data kolimi-server serve \
+  --bind 127.0.0.1:8080 \
+  --origin http://localhost:8080
+```
+
+| Flag | Env | Default |
+| --- | --- | --- |
+| `--bind` | `KOLIMI_BIND` | `127.0.0.1:8080` |
+| `--data` | `KOLIMI_DATA` | `./kolimi-data` |
+| `--origin` | `KOLIMI_ORIGIN` | `http://localhost:8080` |
+| `--tls-cert` | `KOLIMI_TLS_CERT` | — |
+| `--tls-key` | `KOLIMI_TLS_KEY` | — |
+| `--secure-cookies` | `KOLIMI_SECURE_COOKIES` | off |
+| log level | `RUST_LOG` | `info` |
+
+## TLS and reverse proxies
+
+**Direct TLS** (no proxy):
+
+```sh
+kolimi-server serve --tls-cert /etc/kolimi/tls/cert.pem \
+  --tls-key /etc/kolimi/tls/key.pem --secure-cookies
+```
+
+**Behind a proxy** (recommended; the server stays on localhost):
+
+Caddy:
+
+```caddy
+cloud.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+nginx:
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name cloud.example.com;
+    client_max_body_size 0;            # no body limit; Kolimi caps itself
+    proxy_request_buffering off;       # stream large uploads
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;      # long delta uploads
+    }
+}
+```
+
+Set `KOLIMI_ORIGIN=https://cloud.example.com` and
+`KOLIMI_SECURE_COOKIES=true` when TLS terminates at the proxy.
+`KOLIMI_ORIGIN` must exactly match the URL users visit — WebAuthn
+(passkeys) binds to it.
+
+## First run
+
+1. Open `https://cloud.example.com/app/` (or `http://localhost:8080/app/`).
+2. Sign in with the admin account (`install.sh` printed the password;
+   otherwise create one with `kolimi-server user add admin`).
+3. Upload something, then share it: the share dialog creates a public
+   link with a generated password and a 30-day expiry by default.
+4. Optional but recommended:
+   - Register a passkey (toolbar → **Passkeys**) and then run
+     `kolimi-server user passkey-only <name>` to drop the password.
+   - Enable TOTP (same dialog) and store the recovery codes.
+   - Point a WebDAV client (rclone, davfs2, Finder) at
+     `https://cloud.example.com/dav/`.
+   - CalDAV/CardDAV discovery works from the bare domain
+     (`/.well-known/caldav`, `/.well-known/carddav`).
+
+## Upgrading
+
+```sh
+# 1. back up first (online, safe)
+kolimi-server backup --data /var/lib/kolimi --to /backups/kolimi-$(date +%F)
+
+# 2. replace the binary and restart
+sudo systemctl stop kolimi
+sudo install -m755 kolimi-server /usr/local/bin/kolimi-server
+sudo systemctl start kolimi
+```
+
+Database migrations run automatically at startup and are forward-only;
+downgrading across a migration boundary requires restoring the backup.
+
+## Uninstalling
+
+```sh
+sudo systemctl disable --now kolimi
+sudo rm /usr/local/bin/kolimi-server /usr/local/bin/kolimi-sync
+sudo rm /usr/lib/systemd/system/kolimi.service
+sudo rm -rf /var/lib/kolimi /etc/kolimi   # deletes all data
+sudo userdel kolimi
+```

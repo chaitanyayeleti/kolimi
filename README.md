@@ -5,31 +5,68 @@
 > *kolimi (కొలిమి)* — Telugu for **forge**: where raw iron is shaped into something durable.
 > Rust is iron oxide; here, your data is forged into something that stays yours.
 
-- One static binary — no PHP, nginx, Redis, or MySQL stack
-- Rustls-only TLS, passkeys by default, zero telemetry
-- Standard WebDAV / CalDAV / CardDAV — existing clients work on day one
-- Content-addressed storage: dedup, delta sync, cheap versions, self-healing
+## About
 
-See [ROADMAP.md](ROADMAP.md) for the full plan.
+Kolimi is a self-hosted cloud — files, calendars, contacts, sync — that
+you install in one command and run as one ~40 MiB binary. No PHP, no
+nginx, no Redis, no MySQL: SQLite (WAL) and the filesystem are embedded,
+and the web UI is compiled to WebAssembly and served from the same
+process.
+
+**Highlights**
+
+- **One binary, one command.** `install.sh`, AUR, `.deb`, distroless
+  Docker/Podman, Helm — all install the same server.
+  [Install guide →](docs/install.md)
+- **Protocol-first.** WebDAV is litmus-clean (100%), so rclone, davfs2,
+  Finder and Windows Explorer work on day one; CalDAV/CardDAV with
+  RFC 6578 sync-collection covers Thunderbird, iOS and macOS.
+- **Native delta sync.** FastCDC + BLAKE3 content-addressed storage:
+  chunk-level deltas, dedup, versions, trash, a tray app and CLI
+  (`kolimi-sync`), UniFFI bindings for mobile.
+- **End-to-end encryption.** Optional client-side E2EE (RFC 0007):
+  per-file keys, deterministic chunk AEAD that keeps deltas working,
+  passphrase/recovery/passkey-PRF unlock, encrypted sharing with users
+  and groups, and a committed interop vector set. The server stores
+  only ciphertext and wrapped keys.
+- **Auth without ceremony.** Passkeys by default, passwordless
+  accounts, TOTP with one-time recovery codes, session hardening
+  (CSRF, lockout, secure cookies).
+- **Append-only audit log.** Every security-relevant action is
+  hash-chained; `kolimi-server audit verify` detects tampering.
+- **Nothing unsandboxed.** Previews decode in a re-executed
+  landlock+seccomp+rlimits worker; plugins are WebAssembly components
+  under a wasmtime fuel/memory sandbox with a capability-only import
+  list.
+- **Observable and gated.** Prometheus `/metrics`, incremental BLAKE3
+  scrubbing, CI performance gates (10k-file delta < 5 s, binary < 50 MB).
+
+**Documentation**: [docs/README.md](docs/README.md) — install, operations,
+architecture, threat model, crypto review, audit package, RFCs.
+**Status and plans**: [ROADMAP.md](ROADMAP.md), including the pending-work
+table and the next milestone (MLS group messaging, RFC 9420).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `crates/kolimi-chunk` | Content-defined chunking (FastCDC) + BLAKE3 content-addressed manifests |
-| `crates/kolimi-store` | Chunked content-addressed storage: FastCDC + BLAKE3, atomic writes, verify-on-read, GC |
-| `crates/kolimi-db` | SQLite persistence (users, sessions, file tree) with migrations |
-| `crates/kolimi-auth` | Argon2id passwords, session tokens, brute-force lockout, credential cache |
-| `crates/kolimi-vfs` | Path-safe virtual filesystem over DB + blobs; single permission engine |
-| `crates/kolimi-webdav` | WebDAV surface: OPTIONS, GET/HEAD, PUT, DELETE, MKCOL, PROPFIND, COPY, MOVE + CalDAV/CardDAV and REPORT |
+| `crates/kolimi-crypto` | Client-side E2EE: keyring, file keys, chunk AEAD, X25519 sharing |
+| `crates/kolimi-store` | Chunked content-addressed storage: atomic writes, verify-on-read, GC, scrub |
+| `crates/kolimi-db` | SQLite persistence (users, sessions, tree, shares, DAV, audit, E2EE keys) |
+| `crates/kolimi-auth` | Argon2id passwords, sessions, passkeys, TOTP + recovery codes, lockout |
+| `crates/kolimi-vfs` | Path-safe virtual filesystem; the single permission engine |
+| `crates/kolimi-webdav` | WebDAV + CalDAV/CardDAV surfaces and REPORTs |
 | `crates/kolimi-search` | tantivy full-text index fed from the change feed, per-user isolation |
 | `crates/kolimi-preview` | Preview decoding in a landlock+seccomp+rlimits worker process |
-| `crates/kolimi-sync` | Desktop sync core + `kolimi-sync` CLI: bidirectional delta sync |
+| `crates/kolimi-plugins` | wasmtime component host for sandboxed WebAssembly plugins |
+| `crates/kolimi-sync` | Desktop sync core + `kolimi-sync` CLI (delta sync, E2EE, sharing) |
+| `crates/kolimi-ffi` | UniFFI bindings for the mobile shells (Kotlin/Swift) |
 | `crates/kolimi-ui` | Leptos (WASM) web UI, embedded into the server binary |
-| `crates/kolimi-server` | The single binary: session API, auth middleware, CLI, TLS |
-| `docs/rfc/` | Design docs: RFC 0001 (storage), RFC 0002 (sync), RFC 0003 (sharing), RFC 0004 (CalDAV/CardDAV), RFC 0005 (search/previews) |
-| `docs/threat-model.md` | Assets, adversaries, trust boundaries, review checklist |
-| `fuzz/` | cargo-fuzz targets for chunking + manifest invariants |
+| `crates/kolimi-server` | The single binary: HTTP routes, janitor, metrics, CLI, TLS |
+| `apps/kolimi-tray` | Tauri tray shell (separate workspace) |
+| `docs/` | [Documentation index](docs/README.md): install, operations, architecture, audit, RFCs |
+| `fuzz/` | cargo-fuzz targets: chunking, preview decode, E2EE decrypt surface |
 
 ## Development
 

@@ -70,6 +70,8 @@
 | ↳ *TOTP + recovery codes (ship-blocker)* | RFC 6238 TOTP (HMAC-SHA-1, 6 digits, ±1 step, constant-time compare, consumed-step replay guard) with RFC 6238 test vectors; 10 one-time recovery codes (SHA-256 hashed at rest); `/api/totp` status/begin/enable/disable; login accepts code or recovery code; CLI `user totp-disable` escape hatch; UI: code field on login + QR/secret enrollment and one-time recovery display in the security dialog | unit vectors + full server flow test (enroll, two-step login, replay, recovery single-use, disable, CLI, audit) |
 | ↳ *packaging landed* | `scripts/install.sh` (download + checksum/cosign verify, systemd, admin bootstrap; `--binary` for local/CI), AUR PKGBUILD, cargo-deb metadata + postinst, distroless Dockerfile (nonroot, volume ownership) + compose, hardened systemd unit + sysusers/tmpfiles, Helm chart (PVC/probes/ingress/nonroot); release workflow on tags: gnu + musl tarballs, sha256, cosign keyless signatures, CycloneDX SBOM; `cargo-vet` initialized (exemptions to burn down) | CI proves install → admin → serve → DAV upload → password-protected link → public download on every push; deb + helm lint in CI; docker build on the release runner |
 | ↳ *plugin host landed* | `kolimi-plugins`: wasmtime component model host with the WIT ABI in `wit/plugin.wit`; capabilities are the import list (logging, plugin-private KV, clock); WASI linked with an empty context (no preopens/sockets/env); fuel budget per call (runaway loops trap), 16 MiB memory cap, broken components skipped at load; routes `/plugins/{name}/{*path}` + `GET /api/plugins`; traps audited; `examples/hello-plugin` + `spin-plugin` with committed fixtures and `scripts/build-plugins.sh` | host tests (greeting/echo/KV, fuel kill, filesystem denial, sandbox surface, reload persistence, broken-plugin skip) + server integration test over HTTP incl. audit |
+| **M8** (next week) | MLS group messaging (RFC 9420) for group E2EE | a 3-member group syncs across add/remove; a removed member cannot read new epochs; vectors + audit delta |
+| ↳ *plan* | Replace pre-MLS per-member X25519 wrapping (documented tradeoff: no FS/PCS) with `openmls`: Ed25519 credentials, key packages published to the server, group create/add via commit + welcome, epoch exporter derived group key wrapping file keys, re-wrap on membership change; migrate existing group shares by re-sharing under the MLS group. The audit package already flags this as the open item; land it *with* the external review, not before. | exit criteria above; `e2ee_decrypt`-style fuzz for the MLS decoders; vectors committed |
 
 Every milestone gates on: fuzz targets run, benchmark baseline updated, docs written.
 
@@ -102,11 +104,37 @@ Every milestone gates on: fuzz targets run, benchmark baseline updated, docs wri
 | Upload throughput | line-rate, zero-copy (sendfile / io_uring) |
 | Binary size | < 50 MB static |
 
-## 8. Non-goals
+## 8. Pending work (tracked)
+
+Everything below is deliberately not done yet, with a plan. Nothing here
+is silently skipped.
+
+| Item | Why it matters | Plan |
+| --- | --- | --- |
+| **MLS groups (RFC 9420)** | Group E2EE today is per-member X25519 wrapping: no forward secrecy or post-compromise security across membership changes | Milestone M8 next week; `openmls`, key packages, commits/welcomes, epoch exporter, re-wrap on membership change; land with the external audit |
+| **External crypto audit** | The v1+v2 crypto is internally reviewed only | Audit package ready (`docs/audit/`); freeze the surface, engage a reviewer; MLS changes land as a reviewed delta |
+| **Passkey recovery / account recovery** | A user who loses every passkey (and recovery code) needs an admin path | Admin CLI reset exists for TOTP and passwords; add a documented, audited `user recover` flow (out-of-band verification) |
+| **Web-UI E2EE** | The browser UI shows encrypted files as ciphertext | wasm E2EE client (kolimi-crypto already compiles to wasm) or an explicit "download via sync client" UX; decide after M8 |
+| **Public links to encrypted files** | Links have no key-distribution channel | Key-in-fragment (`#k=…`) design in RFC 0007 open questions; needs its own threat analysis |
+| **Group write sharing of encrypted files** | Encrypted shares are read-only today | Needs key rotation per writer / shared epoch keys; do after MLS |
+| **Multi-device E2EE** | One master key per user; devices share it out-of-band | Device enrollment (QR + ephemeral key), wrapped-key replication; after MLS |
+| **Postgres backend** | Stack promises "Postgres-ready queries" | sqlx is already the layer; port migrations + connection plumbing behind the same `Db` API; decide demand-driven |
+| **HTTP/3 (quinn), zero-copy uploads** | Stack mentions both; performance targets are met without them | Only if benchmarks show a gap; not on the critical path |
+| **General rate limiting + compression** | Only login lockout exists; tower stack lists rate limit/compression | Add `tower-http` compression + a per-IP limiter for public endpoints |
+| **Reproducible builds + first release** | Release workflow exists but has never run (no tag) | Tag `v0.1.0` once the audit delta for M8 lands; verify `--locked` reproducibility; publish checksums + SBOM |
+| **cargo-vet burn-down** | 570 exemptions is a placeholder, not vetting | Prioritize crypto/server crates; replace exemptions with real audits over time |
+| **AUR/deb/tray packaging of the desktop client** | Only the server is packaged today | PKGBUILD + .deb for `kolimi-sync` and the Tauri tray once the tray UI stabilizes |
+| **Mobile background scheduling** | FFI exposes `sync_once`; scheduling is platform code | Kotlin/Swift wrappers (WorkManager / BGTaskScheduler) in the mobile shells; FFI docs already describe the boundary |
+| **Self-heal from replicas** | Scrubber detects corruption but single-node has no replica to heal from | Replication is out of v1 scope; document the single-node reality (done) and revisit with object storage |
+| **Restore drills in CI** | backup/verify exist; drills are manual | Add a CI job: seed → backup → destroy → restore → verify → byte-compare |
+| **Plugin SDK polish + signing** | Plugins are unsigned; SDK is one example | WIT docs, a plugin template, optional signature verification (cosign) before load |
+| **OTel traces** | Prometheus metrics exist; traces do not | Add `tracing-opentelemetry` behind a feature flag; only if operators ask |
+
+## 9. Non-goals
 
 Own DB engine, own TLS, chat/Talk, federation in v1, PHP-style plugin model, app-store sprawl.
 
-## 9. Open decisions
+## 10. Open decisions
 
 | Decision | Proposal |
 |---|---|
