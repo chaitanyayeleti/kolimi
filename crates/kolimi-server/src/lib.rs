@@ -141,7 +141,11 @@ pub fn build_app(state: AppState) -> Router {
         .merge(kolimi_webdav::routes())
         .route("/api/me", get(api::me))
         .route("/api/session", delete(api::logout))
-        .route("/api/users", post(api::create_user))
+        .route("/api/users", get(api::list_users).post(api::create_user))
+        .route(
+            "/api/users/{username}",
+            patch(api::update_user).delete(api::delete_user),
+        )
         .route("/api/passkeys", get(api_passkey::list))
         .route("/api/passkeys/{id}", delete(api_passkey::delete))
         .route(

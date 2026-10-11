@@ -13,11 +13,38 @@ kolimi-server user passwd alice              # change the password
 kolimi-server user list                      # id, name, flags
 kolimi-server user passkey-only alice        # drop the password (needs >= 1 passkey)
 kolimi-server user totp-disable alice        # lose TOTP codes? admin escape hatch
+kolimi-server user disable alice             # block logins, drop live sessions
+kolimi-server user enable alice              # restore access
+kolimi-server user delete alice --yes        # delete the user and everything they own
 ```
+
+`user delete` cascades to sessions, passkeys, the file tree, shares,
+DAV collections, E2EE keys and group memberships; audit entries keep
+their history with a null actor, and the blob store is reclaimed by the
+janitor's garbage collection. `user disable` takes effect immediately
+(existing sessions stop working) and is the reversible alternative.
 
 Passkeys are registered in the web UI (toolbar → **Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is
 rejected (and audited).
+
+The same operations are available to an authenticated administrator over
+HTTP (JSON API, `Authorization: Basic` or a session cookie):
+
+```sh
+curl -u admin:pw https://cloud.example.com/api/users                 # list
+curl -u admin:pw -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"…"}' https://…/api/users      # create
+curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
+  -d '{"disabled":true}' https://…/api/users/alice                   # disable
+curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
+  -d '{"admin":true}' https://…/api/users/alice                      # grant admin
+curl -u admin:pw -X DELETE https://…/api/users/alice                 # delete
+```
+
+Guards (both CLI and API): you cannot disable or delete your own
+account, and the **last enabled administrator** cannot be disabled,
+demoted, or deleted — so the server always keeps an administrator.
 
 ## Groups and sharing
 

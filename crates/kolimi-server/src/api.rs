@@ -1,6 +1,6 @@
 use axum::{
     Extension, Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -384,6 +384,141 @@ pub async fn create_user(
             .into_response(),
         Err(DbError::InvalidUsername(_)) => bad_request("invalid username"),
         Err(_) => internal_error(),
+    }
+}
+
+/// `GET /api/users` — admin-only list of accounts.
+pub async fn list_users(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    if !user.is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match state.db.list_users().await {
+        Ok(users) => Json(json!({ "users": users })).into_response(),
+        Err(_) => internal_error(),
+    }
+}
+
+/// Payload for `PATCH /api/users/{username}`.
+#[derive(Deserialize)]
+pub struct UpdateUserRequest {
+    /// Enable or disable the account.
+    #[serde(default)]
+    disabled: Option<bool>,
+    /// Grant or revoke administrator rights.
+    #[serde(default)]
+    admin: Option<bool>,
+}
+
+/// `PATCH /api/users/{username}` — admin-only account changes.
+pub async fn update_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(username): Path<String>,
+    Json(req): Json<UpdateUserRequest>,
+) -> Response {
+    if !user.is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if req.disabled.is_none() && req.admin.is_none() {
+        return bad_request("nothing to update");
+    }
+    let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
+        return not_found();
+    };
+    if let Some(disabled) = req.disabled {
+        if disabled && target.id == user.user_id {
+            return bad_request("cannot disable your own account");
+        }
+        if let Err(error) = state.db.set_disabled(&username, disabled).await {
+            return db_error(error);
+        }
+        let action = if disabled {
+            "user.disable"
+        } else {
+            "user.enable"
+        };
+        audit(
+            &state,
+            Some(user.user_id),
+            Some(&user.username),
+            action,
+            &target.username,
+            json!({}),
+        )
+        .await;
+    }
+    if let Some(admin) = req.admin {
+        if !admin && target.id == user.user_id {
+            return bad_request("cannot revoke your own administrator rights");
+        }
+        if let Err(error) = state.db.set_admin(target.id, admin).await {
+            return db_error(error);
+        }
+        let action = if admin {
+            "user.grant_admin"
+        } else {
+            "user.revoke_admin"
+        };
+        audit(
+            &state,
+            Some(user.user_id),
+            Some(&user.username),
+            action,
+            &target.username,
+            json!({}),
+        )
+        .await;
+    }
+    match state.db.find_user(&username).await {
+        Ok(Some(updated)) => Json(json!(updated)).into_response(),
+        _ => internal_error(),
+    }
+}
+
+/// `DELETE /api/users/{username}` — admin-only account deletion.
+pub async fn delete_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(username): Path<String>,
+) -> Response {
+    if !user.is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
+        return not_found();
+    };
+    if target.id == user.user_id {
+        return bad_request("cannot delete your own account");
+    }
+    match state.db.delete_user(&username).await {
+        Ok(()) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "user.delete",
+                &target.username,
+                json!({}),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => db_error(error),
+    }
+}
+
+/// Maps a database error onto an HTTP response.
+fn db_error(error: DbError) -> Response {
+    match error {
+        DbError::NotFound(_) => not_found(),
+        DbError::Conflict(message) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
+        }
+        DbError::InvalidUsername(_) => bad_request("invalid username"),
+        DbError::Sqlx(_) | DbError::Migrate(_) => internal_error(),
     }
 }
 

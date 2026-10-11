@@ -118,6 +118,17 @@ enum UserCommand {
     PasskeyOnly { username: String },
     /// Disable TOTP for a user (admin escape hatch when codes are lost).
     TotpDisable { username: String },
+    /// Disable a user (rejects logins and drops their sessions).
+    Disable { username: String },
+    /// Re-enable a disabled user.
+    Enable { username: String },
+    /// Delete a user and all data they own.
+    Delete {
+        username: String,
+        /// Confirm the deletion (required).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -307,6 +318,45 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             )
             .await?;
             println!("two-factor disabled for {username}");
+        }
+        UserCommand::Disable { username } => {
+            db.set_disabled(&username, true).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "user.disable",
+                &username,
+                &serde_json::json!({}),
+            )
+            .await?;
+            println!("disabled {username}");
+        }
+        UserCommand::Enable { username } => {
+            db.set_disabled(&username, false).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "user.enable",
+                &username,
+                &serde_json::json!({}),
+            )
+            .await?;
+            println!("enabled {username}");
+        }
+        UserCommand::Delete { username, yes } => {
+            if !yes {
+                return Err(format!("refusing to delete {username} without --yes").into());
+            }
+            db.delete_user(&username).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "user.delete",
+                &username,
+                &serde_json::json!({}),
+            )
+            .await?;
+            println!("deleted {username} and all owned data");
         }
         UserCommand::List => {
             for user in db.list_users().await? {

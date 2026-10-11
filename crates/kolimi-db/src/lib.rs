@@ -474,15 +474,114 @@ impl Db {
     }
 
     /// Grants or revokes administrator rights.
+    ///
+    /// Revoking the last enabled administrator is refused so the server
+    /// cannot be locked out of administration.
     pub async fn set_admin(&self, user_id: i64, is_admin: bool) -> Result<(), DbError> {
-        let result = sqlx::query("UPDATE users SET is_admin = ? WHERE id = ?")
+        let mut tx = self.pool.begin().await?;
+        let Some(target) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            return Err(DbError::NotFound(format!("user {user_id}")));
+        };
+        if !is_admin && target.is_admin && !target.disabled {
+            let (others,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM users WHERE id != ? AND is_admin = 1 AND disabled = 0",
+            )
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if others == 0 {
+                return Err(DbError::Conflict(
+                    "cannot revoke the last administrator".to_string(),
+                ));
+            }
+        }
+        sqlx::query("UPDATE users SET is_admin = ? WHERE id = ?")
             .bind(is_admin)
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("user {user_id}")));
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Enables or disables an account.
+    ///
+    /// Disabling drops the account's sessions immediately and is refused
+    /// for the last enabled administrator.
+    pub async fn set_disabled(&self, username: &str, disabled: bool) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        let Some(target) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            return Err(DbError::NotFound(format!("user {username}")));
+        };
+        if disabled && target.is_admin && !target.disabled {
+            let (others,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM users WHERE id != ? AND is_admin = 1 AND disabled = 0",
+            )
+            .bind(target.id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if others == 0 {
+                return Err(DbError::Conflict(
+                    "cannot disable the last administrator".to_string(),
+                ));
+            }
         }
+        sqlx::query("UPDATE users SET disabled = ? WHERE id = ?")
+            .bind(disabled)
+            .bind(target.id)
+            .execute(&mut *tx)
+            .await?;
+        if disabled {
+            sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+                .bind(target.id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Deletes a user and everything they own.
+    ///
+    /// Foreign keys cascade to sessions, passkeys, nodes, shares, DAV
+    /// collections, E2EE keys, TOTP and group memberships; audit entries
+    /// keep their history with a null actor. Blob data is reclaimed by the
+    /// janitor's garbage collection. Refused for the last enabled admin.
+    pub async fn delete_user(&self, username: &str) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        let Some(target) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            return Err(DbError::NotFound(format!("user {username}")));
+        };
+        if target.is_admin && !target.disabled {
+            let (others,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM users WHERE id != ? AND is_admin = 1 AND disabled = 0",
+            )
+            .bind(target.id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if others == 0 {
+                return Err(DbError::Conflict(
+                    "cannot delete the last administrator".to_string(),
+                ));
+            }
+        }
+        sqlx::query("DELETE FROM users WHERE id = ?")
+            .bind(target.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
