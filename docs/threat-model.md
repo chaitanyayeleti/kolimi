@@ -53,7 +53,7 @@ client ──(TLS, untrusted network)──> kolimi-server
 | A1 parser exploits (DAV/XML/manifests) | Rust memory safety, `dav-server` + own parser fuzzing, strict size/depth limits | M0–M2 |
 | A2 IDOR / path traversal | single server-side permission engine; every lookup goes through it; `..`/symlink normalization tests | M1–M3 |
 | A2 chunk-existence oracle | chunk endpoint checks visibility, constant 404 for invisible chunks | M2 |
-| A2 hostile uploads (zip bomb, image exploit) | previews in separate process: landlock+seccomp, rlimits, timeouts, no network | M5 |
+| A2 hostile uploads (zip bomb, image exploit) | previews in a re-executed worker: rlimits (AS/CPU/FSIZE/NOFILE) → landlock (read the scratch file only) → seccomp allowlist (no network, no exec); wall-clock kill; decoder dimension/allocation limits; fuzzed | M5 |
 | A3 share escalation | shares are capability-scoped, re-checked server-side every request; no client-side trust | M3 |
 | A3 mount traversal | `/Shared with me/<mount>/...` resolution starts at the mount root; ancestors of a share are unreachable | M3 |
 | A3 link token brute force | 128-bit random tokens, exact-match lookup, per-share unlock lockout (5/15min), expiry | M3 |

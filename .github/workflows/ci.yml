@@ -67,6 +67,8 @@ jobs:
         working-directory: fuzz
       - run: cargo fuzz run chunk_roundtrip -- -max_total_time=30 -max_len=4194304
         working-directory: fuzz
+      - run: cargo fuzz run preview_image -- -max_total_time=30 -max_len=1048576
+        working-directory: fuzz
 
   ui:
     name: ui (wasm)

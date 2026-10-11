@@ -22,9 +22,11 @@ See [ROADMAP.md](ROADMAP.md) for the full plan.
 | `crates/kolimi-auth` | Argon2id passwords, session tokens, brute-force lockout, credential cache |
 | `crates/kolimi-vfs` | Path-safe virtual filesystem over DB + blobs; single permission engine |
 | `crates/kolimi-webdav` | WebDAV surface: OPTIONS, GET/HEAD, PUT, DELETE, MKCOL, PROPFIND, COPY, MOVE + CalDAV/CardDAV and REPORT |
+| `crates/kolimi-search` | tantivy full-text index fed from the change feed, per-user isolation |
+| `crates/kolimi-preview` | Preview decoding in a landlock+seccomp+rlimits worker process |
 | `crates/kolimi-ui` | Leptos (WASM) web UI, embedded into the server binary |
 | `crates/kolimi-server` | The single binary: session API, auth middleware, CLI, TLS |
-| `docs/rfc/` | Design docs: RFC 0001 (storage), RFC 0002 (sync), RFC 0003 (sharing), RFC 0004 (CalDAV/CardDAV) |
+| `docs/rfc/` | Design docs: RFC 0001 (storage), RFC 0002 (sync), RFC 0003 (sharing), RFC 0004 (CalDAV/CardDAV), RFC 0005 (search/previews) |
 | `docs/threat-model.md` | Assets, adversaries, trust boundaries, review checklist |
 | `fuzz/` | cargo-fuzz targets for chunking + manifest invariants |
 
@@ -87,6 +89,8 @@ Native sync API (delta transfers, RFC 0002):
 | `GET /api/trash`, `POST /api/trash/{id}/restore`, `DELETE /api/trash/{id}` | Trash lifecycle |
 | `GET /api/versions?path=`, `POST /api/versions/{id}/restore` | Version history |
 | `GET /api/browse?path=` | Directory listing (own tree + received shares) for the UI |
+| `GET /api/search?q=&limit=` | Full-text search over names, paths, and text content |
+| `GET /api/preview?path=&size=` | Sandboxed thumbnails (images) and text heads |
 
 Sharing (RFC 0003): received shares mount at `/Shared with me/<name>` in
 WebDAV and the API; `POST /api/shares` creates user, group, or link shares;
@@ -151,10 +155,10 @@ implemented yet).
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE).
 
-**Status:** M4 complete — CalDAV/CardDAV (RFC 4791/6352) with RFC 6764
-discovery, byte-exact iCalendar/vCard storage with UID conflict detection,
-RFC 6578 `sync-collection` for calendar, address-book, and file
-collections, and calendar-query/multiget reports. 209 tests; litmus 100%;
-rclone round-trips byte-identical; live-verified over HTTP (well-known →
-principal → MKCALENDAR → PUT → incremental sync). Next: M5 (search,
-sandboxed previews, desktop/mobile clients).
+**Status:** M5 server side complete — tantivy full-text search fed from
+the change feed (per-user isolation, snippet excerpts, UI search box) and
+sandboxed previews: decoding happens in a re-executed worker under
+landlock + seccomp + rlimits with wall-clock kills, so a hostile image
+can never take the server down (tested, plus a cargo-fuzz decode target).
+226 tests; litmus 100%; rclone byte-identical. In progress: desktop sync
+client alpha, mobile background upload (M5 clients).

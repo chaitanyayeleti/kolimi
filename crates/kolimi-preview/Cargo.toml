@@ -1,0 +1,22 @@
+[package]
+name = "kolimi-preview"
+description = "Sandboxed preview generation (landlock + seccomp + rlimits)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
+landlock = "0.4"
+libc = "0.2"
+rustix = { version = "1", features = ["process", "thread"] }
+seccompiler = "0.5"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

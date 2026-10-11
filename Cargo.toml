@@ -4,6 +4,8 @@ members = [
     "crates/kolimi-auth",
     "crates/kolimi-chunk",
     "crates/kolimi-db",
+    "crates/kolimi-preview",
+    "crates/kolimi-search",
     "crates/kolimi-server",
     "crates/kolimi-store",
     "crates/kolimi-ui",
@@ -33,9 +35,12 @@ getrandom = "0.4"
 hex = "0.4"
 http-body-util = "0.1"
 httpdate = "1"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
 kolimi-auth = { version = "0.0.1", path = "crates/kolimi-auth" }
 kolimi-chunk = { version = "0.0.1", path = "crates/kolimi-chunk" }
 kolimi-db = { version = "0.0.1", path = "crates/kolimi-db" }
+kolimi-preview = { version = "0.0.1", path = "crates/kolimi-preview" }
+kolimi-search = { version = "0.0.1", path = "crates/kolimi-search" }
 kolimi-store = { version = "0.0.1", path = "crates/kolimi-store" }
 kolimi-vfs = { version = "0.0.1", path = "crates/kolimi-vfs" }
 kolimi-webdav = { version = "0.0.1", path = "crates/kolimi-webdav" }
@@ -49,7 +54,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "io-util", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "io-util", "time", "process"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"

@@ -42,6 +42,50 @@ struct TrashItem {
     size: u64,
 }
 
+#[derive(Clone, PartialEq)]
+struct SearchHit {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: u64,
+    modified_at: i64,
+    snippet: String,
+}
+
+fn parse_results(body: &Value) -> Vec<SearchHit> {
+    body.get("results")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| SearchHit {
+                    name: item["name"].as_str().unwrap_or_default().to_string(),
+                    path: item["path"].as_str().unwrap_or_default().to_string(),
+                    is_dir: item["is_dir"].as_bool().unwrap_or(false),
+                    size: item["size"].as_u64().unwrap_or(0),
+                    modified_at: item["modified_at"].as_i64().unwrap_or(0),
+                    snippet: item["snippet"].as_str().unwrap_or_default().to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parent_of(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((parent, _)) if !parent.is_empty() => parent.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
+fn is_image_name(name: &str) -> bool {
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp")
+}
+
 fn encode(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
@@ -199,6 +243,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let trash = RwSignal::new(Vec::<TrashItem>::new());
     let share_target = RwSignal::new(Option::<Entry>::None);
     let uploading = RwSignal::new(false);
+    let query = RwSignal::new(String::new());
+    let results = RwSignal::new(Vec::<SearchHit>::new());
+    let search_active = RwSignal::new(false);
 
     let load = move |target: String| {
         spawn_local(async move {
@@ -380,6 +427,32 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
 
     let share_entry = move |entry: Entry| share_target.set(Some(entry));
 
+    let search_submit = move |ev: ev::SubmitEvent| {
+        ev.prevent_default();
+        let text = query.get_untracked();
+        if text.trim().is_empty() {
+            search_active.set(false);
+            return;
+        }
+        spawn_local(async move {
+            let url = format!("/api/search?q={}&limit=50", encode(&text));
+            match api::get(&url).await {
+                Ok(r) if r.status == 200 => {
+                    results.set(parse_results(&r.body));
+                    search_active.set(true);
+                    error.set(String::new());
+                }
+                Ok(r) => error.set(r.error().unwrap_or("Search failed").to_string()),
+                Err(e) => error.set(e),
+            }
+        });
+    };
+    let clear_search = move |_| {
+        search_active.set(false);
+        results.set(Vec::new());
+        query.set(String::new());
+    };
+
     view! {
         <div class="toolbar">
             <nav class="crumbs">
@@ -412,6 +485,15 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 }}
             </nav>
             <div class="actions">
+                <form class="search" on:submit=search_submit>
+                    <input
+                        type="search"
+                        placeholder="Search files…"
+                        prop:value=move || query.get()
+                        on:input=move |ev| query.set(event_target_value(&ev))
+                    />
+                    <button type="submit">"Search"</button>
+                </form>
                 <label class="button">
                     {move || if uploading.get() { "Uploading…" } else { "Upload" }}
                     <input type="file" class="hidden" on:change=upload/>
@@ -438,6 +520,53 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         <p class="notice pad">{move || notice.get()}</p>
 
         {move || {
+            if search_active.get() {
+                let clear = clear_search;
+                return view! {
+                    <ul class="files">
+                        <li class="row">
+                            <span class="name muted">
+                                {move || format!("{} result(s)", results.get().len())}
+                            </span>
+                            <span class="row-actions">
+                                <button on:click=move |ev| clear(ev)>"Clear"</button>
+                            </span>
+                        </li>
+                        <For
+                            each=move || results.get()
+                            key=|hit| hit.path.clone()
+                            children=move |hit| {
+                                let navigate = parent_of(&hit.path);
+                                let download_path = hit.path.clone();
+                                let is_dir = hit.is_dir;
+                                view! {
+                                    <li class="row">
+                                        <button class="name" on:click=move |_| load(navigate.clone())>
+                                            {if is_dir { "📁 " } else { "📄 " }}
+                                            {hit.name.clone()}
+                                            <span class="muted">{hit.path.clone()}</span>
+                                        </button>
+                                        <span class="size">{hit.snippet.clone()}</span>
+                                        {(!is_dir).then(|| {
+                                            view! {
+                                                <span class="row-actions">
+                                                    <a
+                                                        class="button"
+                                                        href=format!("/dav{}", encode_path(&download_path))
+                                                        download
+                                                    >
+                                                        "Download"
+                                                    </a>
+                                                </span>
+                                            }
+                                        })}
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+                }.into_any();
+            }
             match tab.get() {
                 Tab::Files => {
                     view! {
@@ -466,6 +595,19 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                     view! {
                                         <li class="row">
                                             <button class="name" on:click=move |_| open(open_entry.clone())>
+                                                {(!is_dir && is_image_name(&entry.name)).then(|| {
+                                                    view! {
+                                                        <img
+                                                            class="thumb"
+                                                            loading="lazy"
+                                                            alt=""
+                                                            src=format!(
+                                                                "/api/preview?path={}&size=64",
+                                                                encode(&entry.path),
+                                                            )
+                                                        />
+                                                    }
+                                                })}
                                                 {if is_dir { "📁 " } else { "📄 " }}
                                                 {entry.name.clone()}
                                                 {entry.shared.then(|| view! {

@@ -49,6 +49,16 @@ enum Command {
         #[arg(long, env = "KOLIMI_DATA", default_value = "./kolimi-data")]
         data: PathBuf,
     },
+    /// Internal: sandboxed preview worker (invoked by the server itself).
+    #[command(hide = true)]
+    PreviewWorker {
+        /// `image` or `text`.
+        kind: String,
+        /// Input file to read.
+        input: PathBuf,
+        /// Maximum thumbnail dimension.
+        max: u32,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -131,12 +141,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(Command::Group { command }) => group_command(command).await,
         Some(Command::Backup { data, to }) => backup(data, to).await,
         Some(Command::Verify { data }) => verify(data).await,
+        Some(Command::PreviewWorker { kind, input, max }) => {
+            match kolimi_preview::worker::run(&kind, &input, max) {
+                Ok(()) => std::process::exit(0),
+                Err(error) => {
+                    eprintln!("preview worker: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 
 async fn serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let state = AppState::init(&args.data, args.secure_cookies, &args.origin).await?;
     tokio::spawn(kolimi_server::janitor::run(state.clone()));
+    tokio::spawn(kolimi_server::search_indexer::run(state.clone()));
     let app = build_app(state);
 
     match (args.tls_cert, args.tls_key) {

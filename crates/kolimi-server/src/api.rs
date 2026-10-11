@@ -1,6 +1,6 @@
 use axum::{
     Extension, Json,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -144,6 +144,40 @@ pub async fn me(Extension(user): Extension<CurrentUser>) -> Json<Value> {
         "username": user.username,
         "is_admin": user.is_admin,
     }))
+}
+
+/// Query parameters for `/api/search`.
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    q: String,
+    #[serde(default = "search_limit")]
+    limit: usize,
+}
+
+fn search_limit() -> usize {
+    50
+}
+
+/// `GET /api/search?q=&limit=` — full-text search over the caller's files.
+pub async fn search(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<SearchQuery>,
+) -> Response {
+    let search = state.search.clone();
+    let user_id = user.user_id;
+    let text = query.q.clone();
+    let limit = query.limit.clamp(1, 100);
+    let result = tokio::task::spawn_blocking(move || search.search(user_id, &text, limit)).await;
+    match result {
+        Ok(Ok(hits)) => Json(json!({ "query": query.q, "results": hits })).into_response(),
+        Ok(Err(kolimi_search::SearchError::Query(message))) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("invalid query: {message}") })),
+        )
+            .into_response(),
+        _ => internal_error(),
+    }
 }
 
 /// New user creation payload.

@@ -9,6 +9,7 @@ use sqlx::{
 };
 
 mod dav;
+mod search_state;
 mod sharing;
 pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
 pub use sharing::{Group, LinkSession, ReceivedShare, ShareRow};

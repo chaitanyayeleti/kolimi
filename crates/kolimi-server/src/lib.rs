@@ -10,9 +10,11 @@ pub mod api_shares;
 pub mod api_sync;
 pub mod auth;
 pub mod janitor;
+pub mod preview;
+pub mod search_indexer;
 pub mod ui;
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::Path, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Router,
@@ -20,6 +22,7 @@ use axum::{
 };
 use kolimi_auth::{cache::CredentialCache, lockout::FailedAuthTracker, passkey::Passkeys};
 use kolimi_db::Db;
+use kolimi_search::SearchIndex;
 use kolimi_store::BlobStore;
 use kolimi_vfs::Vfs;
 use tower_http::trace::TraceLayer;
@@ -52,6 +55,9 @@ pub enum InitError {
     /// Passkey relying-party configuration failure.
     #[error("passkey configuration: {0}")]
     Passkey(#[from] kolimi_auth::AuthError),
+    /// Search index initialization failure.
+    #[error("search index: {0}")]
+    Search(#[from] kolimi_search::SearchError),
 }
 
 /// Shared application state.
@@ -67,8 +73,16 @@ pub struct AppState {
     pub cred_cache: Arc<CredentialCache>,
     /// WebAuthn ceremonies.
     pub passkeys: Arc<Passkeys>,
+    /// Full-text search index.
+    pub search: Arc<SearchIndex>,
     /// Whether to set the `Secure` attribute on cookies.
     pub secure_cookies: bool,
+    /// Data directory (used for preview scratch files).
+    pub data_dir: PathBuf,
+    /// Executable that serves as the sandboxed preview worker.
+    pub preview_worker: PathBuf,
+    /// Limits concurrent preview workers.
+    pub preview_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -79,9 +93,13 @@ impl AppState {
         origin: &str,
     ) -> Result<Self, InitError> {
         tokio::fs::create_dir_all(data_dir).await?;
+        tokio::fs::create_dir_all(data_dir.join("tmp")).await?;
         let db = Db::connect(&data_dir.join("kolimi.db")).await?;
         let store = BlobStore::open(data_dir.join("blobs")).await?;
         let vfs = Arc::new(Vfs::new(db.clone(), store));
+        let search = Arc::new(SearchIndex::open(&data_dir.join("search"))?);
+        let preview_worker =
+            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kolimi-server"));
         Ok(Self {
             db: Arc::new(db),
             vfs,
@@ -92,7 +110,11 @@ impl AppState {
             )),
             cred_cache: Arc::new(CredentialCache::new(Duration::from_secs(60), 1024)),
             passkeys: Arc::new(Passkeys::from_origin(origin, "Kolimi")?),
+            search,
             secure_cookies,
+            data_dir: data_dir.to_path_buf(),
+            preview_worker,
+            preview_permits: Arc::new(tokio::sync::Semaphore::new(preview::MAX_CONCURRENT_WORKERS)),
         })
     }
 }
@@ -133,6 +155,8 @@ pub fn build_app(state: AppState) -> Router {
             post(api_sync::restore_version),
         )
         .route("/api/browse", get(api_browse::browse))
+        .route("/api/search", get(api::search))
+        .route("/api/preview", get(preview::handler))
         .route(
             "/api/shares",
             get(api_shares::list).post(api_shares::create),

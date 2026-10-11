@@ -5,7 +5,7 @@ use kolimi_chunk::Hash;
 use kolimi_db::{Db, Node as DbNode};
 use kolimi_store::{BlobStore, SweepStats};
 
-use crate::{error::VfsError, path};
+use crate::{Access, Perm, error::VfsError, path};
 
 /// Whether a node is a directory or a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,13 +330,59 @@ impl Vfs {
     /// Reads a file's content.
     pub async fn read(&self, user_id: i64, raw: &str) -> Result<(Node, Vec<u8>), VfsError> {
         let node = self.resolve(user_id, raw).await?;
+        let data = self.read_node_content(user_id, &node).await?;
+        Ok((node, data))
+    }
+
+    /// Reads at most `max_bytes` from the head of a file.
+    pub async fn read_head(
+        &self,
+        user_id: i64,
+        raw: &str,
+        max_bytes: usize,
+    ) -> Result<(Node, Vec<u8>), VfsError> {
+        let node = self.resolve(user_id, raw).await?;
+        let data = self.read_node_head(user_id, &node, max_bytes).await?;
+        Ok((node, data))
+    }
+
+    /// Reads at most `max_bytes` from the head of a file through the
+    /// permission engine.
+    pub async fn read_access_head(
+        &self,
+        caller_id: i64,
+        raw: &str,
+        max_bytes: usize,
+    ) -> Result<(Access, Vec<u8>), VfsError> {
+        let access = self.resolve_access(caller_id, raw).await?;
+        access.perm.require(Perm::Read)?;
+        let data = self
+            .read_node_head(access.owner_id, &access.node, max_bytes)
+            .await?;
+        Ok((access, data))
+    }
+
+    pub(crate) async fn read_node_head(
+        &self,
+        owner_id: i64,
+        node: &Node,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, VfsError> {
         if node.is_dir() {
             return Err(VfsError::IsCollection);
         }
         let content_id = node.content_id.ok_or(VfsError::NotFound)?;
-        let manifest = self.store.get_manifest(user_id, &content_id).await?;
-        let data = self.store.read_content(user_id, &manifest).await?;
-        Ok((node, data))
+        let manifest = self.store.get_manifest(owner_id, &content_id).await?;
+        let mut out = Vec::new();
+        for chunk in &manifest.chunks {
+            if out.len() >= max_bytes {
+                break;
+            }
+            let data = self.store.get_chunk(owner_id, &chunk.hash).await?;
+            let take = data.len().min(max_bytes - out.len());
+            out.extend_from_slice(&data[..take]);
+        }
+        Ok(out)
     }
 
     /// Returns the manifest of a file (for delta download).
