@@ -16,6 +16,11 @@ kolimi-server user totp-disable alice        # lose TOTP codes? admin escape hat
 kolimi-server user disable alice             # block logins, drop live sessions
 kolimi-server user enable alice              # restore access
 kolimi-server user delete alice --yes        # delete the user and everything they own
+kolimi-server user quota alice 10737418240   # per-user storage quota (bytes)
+kolimi-server user quota alice unlimited     # no limit
+kolimi-server user quota alice default       # fall back to the server default
+kolimi-server user usage alice               # used vs quota (cached counter)
+kolimi-server user usage alice --reconcile   # recompute usage from disk
 ```
 
 `user delete` removes the account and everything it owns: sessions,
@@ -41,7 +46,16 @@ curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
 curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
   -d '{"admin":true}' https://…/api/users/alice                      # grant admin
 curl -u admin:pw -X DELETE https://…/api/users/alice                 # delete
+curl -u admin:pw 'https://…/api/users?limit=100'                     # paginated list (+ quota/used)
+curl -u admin:pw https://…/api/users/alice/usage                     # fresh usage for one user
+curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
+  -d '{"quota_bytes":10737418240}' https://…/api/users/alice          # set quota (null = default)
 ```
+
+Listing users is **paginated** (`?cursor=<id>&limit=`) and returns the
+cached `quota_bytes`/`used_bytes` columns, so it stays a single indexed
+query even with thousands of users; the per-user `/usage` endpoint is the
+only one that walks the blob store.
 
 Guards (both CLI and API): you cannot disable or delete your own
 account, and the **last enabled administrator** cannot be disabled,
@@ -152,10 +166,14 @@ scrape_configs:
   `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`;
   `Strict-Transport-Security` is added when secure cookies are enabled.
   The web UI additionally sends a strict `Content-Security-Policy`.
-- **Per-user storage quota.** Set `KOLIMI_USER_QUOTA_BYTES` to bound how
-  many bytes each account may store; an upload that would exceed it is
-  refused with `413`. The default `0` is unlimited. Re-uploaded
-  (deduplicated) content counts conservatively toward the limit.
+- **Per-user storage quota.** `KOLIMI_USER_QUOTA_BYTES` is the server
+  default (`0` = unlimited); each account may override it (`0` = unlimited,
+  `NULL` = default) via the admin API/CLI. Uploads that would exceed a
+  user's quota are refused with `413`. Usage is a **cached counter**
+  (`users.used_bytes`) incremented by newly written bytes and decremented
+  on GC, so listings never walk the blob tree; the janitor reconciles a
+  bounded batch of counters from disk each pass to correct any drift.
+  Deduplicated re-uploads count conservatively toward the limit.
 - **Event streams.** At most 64 concurrent `/api/sync/events` SSE
   connections are served (further ones get `503`), and each is closed
   after 30 minutes.

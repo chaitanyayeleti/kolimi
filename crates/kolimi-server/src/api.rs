@@ -397,18 +397,105 @@ pub async fn create_user(
     }
 }
 
-/// `GET /api/users` — admin-only list of accounts.
+/// Query for `GET /api/users`.
+#[derive(Deserialize)]
+pub struct UsersQuery {
+    /// Keyset cursor: return users with a larger id.
+    #[serde(default)]
+    cursor: Option<i64>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `GET /api/users?cursor=&limit=` — admin-only, paginated account list.
+///
+/// Reads the cached `quota_bytes`/`used_bytes` columns only, so listing
+/// never walks the blob store (safe with thousands of users). Use
+/// `GET /api/users/{username}/usage` for a freshly measured number.
 pub async fn list_users(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    Query(query): Query<UsersQuery>,
 ) -> Response {
     if !user.is_admin {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match state.db.list_users().await {
-        Ok(users) => Json(json!({ "users": users })).into_response(),
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let after = query.cursor.unwrap_or(0).max(0);
+    match state.db.users_page(after, limit + 1).await {
+        Ok(mut users) => {
+            let has_more = users.len() as i64 > limit;
+            if has_more {
+                users.pop();
+            }
+            let next_cursor = if has_more {
+                users.last().map(|account| account.id)
+            } else {
+                None
+            };
+            Json(json!({ "users": users, "next_cursor": next_cursor })).into_response()
+        }
         Err(_) => internal_error(),
     }
+}
+
+/// `GET /api/users/{username}` — admin-only account detail.
+pub async fn user_detail(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(username): Path<String>,
+) -> Response {
+    if !user.is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match state.db.find_user(&username).await {
+        Ok(Some(account)) => Json(json!(account)).into_response(),
+        Ok(None) => not_found(),
+        Err(_) => internal_error(),
+    }
+}
+
+/// Returns the effective quota in bytes (`0` = unlimited).
+fn effective_quota(state: &AppState, override_bytes: Option<i64>) -> u64 {
+    match override_bytes {
+        Some(quota) if quota > 0 => quota as u64,
+        Some(_) => 0,
+        None => state.vfs.store().default_quota(),
+    }
+}
+
+/// `GET /api/users/{username}/usage` — admin-only, freshly measured usage.
+///
+/// Walks the user's blob tree, refreshes the cached counter, and returns
+/// the quota. Intended for a single user, never for bulk listing.
+pub async fn user_usage(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(username): Path<String>,
+) -> Response {
+    if !user.is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
+        return not_found();
+    };
+    let used = match state.vfs.store().usage_bytes(target.id).await {
+        Ok(bytes) => {
+            let _ = state
+                .db
+                .set_used_bytes(target.id, bytes, kolimi_db::now_millis())
+                .await;
+            bytes
+        }
+        Err(_) => target.used_bytes.max(0) as u64,
+    };
+    Json(json!({
+        "username": target.username,
+        "used_bytes": used,
+        "quota_bytes": target.quota_bytes,
+        "effective_quota_bytes": effective_quota(&state, target.quota_bytes),
+    }))
+    .into_response()
 }
 
 /// Payload for `PATCH /api/users/{username}`.
@@ -420,6 +507,22 @@ pub struct UpdateUserRequest {
     /// Grant or revoke administrator rights.
     #[serde(default)]
     admin: Option<bool>,
+    /// Per-user storage quota in bytes (`0` = unlimited, `null` = the
+    /// server default). Absent leaves it unchanged.
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    quota_bytes: Option<Option<i64>>,
+}
+
+mod double_option {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Ok(Some(Option::<T>::deserialize(deserializer)?))
+    }
 }
 
 /// `PATCH /api/users/{username}` — admin-only account changes.
@@ -432,7 +535,7 @@ pub async fn update_user(
     if !user.is_admin {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if req.disabled.is_none() && req.admin.is_none() {
+    if req.disabled.is_none() && req.admin.is_none() && req.quota_bytes.is_none() {
         return bad_request("nothing to update");
     }
     let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
@@ -479,6 +582,25 @@ pub async fn update_user(
             action,
             &target.username,
             json!({}),
+        )
+        .await;
+    }
+    if let Some(quota) = req.quota_bytes {
+        if let Some(bytes) = quota
+            && bytes < 0
+        {
+            return bad_request("quota_bytes must be >= 0");
+        }
+        if let Err(error) = state.db.set_quota_bytes(target.id, quota).await {
+            return db_error(error);
+        }
+        audit(
+            &state,
+            Some(user.user_id),
+            Some(&user.username),
+            "user.quota",
+            &target.username,
+            json!({ "quota_bytes": quota }),
         )
         .await;
     }

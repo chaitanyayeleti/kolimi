@@ -129,6 +129,15 @@ enum UserCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Set a user's storage quota (`<bytes>`, `unlimited`, or `default`).
+    Quota { username: String, value: String },
+    /// Show a user's storage usage and quota.
+    Usage {
+        username: String,
+        /// Recompute from disk instead of using the cached counter.
+        #[arg(long)]
+        reconcile: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -370,6 +379,72 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             )
             .await?;
             println!("deleted {username} and all owned data");
+        }
+        UserCommand::Quota { username, value } => {
+            let user = db
+                .find_user(&username)
+                .await?
+                .ok_or_else(|| format!("no such user: {username}"))?;
+            let quota: Option<i64> = match value.as_str() {
+                "unlimited" => Some(0),
+                "default" => None,
+                other => Some(other.parse::<i64>().map_err(|_| {
+                    format!("invalid quota '{other}' (use bytes, 'unlimited' or 'default')")
+                })?),
+            };
+            if let Some(bytes) = quota
+                && bytes < 0
+            {
+                return Err("quota must be >= 0".into());
+            }
+            db.set_quota_bytes(user.id, quota).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "user.quota",
+                &username,
+                &serde_json::json!({ "quota_bytes": quota }),
+            )
+            .await?;
+            match quota {
+                Some(0) => println!("{username}: unlimited storage"),
+                Some(bytes) => println!("{username}: quota set to {bytes} bytes"),
+                None => println!("{username}: using the server default quota"),
+            }
+        }
+        UserCommand::Usage {
+            username,
+            reconcile,
+        } => {
+            let user = db
+                .find_user(&username)
+                .await?
+                .ok_or_else(|| format!("no such user: {username}"))?;
+            let used = if reconcile {
+                let store = kolimi_store::BlobStore::open(data.join("blobs")).await?;
+                let bytes = store.usage_bytes(user.id).await?;
+                db.set_used_bytes(user.id, bytes, kolimi_db::now_millis())
+                    .await?;
+                bytes
+            } else {
+                user.used_bytes.max(0) as u64
+            };
+            let default_quota = std::env::var("KOLIMI_USER_QUOTA_BYTES")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            let effective = match user.quota_bytes {
+                Some(q) if q > 0 => q as u64,
+                Some(_) => 0,
+                None => default_quota,
+            };
+            let quota = if effective == 0 {
+                "unlimited".to_string()
+            } else {
+                format!("{effective} bytes")
+            };
+            let source = if reconcile { " (recomputed)" } else { "" };
+            println!("{username}: used {used} bytes of {quota}{source}");
         }
         UserCommand::List => {
             for user in db.list_users().await? {

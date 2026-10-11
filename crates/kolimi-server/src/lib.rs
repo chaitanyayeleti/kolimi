@@ -174,8 +174,11 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/users", get(api::list_users).post(api::create_user))
         .route(
             "/api/users/{username}",
-            patch(api::update_user).delete(api::delete_user),
+            get(api::user_detail)
+                .patch(api::update_user)
+                .delete(api::delete_user),
         )
+        .route("/api/users/{username}/usage", get(api::user_usage))
         .route("/api/passkeys", get(api_passkey::list))
         .route("/api/passkeys/{id}", delete(api_passkey::delete))
         .route(

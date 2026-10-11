@@ -32,6 +32,38 @@ async fn setup() -> (tempfile::TempDir, AppState, Router) {
     (dir, state, app)
 }
 
+async fn admin_req(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, basic("alice", PASS));
+    let body = match body {
+        Some(value) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(value.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
 async fn put(app: &Router, path: &str, body: Vec<u8>) -> StatusCode {
     app.clone()
         .oneshot(
@@ -86,6 +118,67 @@ async fn per_user_quota_blocks_and_counts() {
         put(&app, "/dav/big.bin", vec![2u8; 800]).await,
         StatusCode::CREATED
     );
+}
+
+#[tokio::test]
+async fn admin_manages_quota_and_reads_usage() {
+    let (_dir, _state, app) = setup().await;
+    assert_eq!(
+        put(&app, "/dav/a.bin", vec![9u8; 2000]).await,
+        StatusCode::CREATED
+    );
+
+    // The list carries the cached quota/usage (no blob-tree walk).
+    let (status, body) = admin_req(&app, "GET", "/api/users", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let account = &body["users"][0];
+    assert_eq!(account["username"], "alice");
+    assert!(account["used_bytes"].as_i64().unwrap() >= 2000);
+
+    // Fresh usage endpoint reflects reality; default quota is unlimited.
+    let (status, body) = admin_req(&app, "GET", "/api/users/alice/usage", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["used_bytes"].as_i64().unwrap() >= 2000);
+    assert_eq!(body["effective_quota_bytes"], 0);
+
+    // Set a per-user quota.
+    let (status, body) = admin_req(
+        &app,
+        "PATCH",
+        "/api/users/alice",
+        Some(serde_json::json!({ "quota_bytes": 4096 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["quota_bytes"], 4096);
+    let (_, body) = admin_req(&app, "GET", "/api/users/alice/usage", None).await;
+    assert_eq!(body["effective_quota_bytes"], 4096);
+
+    // Clear the override back to the server default (`null`).
+    let (status, body) = admin_req(
+        &app,
+        "PATCH",
+        "/api/users/alice",
+        Some(serde_json::json!({ "quota_bytes": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["quota_bytes"].is_null());
+
+    // Negative quotas are refused.
+    let (status, _) = admin_req(
+        &app,
+        "PATCH",
+        "/api/users/alice",
+        Some(serde_json::json!({ "quota_bytes": -5 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Detail endpoint.
+    let (status, body) = admin_req(&app, "GET", "/api/users/alice", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["username"], "alice");
 }
 
 #[tokio::test]

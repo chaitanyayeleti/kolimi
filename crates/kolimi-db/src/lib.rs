@@ -442,6 +442,18 @@ impl Db {
         )
     }
 
+    /// A page of users ordered by id (keyset pagination): those with
+    /// `id > after_id`, at most `limit`.
+    pub async fn users_page(&self, after_id: i64, limit: i64) -> Result<Vec<User>, DbError> {
+        Ok(
+            sqlx::query_as::<_, User>("SELECT * FROM users WHERE id > ? ORDER BY id LIMIT ?")
+                .bind(after_id)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
+
     /// Lists all users ordered by name.
     pub async fn list_users(&self) -> Result<Vec<User>, DbError> {
         Ok(
