@@ -9,7 +9,7 @@ use kolimi_db::DbError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{AppState, CSRF_COOKIE, SESSION_COOKIE, SESSION_TTL_MILLIS};
+use crate::{AppState, CSRF_COOKIE, SESSION_COOKIE, SESSION_TTL_MILLIS, audit};
 
 /// Liveness probe.
 pub async fn healthz() -> &'static str {
@@ -37,6 +37,15 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
         return bad_request("username and password are required");
     }
     if state.lockout.check(&req.username).is_some() {
+        audit(
+            &state,
+            None,
+            None,
+            "auth.login_failed",
+            &req.username,
+            json!({ "reason": "locked_out" }),
+        )
+        .await;
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": "too many failed attempts, try again later" })),
@@ -46,10 +55,41 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
 
     let Some(user) = state.db.find_user(&req.username).await.ok().flatten() else {
         state.lockout.record_failure(&req.username);
+        audit(
+            &state,
+            None,
+            None,
+            "auth.login_failed",
+            &req.username,
+            json!({ "reason": "unknown_user" }),
+        )
+        .await;
         return unauthorized("invalid credentials");
     };
     if user.disabled {
         state.lockout.record_failure(&req.username);
+        audit(
+            &state,
+            None,
+            None,
+            "auth.login_failed",
+            &req.username,
+            json!({ "reason": "disabled" }),
+        )
+        .await;
+        return unauthorized("invalid credentials");
+    }
+    if user.password_hash.is_empty() {
+        state.lockout.record_failure(&req.username);
+        audit(
+            &state,
+            None,
+            None,
+            "auth.login_failed",
+            &req.username,
+            json!({ "reason": "passkey_only" }),
+        )
+        .await;
         return unauthorized("invalid credentials");
     }
 
@@ -62,9 +102,27 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     .unwrap_or(false);
     if !verified {
         state.lockout.record_failure(&req.username);
+        audit(
+            &state,
+            None,
+            None,
+            "auth.login_failed",
+            &req.username,
+            json!({ "reason": "bad_password" }),
+        )
+        .await;
         return unauthorized("invalid credentials");
     }
     state.lockout.record_success(&req.username);
+    audit(
+        &state,
+        Some(user.id),
+        Some(&user.username),
+        "auth.login",
+        &user.username,
+        json!({ "method": "password" }),
+    )
+    .await;
 
     start_session(&state, &user).await
 }
@@ -126,6 +184,15 @@ pub async fn logout(
     if let Some(hash) = user.session_hash {
         let _ = state.db.delete_session(&hash).await;
     }
+    audit(
+        &state,
+        Some(user.user_id),
+        Some(&user.username),
+        "auth.logout",
+        &user.username,
+        json!({}),
+    )
+    .await;
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
@@ -204,15 +271,26 @@ pub async fn create_user(
         Err(_) => return internal_error(),
     };
     match state.db.create_user(&req.username, &hash).await {
-        Ok(created) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "id": created.id,
-                "username": created.username,
-                "is_admin": created.is_admin,
-            })),
-        )
-            .into_response(),
+        Ok(created) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "user.add",
+                &created.username,
+                json!({ "by": "api" }),
+            )
+            .await;
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": created.id,
+                    "username": created.username,
+                    "is_admin": created.is_admin,
+                })),
+            )
+                .into_response()
+        }
         Err(DbError::Conflict(_)) => (
             StatusCode::CONFLICT,
             Json(json!({ "error": "username already exists" })),

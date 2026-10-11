@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use crate::AppState;
 use crate::api::{bad_request, internal_error, start_session, unauthorized};
+use crate::audit;
 
 const MAX_PASSKEYS_PER_USER: i64 = 20;
 const MAX_PASSKEY_NAME_LEN: usize = 64;
@@ -137,11 +138,22 @@ pub async fn register_finish(
         )
         .await
     {
-        Ok(row) => (
-            StatusCode::CREATED,
-            Json(json!({ "id": row.id, "name": row.name })),
-        )
-            .into_response(),
+        Ok(row) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "passkey.add",
+                &row.name,
+                json!({}),
+            )
+            .await;
+            (
+                StatusCode::CREATED,
+                Json(json!({ "id": row.id, "name": row.name })),
+            )
+                .into_response()
+        }
         Err(DbError::Conflict(_)) => (
             StatusCode::CONFLICT,
             Json(json!({ "error": "a passkey with that name already exists" })),
@@ -169,7 +181,18 @@ pub async fn delete(
     Path(passkey_id): Path<i64>,
 ) -> Response {
     match state.db.delete_passkey(user.user_id, passkey_id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "passkey.remove",
+                &passkey_id.to_string(),
+                json!({}),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(DbError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => internal_error(),
     }
@@ -249,6 +272,15 @@ pub async fn login_finish(State(state): State<AppState>, Json(req): Json<LoginFi
         Err(error) => {
             tracing::debug!(error = %error, "passkey authentication failed");
             state.lockout.record_failure(&req.username);
+            audit(
+                &state,
+                None,
+                None,
+                "auth.login_failed",
+                &req.username,
+                json!({ "reason": "bad_passkey" }),
+            )
+            .await;
             return unauthorized("invalid credentials");
         }
     };
@@ -270,5 +302,14 @@ pub async fn login_finish(State(state): State<AppState>, Json(req): Json<LoginFi
     }
 
     state.lockout.record_success(&req.username);
+    audit(
+        &state,
+        Some(user.id),
+        Some(&user.username),
+        "auth.login",
+        &user.username,
+        json!({ "method": "passkey" }),
+    )
+    .await;
     start_session(&state, &user).await
 }

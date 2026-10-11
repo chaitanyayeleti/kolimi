@@ -11,9 +11,13 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+blake3.workspace = true
+hex.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tempfile.workspace = true

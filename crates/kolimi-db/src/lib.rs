@@ -1,6 +1,6 @@
 //! SQLite persistence for Kolimi: users, sessions, and the file tree.
 
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use serde::Serialize;
 use sqlx::{
@@ -8,9 +8,11 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
+mod audit;
 mod dav;
 mod search_state;
 mod sharing;
+pub use audit::{AuditEntry, AuditVerify};
 pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
 pub use sharing::{Group, LinkSession, ReceivedShare, ShareRow};
 
@@ -196,6 +198,7 @@ pub enum DeadPropOp {
 #[derive(Debug, Clone)]
 pub struct Db {
     pool: SqlitePool,
+    audit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 fn map_sqlx(e: sqlx::Error, what: &str) -> DbError {
@@ -236,7 +239,15 @@ impl Db {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            audit_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
+    }
+
+    /// Raw pool access for tests and low-level helpers.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Creates a user plus their root directory. The first user becomes admin.
@@ -299,6 +310,21 @@ impl Db {
                 .fetch_all(&self.pool)
                 .await?,
         )
+    }
+
+    /// Removes the password hash, making the account passkey-only.
+    ///
+    /// Password login is rejected for accounts whose hash is empty; the
+    /// caller must ensure at least one passkey is registered first.
+    pub async fn clear_password(&self, username: &str) -> Result<(), DbError> {
+        let result = sqlx::query("UPDATE users SET password_hash = '' WHERE username = ?")
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("user {username}")));
+        }
+        Ok(())
     }
 
     /// Replaces a user's password hash.
@@ -775,6 +801,25 @@ impl Db {
         .bind(size)
         .bind(modified_at)
         .execute(&self.pool)
+        .await?;
+        let mut details = serde_json::Map::new();
+        details.insert("size".to_string(), serde_json::json!(size));
+        if let Some(from) = from_path {
+            details.insert("from".to_string(), serde_json::json!(from));
+        }
+        if let Some(content) = content_id {
+            details.insert(
+                "content_id".to_string(),
+                serde_json::json!(hex::encode(content)),
+            );
+        }
+        self.audit_append(
+            Some(user_id),
+            None,
+            &format!("file.{op}"),
+            path,
+            &serde_json::Value::Object(details),
+        )
         .await?;
         Ok(())
     }

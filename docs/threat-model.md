@@ -61,7 +61,8 @@ client ──(TLS, untrusted network)──> kolimi-server
 | A2 DAV object injection | iCalendar parsed + UID rules enforced; vCards structurally validated; raw payloads stored byte-for-byte (no re-serialization); 10 MiB cap; XML parsers size-capped | M4 |
 | A2 DAV namespace shadowing | `principals`/`calendars`/`addressbooks` reserved at the root; principals/homes are owner-only and 404 for everyone else | M4 |
 | A4 plugin root | WASM component model, explicit capabilities (no ambient FS/net), fuel metering | M7 |
-| A5 operator reads content | optional client-side E2EE (per-file keys; MLS groups in v2); metadata remains visible in v1 — documented honestly | M6 |
+| A5 operator reads content | optional client-side E2EE (per-file keys; MLS groups in v2); metadata remains visible in v1 — documented honestly (RFC 0007) | M6 |
+| Operator tampers with or deletes audit records | BLAKE3 hash-chained append-only audit log; `audit verify` detects edits, deletions, and reordering (`audit_log` rows are only ever inserted) | landed (M6) |
 | A6 MITM | rustls, TLS 1.3 only, HSTS, no mixed content in UI | M1 |
 | A7 memory scraping | `zeroize`/`secrecy` for secrets, no keys in logs; full-disk encryption is the operator's responsibility | M1+ |
 | A8 malicious dependency | `cargo-deny`, `cargo-audit`, `cargo-vet`, minimal dep tree, pinned lockfile in CI | M0 |

@@ -210,3 +210,23 @@ pub fn build_app(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
+
+/// Best-effort audit append for request handlers: failures are logged but
+/// never fail the audited operation. Use [`kolimi_db::Db::audit_append`]
+/// directly where the append must abort the operation.
+pub async fn audit(
+    state: &AppState,
+    actor_id: Option<i64>,
+    actor: Option<&str>,
+    action: &str,
+    subject: &str,
+    details: serde_json::Value,
+) {
+    if let Err(error) = state
+        .db
+        .audit_append(actor_id, actor, action, subject, &details)
+        .await
+    {
+        tracing::error!(%error, action, subject, "audit append failed");
+    }
+}

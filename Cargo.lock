@@ -2041,7 +2041,10 @@ dependencies = [
 name = "kolimi-db"
 version = "0.0.1"
 dependencies = [
+ "blake3",
+ "hex",
  "serde",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",

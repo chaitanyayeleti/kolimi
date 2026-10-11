@@ -17,7 +17,7 @@ use kolimi_db::{DbError, ShareRow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{AppState, api};
+use crate::{AppState, api, audit};
 
 /// Default lifetime of a public link (30 days).
 pub const DEFAULT_LINK_TTL_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -165,11 +165,26 @@ pub async fn create(
     };
 
     match result {
-        Ok(share) => (
-            StatusCode::CREATED,
-            Json(share_json(&state, &share, generated.as_deref()).await),
-        )
-            .into_response(),
+        Ok(share) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "share.create",
+                &share.id.to_string(),
+                json!({
+                    "kind": share.kind,
+                    "path": req.path,
+                    "recipient": req.recipient,
+                }),
+            )
+            .await;
+            (
+                StatusCode::CREATED,
+                Json(share_json(&state, &share, generated.as_deref()).await),
+            )
+                .into_response()
+        }
         Err(DbError::Conflict(_)) => conflict("already shared with that recipient"),
         Err(_) => api::internal_error(),
     }
@@ -349,6 +364,15 @@ pub async fn update(
     let Some(share) = state.db.share_by_id(share_id).await.ok().flatten() else {
         return not_found();
     };
+    audit(
+        &state,
+        Some(user.user_id),
+        Some(&user.username),
+        "share.update",
+        &share_id.to_string(),
+        json!({}),
+    )
+    .await;
     (StatusCode::OK, Json(share_json(&state, &share, None).await)).into_response()
 }
 
@@ -388,7 +412,18 @@ pub async fn delete(
         return forbidden("not allowed to revoke this share");
     }
     match state.db.delete_share(share_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "share.delete",
+                &share_id.to_string(),
+                json!({}),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => not_found(),
         Err(_) => api::internal_error(),
     }
@@ -520,6 +555,15 @@ async fn public_download_inner(
         Ok(data) => data,
         Err(_) => return api::internal_error(),
     };
+    audit(
+        state,
+        None,
+        Some("link"),
+        "link.download",
+        &share.id.to_string(),
+        json!({ "file": node.name }),
+    )
+    .await;
     let content_type = mime_guess::from_path(&node.name)
         .first_or_octet_stream()
         .to_string();
@@ -572,9 +616,27 @@ pub async fn public_unlock(
     .unwrap_or(false);
     if !verified {
         state.lockout.record_failure(&lockout_key);
+        audit(
+            &state,
+            None,
+            Some("link"),
+            "link.unlock_failed",
+            &share.id.to_string(),
+            json!({}),
+        )
+        .await;
         return api::unauthorized("wrong password");
     }
     state.lockout.record_success(&lockout_key);
+    audit(
+        &state,
+        None,
+        Some("link"),
+        "link.unlock",
+        &share.id.to_string(),
+        json!({}),
+    )
+    .await;
 
     let Ok(session_token) = token::new_session_token() else {
         return api::internal_error();

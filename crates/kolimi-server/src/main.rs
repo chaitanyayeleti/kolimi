@@ -49,6 +49,11 @@ enum Command {
         #[arg(long, env = "KOLIMI_DATA", default_value = "./kolimi-data")]
         data: PathBuf,
     },
+    /// Inspect the append-only audit log.
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
     /// Internal: sandboxed preview worker (invoked by the server itself).
     #[command(hide = true)]
     PreviewWorker {
@@ -109,6 +114,23 @@ enum UserCommand {
     },
     /// List users.
     List,
+    /// Make a user passkey-only (requires at least one registered passkey).
+    PasskeyOnly { username: String },
+}
+
+#[derive(Subcommand)]
+enum AuditCommand {
+    /// List recent audit entries, newest first (JSON lines).
+    List {
+        /// Maximum number of entries.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Only entries with a smaller id.
+        #[arg(long)]
+        before: Option<i64>,
+    },
+    /// Verify the hash chain (exit 1 if broken).
+    Verify,
 }
 
 #[derive(Subcommand)]
@@ -141,6 +163,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(Command::Group { command }) => group_command(command).await,
         Some(Command::Backup { data, to }) => backup(data, to).await,
         Some(Command::Verify { data }) => verify(data).await,
+        Some(Command::Audit { command }) => audit_command(command).await,
         Some(Command::PreviewWorker { kind, input, max }) => {
             match kolimi_preview::worker::run(&kind, &input, max) {
                 Ok(()) => std::process::exit(0),
@@ -212,6 +235,14 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             if admin && !user.is_admin {
                 db.set_admin(user.id, true).await?;
             }
+            db.audit_append(
+                None,
+                Some("cli"),
+                "user.add",
+                &user.username,
+                &serde_json::json!({ "admin": user.is_admin || admin }),
+            )
+            .await?;
             println!(
                 "created user {} (id {}, admin: {})",
                 user.username,
@@ -226,7 +257,38 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             };
             let hash = kolimi_auth::password::hash_password(&password)?;
             db.set_password(&username, &hash).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "user.passwd",
+                &username,
+                &serde_json::json!({}),
+            )
+            .await?;
             println!("password updated for {username}");
+        }
+        UserCommand::PasskeyOnly { username } => {
+            let user = db
+                .find_user(&username)
+                .await?
+                .ok_or_else(|| format!("no such user: {username}"))?;
+            let passkeys = db.count_passkeys(user.id).await?;
+            if passkeys == 0 {
+                return Err(format!(
+                    "{username} has no passkeys; register one before going passkey-only"
+                )
+                .into());
+            }
+            db.clear_password(&username).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "user.passkey_only",
+                &username,
+                &serde_json::json!({ "passkeys": passkeys }),
+            )
+            .await?;
+            println!("{username} is now passkey-only ({passkeys} passkeys)");
         }
         UserCommand::List => {
             for user in db.list_users().await? {
@@ -249,6 +311,14 @@ async fn group_command(command: GroupCommand) -> Result<(), Box<dyn Error>> {
     match command {
         GroupCommand::Add { name } => {
             let group = db.create_group(&name).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "group.add",
+                &group.name,
+                &serde_json::json!({ "id": group.id }),
+            )
+            .await?;
             println!("created group {} (id {})", group.name, group.id);
         }
         GroupCommand::List => {
@@ -273,6 +343,14 @@ async fn group_command(command: GroupCommand) -> Result<(), Box<dyn Error>> {
                 .await?
                 .ok_or_else(|| format!("no such user: {username}"))?;
             db.add_group_member(group.id, user.id).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "group.member_add",
+                &group.name,
+                &serde_json::json!({ "user": user.username }),
+            )
+            .await?;
             println!("added {} to {}", user.username, group.name);
         }
         GroupCommand::RemoveMember { group, username } => {
@@ -285,6 +363,14 @@ async fn group_command(command: GroupCommand) -> Result<(), Box<dyn Error>> {
                 .await?
                 .ok_or_else(|| format!("no such user: {username}"))?;
             if db.remove_group_member(group.id, user.id).await? {
+                db.audit_append(
+                    None,
+                    Some("cli"),
+                    "group.member_remove",
+                    &group.name,
+                    &serde_json::json!({ "user": user.username }),
+                )
+                .await?;
                 println!("removed {} from {}", user.username, group.name);
             } else {
                 println!("{} was not a member of {}", user.username, group.name);
@@ -296,6 +382,14 @@ async fn group_command(command: GroupCommand) -> Result<(), Box<dyn Error>> {
                 .await?
                 .ok_or_else(|| format!("no such group: {name}"))?;
             db.delete_group(group.id).await?;
+            db.audit_append(
+                None,
+                Some("cli"),
+                "group.delete",
+                &group.name,
+                &serde_json::json!({ "id": group.id }),
+            )
+            .await?;
             println!("deleted group {}", group.name);
         }
     }
@@ -345,6 +439,48 @@ async fn verify(data: PathBuf) -> Result<(), Box<dyn Error>> {
         return Err(format!("{failures} user(s) failed verification").into());
     }
     println!("all content verified");
+    Ok(())
+}
+
+async fn audit_command(command: AuditCommand) -> Result<(), Box<dyn Error>> {
+    let data: PathBuf =
+        std::env::var("KOLIMI_DATA").map_or_else(|_| PathBuf::from("./kolimi-data"), PathBuf::from);
+    tokio::fs::create_dir_all(&data).await?;
+    let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
+
+    match command {
+        AuditCommand::List { limit, before } => {
+            for entry in db.audit_list(limit, before).await? {
+                let details: serde_json::Value =
+                    serde_json::from_str(&entry.details).unwrap_or(serde_json::Value::Null);
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": entry.id,
+                        "ts": entry.ts,
+                        "actor_id": entry.actor_id,
+                        "actor": entry.actor,
+                        "action": entry.action,
+                        "subject": entry.subject,
+                        "details": details,
+                    })
+                );
+            }
+        }
+        AuditCommand::Verify => {
+            let verify = db.audit_verify().await?;
+            match verify.first_bad {
+                None => println!("audit chain ok ({} entries)", verify.entries),
+                Some(id) => {
+                    eprintln!(
+                        "audit chain BROKEN at entry {id} ({} entries checked)",
+                        verify.entries
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
     Ok(())
 }
 

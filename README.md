@@ -174,12 +174,42 @@ implemented yet).
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE).
 
-**Status:** M5 server side complete — tantivy full-text search fed from
+## Audit log
+
+Every security-relevant action (logins and failures, logouts, passkey
+changes, file writes/deletes/moves, shares, public-link unlocks and
+downloads, CLI user/group changes) is appended to a hash-chained audit
+log: each entry hashes the previous entry's hash together with its own
+fields, so editing, removing, or reordering rows is detectable.
+
+```sh
+kolimi-server audit list --limit 50    # JSON lines, newest first
+kolimi-server audit verify             # exits 1 and names the first bad entry
+```
+
+The log is tamper-evident, not fail-closed: a failed append is logged
+but does not fail the audited operation.
+
+## Passkey-only accounts
+
+A user with a registered passkey can drop the password entirely:
+
+```sh
+kolimi-server user passkey-only alice  # requires >= 1 registered passkey
+```
+
+Password login for such accounts is rejected (and audited); sign-in
+goes through the WebAuthn endpoints.
+
+## Desktop sync (alpha)
 the change feed (per-user isolation, snippet excerpts, UI search box) and
 sandboxed previews: decoding happens in a re-executed worker under
 landlock + seccomp + rlimits with wall-clock kills, so a hostile image
 can never take the server down (tested, plus a cargo-fuzz decode target).
 Desktop sync core alpha landed (bidirectional delta sync CLI with
-conflict handling, tested end-to-end against a live server). 228 tests;
-litmus 100%; rclone byte-identical. Remaining M5: Tauri shell + mobile
+conflict handling, tested end-to-end against a live server). M6
+started: append-only hash-chained audit log (auth, file, share, link,
+passkey, and CLI events; `audit list|verify`), passkey-only accounts,
+and the E2EE design (RFC 0007; implementation next). 231 tests; litmus
+100%; rclone byte-identical. Remaining M5: Tauri shell + mobile
 background upload (uniffi).
