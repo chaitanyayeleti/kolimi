@@ -8,7 +8,7 @@ Start here.
 | [install.md](install.md) | Every way to install and run the server (script, AUR, .deb, Docker/Podman, Helm, systemd), Docker Compose with Traefik, TLS, Caddy/nginx/Traefik proxies, first-run |
 | [operations.md](operations.md) | Day-2 administration: users, groups, TOTP, passkeys, backups, scrub/verify, audit, E2EE operations, plugins, metrics, upgrades, troubleshooting |
 | [architecture.md](architecture.md) | Crate map, dependency rules, and why the single binary is not a code monolith |
-| [plan-clients.md](plan-clients.md) | Client roadmap — Android first (F-Droid), then desktop/iOS: architecture, F-Droid requirements, week-by-week plan |
+| [plan-clients.md](plan-clients.md) | Client roadmap — desktop first (Linux → Windows/macOS), then mobile (Android first, F-Droid), then iOS: architecture, F-Droid requirements, week-by-week plan |
 | [threat-model.md](threat-model.md) | Assets, adversaries, and mitigations |
 | [crypto-review.md](crypto-review.md) | Internal review of the E2EE design (invariants, attacks, gaps) |
 | [audit/README.md](audit/README.md) | External audit package: scope, artifacts, reproduction |
