@@ -116,6 +116,12 @@ docker run -d --name kolimi \
   Keep this in mind if you use `--no-cache` (it still reuses the cache
   mounts, so it stays fast) or `docker builder prune` (clears them; the
   next build is slow again).
+- **Disk:** those cache mounts (the Rust `target/` in particular) can grow
+  to several GB, and each rebuild can leave old images behind. On a small
+  host this adds up. Inspect with `docker system df -v` and bound the cache
+  with `docker builder prune --keep-storage 6GB` (keeps recent layers, frees
+  the rest) plus `docker image prune -a` for stale images. Wiping the cache
+  entirely makes the next build slow again, so prefer `--keep-storage`.
 - Compose examples: `packaging/docker/compose.yaml` (direct port) and
   `packaging/docker/compose.traefik.yaml` (TLS via Traefik, below).
 - Create the first admin inside the container:

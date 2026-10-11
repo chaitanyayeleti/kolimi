@@ -253,5 +253,6 @@ See [install.md](install.md#upgrading). Migrations are forward-only.
 | "too many failed attempts" | Login lockout (5 failures / 15 min, keyed on account **and** client address) or per-client rate limiting on auth/link endpoints; wait it out, then check the audit log for `auth.login_failed` reasons. |
 | Sync reports conflicts | Expected when both sides edited a file: the server version wins and your edit is kept as `name.conflict-<ts>`. |
 | Server won't start after upgrade | Restore the pre-upgrade backup (migrations are forward-only). |
+| Disk filling on a Docker host | The BuildKit build cache (Rust `target/`, several GB) and old images dominate. Inspect with `docker system df -v`; bound the cache with `docker builder prune --keep-storage 6GB` and remove stale images with `docker image prune -a`. The app data is the `kolimi-data` volume (see `du -sh /var/lib/kolimi` or the volume path). |
 
 Logs go to stderr; with systemd: `journalctl -u kolimi -f`.
