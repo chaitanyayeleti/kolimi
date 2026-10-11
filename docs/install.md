@@ -7,6 +7,7 @@ matches your environment; all of them run the same program.
 - [Arch Linux (AUR)](#arch-linux-aur)
 - [Debian / Ubuntu (.deb)](#debian--ubuntu-deb)
 - [Docker / Podman](#docker--podman)
+- [Docker Compose with Traefik (automatic HTTPS)](#docker-compose-with-traefik)
 - [Kubernetes (Helm)](#kubernetes-helm)
 - [Manual / from source](#manual--from-source)
 - [TLS and reverse proxies](#tls-and-reverse-proxies)
@@ -93,7 +94,8 @@ docker run -d --name kolimi \
 
 - The image is distroless and runs as nonroot (uid 65532); the `/data`
   volume is pre-owned so named volumes inherit the right ownership.
-- Compose example: `packaging/docker/compose.yaml`.
+- Compose examples: `packaging/docker/compose.yaml` (direct port) and
+  `packaging/docker/compose.traefik.yaml` (TLS via Traefik, below).
 - Create the first admin inside the container:
 
 ```sh
@@ -101,6 +103,45 @@ docker exec kolimi kolimi-server user add admin --password '…'
 ```
 
 Podman works identically (`podman build`, `podman run`).
+
+## Docker Compose with Traefik
+
+A production-ready stack: Traefik terminates TLS with an automatic
+Let's Encrypt certificate (TLS challenge), Kolimi is discovered through
+Docker labels, and the app publishes no ports at all.
+
+```sh
+cd packaging/docker
+cp .env.example .env         # set KOLIMI_DOMAIN and ACME_EMAIL
+docker compose -f compose.traefik.yaml up -d
+
+# create the first admin inside the container
+docker compose -f compose.traefik.yaml exec kolimi \
+  kolimi-server user add admin
+```
+
+What the compose file sets up:
+
+- `KOLIMI_ORIGIN=https://$KOLIMI_DOMAIN` and
+  `KOLIMI_SECURE_COOKIES=true` — **the origin must match the public URL
+  exactly**, or passkey registration will fail.
+- HTTP→HTTPS redirect on port 80; the ACME account and certificates live
+  in the `traefik-acme` volume.
+- The Docker socket is mounted read-only (Traefik only watches labels).
+- `kolimi-data` holds the database and blobs; back it up as described in
+  [operations.md](operations.md#backup-and-restore).
+
+Requirements: DNS for `KOLIMI_DOMAIN` already pointing at the host, and
+ports 80/443 reachable (the TLS challenge needs port 443). WebDAV,
+CalDAV, the JSON API, `/app`, `/plugins`, and public links all share the
+same host rule — no extra routing needed.
+
+Running Traefik outside Compose works the same way; point its Docker
+provider at this container and give Kolimi the labels above
+(`traefik.http.routers.kolimi.*`). If you prefer file-based Traefik
+configuration, the equivalent dynamic config is a router with
+`rule: Host(`cloud.example.com`)`, `entryPoints: [websecure]`,
+`tls.certResolver: le`, and a service pointing at `kolimi:8080`.
 
 ## Kubernetes (Helm)
 
@@ -163,7 +204,10 @@ kolimi-server serve --tls-cert /etc/kolimi/tls/cert.pem \
   --tls-key /etc/kolimi/tls/key.pem --secure-cookies
 ```
 
-**Behind a proxy** (recommended; the server stays on localhost):
+**Behind a proxy** (recommended; the server stays on localhost).
+Traefik users can jump to
+[Docker Compose with Traefik](#docker-compose-with-traefik); the
+snippets below cover Caddy and nginx.
 
 Caddy:
 

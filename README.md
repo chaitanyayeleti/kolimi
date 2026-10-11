@@ -253,7 +253,9 @@ Other paths:
   (postinst creates the `kolimi` user and state dir).
 - **Docker**: `docker build -f packaging/docker/Dockerfile -t kolimi .`
   then `docker run -d -p 8080:8080 -v kolimi-data:/data kolimi`
-  (distroless, nonroot). Compose example in `packaging/docker/`.
+  (distroless, nonroot). Compose examples in `packaging/docker/`:
+  `compose.yaml` (direct port) and `compose.traefik.yaml`
+  (automatic HTTPS via Traefik).
 - **Kubernetes**: `helm install kolimi packaging/helm/kolimi`
   (PVC, probes, nonroot, ingress values included).
 - **systemd**: `packaging/systemd/kolimi.service` with hardening

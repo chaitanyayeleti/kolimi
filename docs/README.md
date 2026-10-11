@@ -5,7 +5,7 @@ Start here.
 | Document | What it covers |
 | --- | --- |
 | [../README.md](../README.md) | What Kolimi is, feature highlights, quick start |
-| [install.md](install.md) | Every way to install and run the server (script, AUR, .deb, Docker/Podman, Helm, systemd), TLS, reverse proxies, first-run |
+| [install.md](install.md) | Every way to install and run the server (script, AUR, .deb, Docker/Podman, Helm, systemd), Docker Compose with Traefik, TLS, Caddy/nginx/Traefik proxies, first-run |
 | [operations.md](operations.md) | Day-2 administration: users, groups, TOTP, passkeys, backups, scrub/verify, audit, E2EE operations, plugins, metrics, upgrades, troubleshooting |
 | [architecture.md](architecture.md) | Crate map, dependency rules, and why the single binary is not a code monolith |
 | [threat-model.md](threat-model.md) | Assets, adversaries, and mitigations |

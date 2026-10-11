@@ -1,0 +1,64 @@
+# Kolimi behind Traefik with automatic HTTPS (Let's Encrypt).
+#
+#   1. cp .env.example .env  and set KOLIMI_DOMAIN + ACME_EMAIL
+#   2. docker compose -f compose.traefik.yaml up -d
+#   3. open https://$KOLIMI_DOMAIN/app/ and create the admin:
+#        docker compose -f compose.traefik.yaml exec kolimi \
+#          kolimi-server user add admin
+#
+# Traefik discovers Kolimi through Docker labels and terminates TLS;
+# the app itself stays on the internal network and never publishes a
+# port. KOLIMI_ORIGIN must equal the public URL or passkeys will refuse
+# to register.
+
+services:
+  traefik:
+    image: traefik:v3.6
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?set ACME_EMAIL in .env}
+      - --certificatesresolvers.le.acme.storage=/acme/acme.json
+      - --certificatesresolvers.le.acme.tlschallenge=true
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Read-only Docker socket: Traefik only needs to watch labels.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-acme:/acme
+    networks:
+      - kolimi
+
+  kolimi:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    image: kolimi:latest
+    restart: unless-stopped
+    environment:
+      KOLIMI_ORIGIN: https://${KOLIMI_DOMAIN:?set KOLIMI_DOMAIN in .env}
+      KOLIMI_SECURE_COOKIES: "true"
+      RUST_LOG: info
+    volumes:
+      - kolimi-data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.kolimi.rule=Host(`${KOLIMI_DOMAIN}`)
+      - traefik.http.routers.kolimi.entrypoints=websecure
+      - traefik.http.routers.kolimi.tls.certresolver=le
+      - traefik.http.services.kolimi.loadbalancer.server.port=8080
+    networks:
+      - kolimi
+
+networks:
+  kolimi:
+
+volumes:
+  kolimi-data:
+  traefik-acme:
