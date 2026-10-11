@@ -6,7 +6,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0]
+## [0.1.1]
+
+### Added
+- Release artifacts for **`x86_64-unknown-linux-musl`** (static) and
+  **`aarch64-unknown-linux-gnu`** targets, plus automated **AUR** updates.
+
+### Fixed
+- SBOM and release-publish steps in the release workflow.
 
 First tagged release. A pure-Rust, single-binary Nextcloud alternative.
 

@@ -24,3 +24,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 url.workspace = true
 webauthn-rs.workspace = true
+
+# The passkey stack (webauthn-rs -> webauthn-attestation-ca) pulls openssl-sys
+# unconditionally. Native targets use the system OpenSSL (libssl-dev); musl
+# statically links, so vendor OpenSSL there.
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
