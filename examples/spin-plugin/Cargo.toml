@@ -1,0 +1,18 @@
+[package]
+name = "spin-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "Test plugin that loops forever (fuel-limit fixture)"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "kolimi:spin-plugin"
+
+[workspace]

@@ -1,0 +1,22 @@
+[package]
+name = "kolimi-plugins"
+description = "Sandboxed WebAssembly plugin host (component model, capability-scoped)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wasmtime = { version = "49", features = ["component-model"] }
+wasmtime-wasi = "49"
+
+[dev-dependencies]
+tempfile.workspace = true

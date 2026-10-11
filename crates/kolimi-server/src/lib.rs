@@ -13,6 +13,7 @@ pub mod api_sync;
 pub mod auth;
 pub mod janitor;
 pub mod metrics;
+pub mod plugins;
 pub mod preview;
 pub mod search_indexer;
 pub mod ui;
@@ -64,6 +65,9 @@ pub enum InitError {
     /// Metrics registration failure.
     #[error("metrics: {0}")]
     Metrics(#[from] prometheus::Error),
+    /// Plugin host initialization failure.
+    #[error("plugins: {0}")]
+    Plugins(#[from] kolimi_plugins::PluginError),
 }
 
 /// Shared application state.
@@ -91,6 +95,8 @@ pub struct AppState {
     pub preview_permits: Arc<tokio::sync::Semaphore>,
     /// Prometheus metrics.
     pub metrics: Arc<metrics::Metrics>,
+    /// Sandboxed WebAssembly plugins.
+    pub plugins: Arc<kolimi_plugins::PluginHost>,
 }
 
 impl AppState {
@@ -124,6 +130,7 @@ impl AppState {
             preview_worker,
             preview_permits: Arc::new(tokio::sync::Semaphore::new(preview::MAX_CONCURRENT_WORKERS)),
             metrics: Arc::new(metrics::Metrics::new()?),
+            plugins: Arc::new(kolimi_plugins::PluginHost::load(&data_dir.join("plugins"))?),
         })
     }
 }
@@ -175,6 +182,15 @@ pub fn build_app(state: AppState) -> Router {
             get(api_e2ee::get_share_key).put(api_e2ee::put_share_key),
         )
         .route("/api/sync/shared-tree", get(api_sync::shared_tree))
+        .route("/api/plugins", get(plugins::list))
+        .route(
+            "/plugins/{name}",
+            get(plugins::handle_root).post(plugins::handle_root),
+        )
+        .route(
+            "/plugins/{name}/{*rest}",
+            get(plugins::handle_path).post(plugins::handle_path),
+        )
         .route("/api/files", axum::routing::put(api_sync::commit_file))
         .route(
             "/api/chunks/{hash}",

@@ -267,6 +267,27 @@ TOTP (RFC 6238, 6 digits, 30 s) plus ten one-time recovery codes:
 All events (`totp.enable`, `totp.disable`, `auth.totp_required`,
 `totp.admin_disable`) land in the audit log.
 
+## Plugins (sandboxed WASM)
+
+Drop a WebAssembly component and a metadata file into
+`<data-dir>/plugins/`:
+
+```sh
+cp hello_plugin.wasm /var/lib/kolimi/plugins/hello.wasm
+echo '{"name":"hello","version":"0.1.0","enabled":true}' \
+    > /var/lib/kolimi/plugins/hello.json
+```
+
+The plugin serves `/plugins/hello/…` for signed-in users and shows up in
+`GET /api/plugins`. The sandbox is the import list: plugins get logging,
+a plugin-private key-value store, and the clock — nothing else. WASI is
+linked with an empty context (no directories, no sockets, no env), each
+call has a fuel budget and a 16 MiB memory cap, and a trapping plugin is
+contained and audited (`plugin.error`). Build plugins with
+`cargo-component` against `crates/kolimi-plugins/wit/plugin.wit`; see
+`examples/` for a working plugin and `scripts/build-plugins.sh` for the
+test fixtures.
+
 ## Metrics and performance gates
 
 `GET /metrics` exposes Prometheus text metrics: request counts and

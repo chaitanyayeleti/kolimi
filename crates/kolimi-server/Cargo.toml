@@ -19,6 +19,7 @@ futures-util.workspace = true
 kolimi-auth.workspace = true
 kolimi-chunk.workspace = true
 kolimi-db.workspace = true
+kolimi-plugins.workspace = true
 kolimi-preview.workspace = true
 kolimi-search.workspace = true
 kolimi-store.workspace = true
