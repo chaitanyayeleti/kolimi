@@ -182,8 +182,9 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
-          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null || true
+          # `accept-new` covers the case where ssh-keyscan was blocked.
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
           git clone ssh://aur@aur.archlinux.org/kolimi-server.git /tmp/aur
           cp packaging/arch/PKGBUILD packaging/arch/.SRCINFO /tmp/aur/
           cd /tmp/aur
