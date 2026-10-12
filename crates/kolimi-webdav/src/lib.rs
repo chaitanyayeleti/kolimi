@@ -122,6 +122,18 @@ fn method_not_allowed() -> Response {
     response
 }
 
+/// Whether `node_id` is an end-to-end encrypted file. The server holds no
+/// keys, so DAV must never serve ciphertext as a file, nor let plaintext
+/// overwrite one (RFC 0010, option A: plaintext-only DAV surface).
+async fn is_encrypted(vfs: &Vfs, node_id: i64) -> bool {
+    vfs.db().is_encrypted(node_id).await.unwrap_or(false)
+}
+
+/// `403 Forbidden` for any DAV access to an encrypted node.
+fn encrypted_forbidden() -> Response {
+    StatusCode::FORBIDDEN.into_response()
+}
+
 async fn get(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, head: bool) -> Response {
     let (access, manifest) = match vfs.read_manifest_access(user_id, path).await {
         Ok(result) => result,
@@ -130,6 +142,9 @@ async fn get(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, head: boo
     };
     let node = access.node;
     let owner_id = access.owner_id;
+    if is_encrypted(vfs, node.id).await {
+        return encrypted_forbidden();
+    }
     let size = manifest.size;
 
     let etag = node.etag();
@@ -235,6 +250,12 @@ async fn put(
         Ok(existing) => existing.map(|access| access.node),
         Err(e) => return vfs_error(e),
     };
+
+    if let Some(node) = &existing
+        && is_encrypted(vfs, node.id).await
+    {
+        return encrypted_forbidden();
+    }
 
     if let Some(value) = header_str(headers, header::IF_NONE_MATCH)
         && value.trim() == "*"
@@ -534,6 +555,18 @@ async fn copy_move(
     };
     if source == destination {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    // Never copy or move encrypted content over DAV: reading the source or
+    // overwriting the destination would cross the plaintext boundary.
+    if let Ok(Some(access)) = vfs.stat_access(user_id, source).await
+        && is_encrypted(vfs, access.node.id).await
+    {
+        return encrypted_forbidden();
+    }
+    if let Ok(Some(access)) = vfs.stat_access(user_id, &destination).await
+        && is_encrypted(vfs, access.node.id).await
+    {
+        return encrypted_forbidden();
     }
     // Moving writes to the destination (and removes the source); copying only
     // writes to the destination.

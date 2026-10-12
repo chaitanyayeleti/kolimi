@@ -160,6 +160,75 @@ async fn put_get_roundtrip_with_conditional_requests() {
 }
 
 #[tokio::test]
+async fn encrypted_files_are_refused_over_dav() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+
+    // Create a file, then mark it end-to-end encrypted the way the sync
+    // client does: store a wrapped key for the node.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/dav/secret.bin",
+            &auth,
+            "application/octet-stream",
+            b"ciphertext",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/api/files/key?path=/secret.bin",
+            &auth,
+            "application/octet-stream",
+            b"wrapped-key-bytes",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The server holds no keys, so it must not serve ciphertext as a file.
+    let (status, _, _) = send(&server.app, request("GET", "/dav/secret.bin", Some(&auth))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = send(&server.app, request("HEAD", "/dav/secret.bin", Some(&auth))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // And it must not let plaintext overwrite an encrypted file.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/secret.bin", &auth, "text/plain", b"plaintext"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // COPY/MOVE of encrypted content is refused in both directions.
+    let mut copy = request("COPY", "/dav/secret.bin", Some(&auth));
+    copy.headers_mut()
+        .insert("destination", "/dav/copy.bin".parse().unwrap());
+    let (status, _, _) = send(&server.app, copy).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let mut move_req = request("MOVE", "/dav/plain.txt", Some(&auth));
+    move_req
+        .headers_mut()
+        .insert("destination", "/dav/secret.bin".parse().unwrap());
+    // A plaintext source cannot overwrite the encrypted destination.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/plain.txt", &auth, "text/plain", b"plain"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = send(&server.app, move_req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn range_requests_serve_partial_content() {
     let server = setup().await;
     let auth = basic(USER, PASS);
