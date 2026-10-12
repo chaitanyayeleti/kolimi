@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- WebDAV no longer serves end-to-end encrypted files as ciphertext or lets a
+  plaintext `PUT` overwrite one: `GET`/`HEAD`/`PUT`/`COPY`/`MOVE` on an
+  encrypted node return `403` (RFC 0010, option A — plaintext-only DAV).
+
+### Changed
+- Documented accepted dependency advisories (`paste` unmaintained, `lru`
+  unsound) with reasons and revisit conditions (`docs/known-advisories.md`);
+  `cargo audit` and `cargo deny` now list them explicitly.
+
 ## [0.1.5]
 
 ### Added

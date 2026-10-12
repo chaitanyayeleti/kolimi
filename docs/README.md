@@ -20,4 +20,9 @@ Start here.
 | [rfc/0005-search-and-previews.md](rfc/0005-search-and-previews.md) | Search index and sandboxed previews |
 | [rfc/0006-sync-client.md](rfc/0006-sync-client.md) | The desktop sync client |
 | [rfc/0007-e2ee.md](rfc/0007-e2ee.md) | End-to-end encryption (v1 core, v2 sharing, pre-MLS groups) |
+| [rfc/0008-device-enrollment.md](rfc/0008-device-enrollment.md) | Multi-device E2EE enrollment |
+| [rfc/0009-e2ee-onboarding.md](rfc/0009-e2ee-onboarding.md) | E2EE onboarding: first-login browser keyring setup, encrypt by default (draft) |
+| [rfc/0010-webdav-e2ee-boundary.md](rfc/0010-webdav-e2ee-boundary.md) | WebDAV / E2EE boundary: a plaintext-only DAV surface (draft) |
+| [decisions/0001-e2ee-dav-scope.md](decisions/0001-e2ee-dav-scope.md) | Decision record: E2EE scope + WebDAV boundary (proposed) |
+| [known-advisories.md](known-advisories.md) | Accepted dependency advisories (paste, lru) with revisit conditions |
 | [../ROADMAP.md](../ROADMAP.md) | Milestones, ship-blockers, pending work with plans |
