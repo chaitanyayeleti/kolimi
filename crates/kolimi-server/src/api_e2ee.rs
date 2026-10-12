@@ -419,6 +419,7 @@ pub async fn get_enrollment(
         Ok(Some(e)) => Json(json!({
             "id": e.id,
             "device_name": e.device_name,
+            "device_public_key": STANDARD.encode(&e.device_public_key),
             "approved": e.approved_at.is_some(),
             "wrapped_master_key": e.wrapped_master_key.as_ref().map(|k| STANDARD.encode(k)),
         }))

@@ -226,9 +226,19 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
         keyring
             .unlock_with_prf(&prf)
             .map_err(|_| SyncError::E2ee("PRF secret does not unlock the keyring".to_string()))?
+    } else if let Some(device) = load_device_file(&config.local_dir)? {
+        // Enrolled device: unlock the master key from the local device file.
+        let secret = hex_decode(&device.device_secret)?;
+        let secret: [u8; 32] = secret
+            .try_into()
+            .map_err(|_| SyncError::E2ee("device key must be 32 bytes".to_string()))?;
+        let wrapped = STANDARD
+            .decode(&device.wrapped_master_key)
+            .map_err(|error| SyncError::E2ee(format!("device key: {error}")))?;
+        MasterKey::from_bytes(kolimi_crypto::unwrap_secret(&secret, &wrapped)?)
     } else {
         return Err(SyncError::E2ee(
-            "e2ee roots are configured but neither a passphrase nor a recovery code was given"
+            "e2ee roots are configured but no passphrase, recovery code, PRF, or device key was found"
                 .to_string(),
         ));
     };
@@ -549,6 +559,174 @@ pub async fn upload_keyring(config: &SyncConfig, keyring: &Keyring) -> Result<()
         });
     }
     Ok(())
+}
+
+/// Device-enrollment file stored under `.kolimi/device.json` (RFC 0008).
+///
+/// Note: this holds the device key **and** the wrapped master key, so the
+/// file is equivalent to the master key at rest; it is written `0600` and
+/// is intended to be replaced by an OS keystore / passkey-PRF wrap in the
+/// desktop shell.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceFile {
+    /// Label of this device.
+    pub name: String,
+    /// X25519 private key (hex).
+    pub device_secret: String,
+    /// Master key wrapped for this device (base64).
+    pub wrapped_master_key: String,
+    /// This device's X25519 public key (base64).
+    pub device_public_key: String,
+}
+
+fn device_file_path(local: &Path) -> PathBuf {
+    local.join(".kolimi").join("device.json")
+}
+
+fn load_device_file(local: &Path) -> Result<Option<DeviceFile>, SyncError> {
+    match std::fs::read(device_file_path(local)) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_device_file(local: &Path, file: &DeviceFile) -> Result<(), SyncError> {
+    let dir = local.join(".kolimi");
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join("device.json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, device_file_path(local))?;
+    Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn hex_decode(text: &str) -> Result<Vec<u8>, SyncError> {
+    let text = text.trim();
+    if !text.len().is_multiple_of(2) {
+        return Err(SyncError::E2ee("hex length must be even".to_string()));
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&text[i..i + 2], 16)
+                .map_err(|_| SyncError::E2ee("invalid hex digits".to_string()))
+        })
+        .collect()
+}
+
+/// Enrolls this device (RFC 0008): creates an enrollment, waits for an
+/// unlocked device to approve it, unwraps the master key, and writes
+/// `.kolimi/device.json`. Returns the enrollment id.
+pub async fn enroll_device(config: &SyncConfig, device_name: &str) -> Result<i64, SyncError> {
+    let http = Http::new(config)?;
+    let device = Identity::generate()?;
+    let (status, body) = http
+        .post_json(
+            "/api/e2ee/enrollments",
+            &serde_json::json!({
+                "device_name": device_name,
+                "device_public_key": STANDARD.encode(device.public_key()),
+            }),
+        )
+        .await?;
+    if status != 200 {
+        return Err(SyncError::Server {
+            status,
+            path: "/api/e2ee/enrollments".to_string(),
+        });
+    }
+    let id = body["id"]
+        .as_i64()
+        .ok_or_else(|| SyncError::E2ee("malformed enrollment response".to_string()))?;
+
+    // Wait for an unlocked device to approve (up to five minutes).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let wrapped = loop {
+        let path = format!("/api/e2ee/enrollments/{id}");
+        let (status, body) = http.get_json(&path).await?;
+        if status != 200 {
+            return Err(SyncError::Server { status, path });
+        }
+        if body["approved"].as_bool() == Some(true) {
+            let wrapped = body["wrapped_master_key"].as_str().unwrap_or_default();
+            break STANDARD
+                .decode(wrapped)
+                .map_err(|error| SyncError::E2ee(format!("wrapped key: {error}")))?;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(SyncError::E2ee(
+                "enrollment was not approved in time".to_string(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    };
+
+    // Verify the wrap opens with our key before persisting anything.
+    let _ = kolimi_crypto::unwrap_secret(&device.private_bytes(), &wrapped)?;
+
+    write_device_file(
+        &config.local_dir,
+        &DeviceFile {
+            name: device_name.to_string(),
+            device_secret: hex_encode(&device.private_bytes()),
+            wrapped_master_key: STANDARD.encode(&wrapped),
+            device_public_key: STANDARD.encode(device.public_key()),
+        },
+    )?;
+    Ok(id)
+}
+
+/// Approves a pending enrollment by wrapping this (unlocked) device's master
+/// key for the new device. Returns the new device's name.
+pub async fn approve_device(config: &SyncConfig, id: i64) -> Result<String, SyncError> {
+    let http = Http::new(config)?;
+    let e2ee = unlock_e2ee(&http, config).await?.ok_or_else(|| {
+        SyncError::E2ee(
+            "approving needs an unlock secret (passphrase, recovery code or PRF)".into(),
+        )
+    })?;
+
+    let path = format!("/api/e2ee/enrollments/{id}");
+    let (status, body) = http.get_json(&path).await?;
+    if status != 200 {
+        return Err(SyncError::Server { status, path });
+    }
+    let name = body["device_name"].as_str().unwrap_or_default().to_string();
+    let public = STANDARD
+        .decode(body["device_public_key"].as_str().unwrap_or_default())
+        .map_err(|error| SyncError::E2ee(format!("device public key: {error}")))?;
+    let public: [u8; 32] = public
+        .try_into()
+        .map_err(|_| SyncError::E2ee("device public key must be 32 bytes".to_string()))?;
+    let wrapped = kolimi_crypto::wrap_secret_for(&public, e2ee.master.as_bytes())?;
+
+    let approve = format!("/api/e2ee/enrollments/{id}/approve");
+    let (status, _) = http
+        .post_json(
+            &approve,
+            &serde_json::json!({ "wrapped_master_key": STANDARD.encode(&wrapped) }),
+        )
+        .await?;
+    if status != 204 {
+        return Err(SyncError::Server {
+            status,
+            path: approve,
+        });
+    }
+    Ok(name)
 }
 
 struct Http {

@@ -57,6 +57,16 @@ struct Cli {
     #[arg(long, env = "KOLIMI_E2EE_PRF", hide_env_values = true)]
     e2ee_prf: Option<String>,
 
+    /// Enroll this device (RFC 0008): create an enrollment and wait for an
+    /// already-unlocked device to approve it, then save `.kolimi/device.json`.
+    #[arg(long = "e2ee-enroll", value_name = "DEVICE_NAME")]
+    e2ee_enroll: Option<String>,
+
+    /// Approve a pending device enrollment by id, wrapping this (unlocked)
+    /// device's master key for the new device (RFC 0008).
+    #[arg(long = "e2ee-approve", value_name = "ENROLLMENT_ID")]
+    e2ee_approve: Option<i64>,
+
     /// Share a path (relative to --local) with a user, wrapping E2EE keys.
     #[arg(long)]
     share: Option<String>,
@@ -95,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         username: cli.user,
         password: cli.password,
         local_dir: cli.local,
-        e2ee: if cli.e2ee_roots.is_empty() {
+        e2ee: if cli.e2ee_roots.is_empty() && cli.e2ee_approve.is_none() {
             None
         } else {
             let prf_secret = match &cli.e2ee_prf {
@@ -110,6 +120,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
         },
     };
+
+    if let Some(name) = cli.e2ee_enroll.clone() {
+        let id = kolimi_sync::enroll_device(&config, &name).await?;
+        println!(
+            "enrolled this device as “{name}” (enrollment {id}); key saved to .kolimi/device.json"
+        );
+        return Ok(());
+    }
+
+    if let Some(id) = cli.e2ee_approve {
+        let name = kolimi_sync::approve_device(&config, id).await?;
+        println!("approved device “{name}” (enrollment {id})");
+        return Ok(());
+    }
 
     if let Some(path) = cli.share.clone() {
         let target = match (cli.with.clone(), cli.group.clone()) {

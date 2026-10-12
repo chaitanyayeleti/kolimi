@@ -224,8 +224,16 @@ scrape_configs:
   (platform shells / FFI). The tray app reads `e2ee_passphrase` from
   `~/.config/kolimi/tray.json`; prefer the environment variable
   `KOLIMI_E2EE_PASSPHRASE` on shared machines.
+- **Multi-device** (RFC 0008): enroll a new device without re-typing the
+  passphrase. On the new device run `kolimi-sync --e2ee-enroll <name>`
+  (prints the enrollment id and waits); on an already-unlocked device run
+  `kolimi-sync --e2ee-approve <id>`. The new device saves
+  `.kolimi/device.json` (`0600`) and unlocks from it thereafter. Devices
+  are listed/removed via `/api/e2ee/devices`.
 - **Not implemented**: MLS group messaging (per-member wrapping today),
-  forward secrecy, web-UI decryption. See RFC 0007 and the roadmap.
+  forward secrecy, web-UI decryption. Device removal is **advisory** — a
+  device keeps any master key it already holds, so true revocation needs
+  master-key rotation (MLS). See RFC 0007 / RFC 0008 and the roadmap.
 
 ## Plugins
 
