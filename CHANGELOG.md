@@ -6,7 +6,12 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3]
+
 ### Added
+- Web UI **redesign**: sidebar with a mobile drawer, list/grid file views,
+  inline SVG icons, toast notifications, a persisted light/dark toggle, and
+  a mobile-first responsive layout.
 - WebDAV **mount-grade** features: byte-range requests (`Range`/`206`/
   `Accept-Ranges`) and streamed downloads (one chunk in memory, not the
   whole file), RFC 4918 **class 2** `LOCK`/`UNLOCK` with `If` conditionals
