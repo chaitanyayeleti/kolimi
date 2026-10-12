@@ -422,7 +422,8 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("no such user: {username}"))?;
             let used = if reconcile {
                 let store = kolimi_store::BlobStore::open(data.join("blobs")).await?;
-                let bytes = store.usage_bytes(user.id).await?;
+                let vfs = kolimi_vfs::Vfs::new(db.clone(), store);
+                let bytes = vfs.referenced_bytes(user.id).await?;
                 db.set_used_bytes(user.id, bytes, kolimi_db::now_millis())
                     .await?;
                 bytes

@@ -82,11 +82,10 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
     }
     report.expired_link_sessions = state.db.delete_expired_link_sessions(now).await?;
 
-    // Recompute a bounded batch of usage counters from disk so the cached
-    // numbers cannot drift; the request path never walks the blob tree.
+    // Recompute a bounded batch of usage counters from *referenced* bytes so
+    // the cached numbers cannot drift; the request path never walks the tree.
     for user_id in state.db.users_for_reconcile(RECONCILE_BATCH).await? {
-        let bytes = state.vfs.store().usage_bytes(user_id).await?;
-        state.db.set_used_bytes(user_id, bytes, now).await?;
+        state.vfs.reconcile_usage(user_id).await?;
         report.reconciled += 1;
     }
     Ok(report)

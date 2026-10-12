@@ -829,6 +829,9 @@ impl Vfs {
                 None,
             )
             .await?;
+        // The content is now unreferenced: refresh the usage counter so the
+        // admin panel and quota reflect the deletion immediately.
+        self.reconcile_usage(user_id).await?;
         Ok(())
     }
 
@@ -869,13 +872,38 @@ impl Vfs {
             .store
             .sweep(user_id, &keep_manifests, &keep_chunks, grace)
             .await?;
-        // Reclaimed bytes come off the usage counter (clamped at zero).
-        if stats.bytes_freed > 0 {
-            self.db
-                .add_used_bytes(user_id, -(stats.bytes_freed as i64))
-                .await?;
-        }
+        // Disk reclamation is independent of the usage counter: usage tracks
+        // *referenced* bytes (see `reconcile_usage`), so freeing unreferenced
+        // blobs here must not change it.
         Ok(stats)
+    }
+
+    /// Total logical bytes referenced by a user's live nodes and versions,
+    /// counting each content id once. This is the figure quota and the admin
+    /// panel report: deleting a file (and emptying trash) drops it at once,
+    /// without waiting for the grace-period GC to reclaim disk.
+    pub async fn referenced_bytes(&self, user_id: i64) -> Result<u64, VfsError> {
+        let content_ids = self.db.referenced_content_ids(user_id).await?;
+        let mut total = 0u64;
+        for bytes in content_ids {
+            let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+                continue;
+            };
+            let content_id = Hash::from_bytes(arr);
+            if let Ok(manifest) = self.store.get_manifest(user_id, &content_id).await {
+                total = total.saturating_add(manifest.size);
+            }
+        }
+        Ok(total)
+    }
+
+    /// Recomputes and stores the user's usage counter from referenced bytes.
+    pub async fn reconcile_usage(&self, user_id: i64) -> Result<u64, VfsError> {
+        let bytes = self.referenced_bytes(user_id).await?;
+        self.db
+            .set_used_bytes(user_id, bytes, kolimi_db::now_millis())
+            .await?;
+        Ok(bytes)
     }
 
     /// Verifies all manifests referenced by a user's files and versions.

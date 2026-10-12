@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Storage usage now tracks **referenced** bytes and is refreshed when trash
+  is emptied, so the admin panel and quota drop immediately after a file is
+  permanently deleted instead of waiting for the grace-period GC and the
+  hourly janitor.
+
 ## [0.1.4]
 
 ### Changed

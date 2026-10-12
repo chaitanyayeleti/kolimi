@@ -479,14 +479,8 @@ pub async fn user_usage(
     let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
         return not_found();
     };
-    let used = match state.vfs.store().usage_bytes(target.id).await {
-        Ok(bytes) => {
-            let _ = state
-                .db
-                .set_used_bytes(target.id, bytes, kolimi_db::now_millis())
-                .await;
-            bytes
-        }
+    let used = match state.vfs.reconcile_usage(target.id).await {
+        Ok(bytes) => bytes,
         Err(_) => target.used_bytes.max(0) as u64,
     };
     Json(json!({

@@ -216,3 +216,36 @@ async fn janitor_reconciles_usage_from_disk() {
         .used_bytes;
     assert!(used >= 3000, "reconciled to on-disk usage, got {used}");
 }
+
+#[tokio::test]
+async fn purging_trash_updates_usage_immediately() {
+    let (_dir, state, app) = setup().await;
+    assert_eq!(
+        put(&app, "/dav/gone.bin", vec![7u8; 5000]).await,
+        StatusCode::CREATED
+    );
+    let alice = state.db.find_user("alice").await.unwrap().unwrap();
+    assert!(alice.used_bytes >= 5000);
+
+    // Delete to trash, then empty the trash.
+    let (status, _) = admin_req(&app, "DELETE", "/dav/gone.bin", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, trash) = admin_req(&app, "GET", "/api/trash", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = trash.as_array().unwrap()[0]["id"].as_i64().unwrap();
+    let (status, _) = admin_req(&app, "DELETE", &format!("/api/trash/{id}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Usage reflects the deletion at once, even though the blobs remain on
+    // disk until the grace-period GC reclaims them.
+    let used = state
+        .db
+        .find_user("alice")
+        .await
+        .unwrap()
+        .unwrap()
+        .used_bytes;
+    assert_eq!(used, 0, "usage must drop on trash purge");
+    let disk = state.vfs.store().usage_bytes(alice.id).await.unwrap();
+    assert!(disk >= 5000, "blobs linger until GC, got {disk}");
+}
