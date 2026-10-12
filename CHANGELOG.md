@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.4]
+
+### Changed
+- Web UI polish: multi-select and drag-and-drop upload, dialog refinements
+  (Share, Passkeys, Admin), relative modified times, auto-dismissing toasts,
+  a theme toggle on the login screen, and an admin-row overlap fix.
+
 ## [0.1.3]
 
 ### Added
