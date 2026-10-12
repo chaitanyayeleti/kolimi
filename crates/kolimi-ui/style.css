@@ -884,12 +884,19 @@ textarea:focus {
   display: grid;
   place-items: center;
   padding: 1.5rem;
+  position: relative;
   background: radial-gradient(
       1200px 500px at 20% -10%,
       var(--accent-soft),
       transparent 60%
     ),
     var(--bg);
+}
+
+.login-theme {
+  position: absolute;
+  top: max(1rem, env(safe-area-inset-top));
+  right: 1rem;
 }
 
 .login {
@@ -1065,6 +1072,7 @@ textarea:focus {
 .row .name {
   flex: 1;
   min-width: 0;
+  flex-wrap: wrap;
   border: none;
   background: none;
   text-align: left;
@@ -1279,4 +1287,110 @@ textarea:focus {
     display: none;
   }
 }
+
+/* ---- polish ---------------------------------------------------------- */
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.modal,
+.content {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.modal::-webkit-scrollbar,
+.content::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.modal::-webkit-scrollbar-thumb,
+.content::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+.file-meta {
+  overflow-wrap: anywhere;
+}
+
+.section-head h2 {
+  font-size: 1.05rem;
+}
+
+.modal-head h2 {
+  font-size: 1.2rem;
+}
+
+.lead-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.lead-icon .icon {
+  width: 18px;
+  height: 18px;
+}
+
+.modal h3 {
+  margin: 1.4rem 0 0.4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  font-size: 1rem;
+}
+
+.modal > p.muted {
+  font-size: 0.9rem;
+  margin: 0.15rem 0 0.7rem;
+}
+
+/* Drag-and-drop upload overlay. */
+.dropzone {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: none;
+  place-items: center;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 3px var(--accent);
+}
+
+.dropzone.active {
+  display: grid;
+}
+
+.dropzone-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1.5rem 2rem;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 2px dashed var(--accent);
+  box-shadow: var(--shadow-lg);
+  font-weight: 550;
+}
+
+.dropzone-inner .icon {
+  width: 28px;
+  height: 28px;
+  color: var(--accent);
+}
+
+.dropzone-inner p {
+  margin: 0;
+}
+
 

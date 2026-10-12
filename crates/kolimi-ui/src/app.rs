@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::api;
 
@@ -199,6 +199,7 @@ fn icon_svg(name: &str) -> String {
         "lock" => {
             r#"<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#
         }
+        "refresh" => r#"<path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/>"#,
         _ => r#"<circle cx="12" cy="12" r="8"/>"#,
     };
     format!(
@@ -249,6 +250,22 @@ fn toggle_theme() {
         web_sys::window().and_then(|window| window.local_storage().ok().flatten())
     {
         let _ = storage.set_item("kolimi-theme", if is_dark { "light" } else { "dark" });
+    }
+}
+
+/// Formats a Unix-millisecond timestamp as a short relative time.
+fn relative_time(ms: i64) -> String {
+    if ms <= 0 {
+        return String::new();
+    }
+    let seconds = ((js_sys::Date::now() as i64 - ms) / 1000).max(0);
+    match seconds {
+        s if s < 45 => "just now".to_string(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s if s < 2_592_000 => format!("{}d ago", s / 86_400),
+        s if s < 31_536_000 => format!("{}mo ago", s / 2_592_000),
+        s => format!("{}y ago", s / 31_536_000),
     }
 }
 
@@ -337,6 +354,13 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
 
     view! {
         <div class="login-wrap">
+        <button
+            class="icon-btn login-theme"
+            aria-label="Toggle theme"
+            on:click=move |_| toggle_theme()
+        >
+            <Icon name="sun"/>
+        </button>
         <form class="card login" on:submit=submit>
             <div class="hero">
                 <span class="logo">"K"</span>
@@ -399,7 +423,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let tab = RwSignal::new(Tab::Files);
     let trash = RwSignal::new(Vec::<TrashItem>::new());
     let share_target = RwSignal::new(Option::<Entry>::None);
-    let uploading = RwSignal::new(false);
+    let upload_label = RwSignal::new("Upload".to_string());
     let query = RwSignal::new(String::new());
     let results = RwSignal::new(Vec::<SearchHit>::new());
     let search_active = RwSignal::new(false);
@@ -409,6 +433,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let username = RwSignal::new(String::new());
     let nav_open = RwSignal::new(false);
     let grid = RwSignal::new(false);
+    let dragging = RwSignal::new(false);
     // Administrators get the user-management panel.
     spawn_local(async move {
         if let Ok(r) = api::get("/api/me").await
@@ -458,6 +483,30 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
 
     Effect::new(move |_| load("/".to_string()));
 
+    // Toasts fade themselves out.
+    Effect::new(move |_| {
+        if !error.get().is_empty() {
+            let clear = Closure::once_into_js(move || error.set(String::new()));
+            if let Some(window) = web_sys::window() {
+                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    clear.unchecked_ref::<js_sys::Function>(),
+                    6000,
+                );
+            }
+        }
+    });
+    Effect::new(move |_| {
+        if !notice.get().is_empty() {
+            let clear = Closure::once_into_js(move || notice.set(String::new()));
+            if let Some(window) = web_sys::window() {
+                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    clear.unchecked_ref::<js_sys::Function>(),
+                    4000,
+                );
+            }
+        }
+    });
+
     let sign_out = move |_| {
         spawn_local(async move {
             let _ = api::delete("/api/session").await;
@@ -471,6 +520,57 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         }
     };
 
+    let upload_files = move |selected: Vec<web_sys::File>| {
+        if selected.is_empty() {
+            return;
+        }
+        let current = path.get_untracked();
+        let total = selected.len();
+        upload_label.set(format!("0/{total}"));
+        spawn_local(async move {
+            let mut uploaded = 0usize;
+            let mut failed = 0usize;
+            for (index, file) in selected.into_iter().enumerate() {
+                let name = file.name();
+                upload_label.set(format!("{}/{total}", index + 1));
+                let result = match api::read_file(&file).await {
+                    Ok(bytes) => {
+                        let url = format!(
+                            "/dav{}",
+                            encode_path(&format!("{}/{}", current.trim_end_matches('/'), name))
+                        );
+                        api::dav("PUT", &url, Some(bytes), &[]).await
+                    }
+                    Err(e) => Err(e),
+                };
+                match result {
+                    Ok(201 | 204) => uploaded += 1,
+                    _ => failed += 1,
+                }
+            }
+            upload_label.set("Upload".to_string());
+            if failed == 0 {
+                notice.set(format!(
+                    "Uploaded {uploaded} file{}",
+                    if uploaded == 1 { "" } else { "s" }
+                ));
+            } else {
+                error.set(format!("Uploaded {uploaded}, {failed} failed"));
+            }
+            load(current);
+        });
+    };
+
+    let collect_files = move |files: web_sys::FileList| {
+        let mut selected = Vec::new();
+        for index in 0..files.length() {
+            if let Some(file) = files.get(index) {
+                selected.push(file);
+            }
+        }
+        selected
+    };
+
     let upload = move |ev: ev::Event| {
         let Some(input) = ev
             .target()
@@ -478,33 +578,24 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         else {
             return;
         };
-        let Some(file) = input.files().and_then(|files| files.get(0)) else {
+        let Some(files) = input.files() else {
             return;
         };
-        let name = file.name();
-        let current = path.get_untracked();
-        uploading.set(true);
-        spawn_local(async move {
-            let result = match api::read_file(&file).await {
-                Ok(bytes) => {
-                    let url = format!(
-                        "/dav{}",
-                        encode_path(&format!("{}/{}", current.trim_end_matches('/'), name))
-                    );
-                    api::dav("PUT", &url, Some(bytes), &[]).await
-                }
-                Err(e) => Err(e),
-            };
-            uploading.set(false);
-            match result {
-                Ok(201 | 204) => {
-                    notice.set(format!("Uploaded {name}"));
-                    load(current);
-                }
-                Ok(status) => error.set(format!("Upload failed (HTTP {status})")),
-                Err(e) => error.set(e),
-            }
-        });
+        let selected = collect_files(files);
+        // Reset so the same files can be chosen again later.
+        input.set_value("");
+        upload_files(selected);
+    };
+
+    let drop_files = move |ev: ev::DragEvent| {
+        ev.prevent_default();
+        dragging.set(false);
+        let Some(transfer) = ev.data_transfer() else {
+            return;
+        };
+        if let Some(files) = transfer.files() {
+            upload_files(collect_files(files));
+        }
     };
 
     let mkdir = move |_| {
@@ -626,8 +717,23 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     };
 
     view! {
-        <div class="shell" class:nav-open=move || nav_open.get()>
+        <div
+            class="shell"
+            class:nav-open=move || nav_open.get()
+            on:dragover=move |ev| {
+                ev.prevent_default();
+                dragging.set(true);
+            }
+            on:dragleave=move |_| dragging.set(false)
+            on:drop=drop_files
+        >
             <div class="nav-scrim" on:click=move |_| nav_open.set(false)></div>
+            <div class="dropzone" class:active=move || dragging.get()>
+                <div class="dropzone-inner">
+                    <Icon name="upload"/>
+                    <p>"Drop files to upload"</p>
+                </div>
+            </div>
             <aside class="sidebar">
                 <a class="side-brand" href="/app/">
                     <span class="logo">"K"</span>
@@ -791,10 +897,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         </form>
                         <label class="button primary">
                             <Icon name="upload"/>
-                            <span>
-                                {move || if uploading.get() { "Uploading…" } else { "Upload" }}
-                            </span>
-                            <input type="file" class="hidden" on:change=upload/>
+                            <span>{move || upload_label.get()}</span>
+                            <input type="file" class="hidden" multiple on:change=upload/>
                         </label>
                         <button on:click=mkdir title="New folder">
                             <Icon name="folder-plus"/>
@@ -826,15 +930,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             if search_active.get() {
                 let clear = clear_search;
                 return view! {
+                    <div class="section-head">
+                        <h2>"Search"</h2>
+                        <button on:click=clear>"Clear"</button>
+                    </div>
                     <ul class="files">
-                        <li class="row">
-                            <span class="name muted">
-                                {move || format!("{} result(s)", results.get().len())}
-                            </span>
-                            <span class="row-actions">
-                                <button on:click=clear>"Clear"</button>
-                            </span>
-                        </li>
                         <For
                             each=move || results.get()
                             key=|hit| hit.path.clone()
@@ -842,27 +942,47 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                 let navigate = parent_of(&hit.path);
                                 let download_path = hit.path.clone();
                                 let is_dir = hit.is_dir;
+                                let name = hit.name.clone();
+                                let snippet = hit.snippet.clone();
+                                let path = hit.path.clone();
+                                let kind = if is_dir { "dir".to_string() } else { "file".to_string() };
                                 view! {
-                                    <li class="row">
-                                        <button class="name" on:click=move |_| load(navigate.clone())>
-                                            {if is_dir { "📁 " } else { "📄 " }}
-                                            {hit.name.clone()}
-                                            <span class="muted">{hit.path.clone()}</span>
-                                        </button>
-                                        <span class="size">{hit.snippet.clone()}</span>
-                                        {(!is_dir).then(|| {
-                                            view! {
-                                                <span class="row-actions">
-                                                    <a
-                                                        class="button"
-                                                        href=format!("/dav{}", encode_path(&download_path))
-                                                        download
-                                                    >
-                                                        "Download"
-                                                    </a>
+                                    <li class="file">
+                                        <button
+                                            class="file-open"
+                                            on:click=move |_| load(navigate.clone())
+                                        >
+                                            <span class="file-icon">
+                                                <Icon name=file_icon(&name, &kind)/>
+                                            </span>
+                                            <span class="file-body">
+                                                <span class="file-name">{name.clone()}</span>
+                                                <span class="file-meta">
+                                                    {path}
+                                                    {(!snippet.is_empty())
+                                                        .then(|| {
+                                                            view! {
+                                                                <span class="muted">" — " {snippet.clone()}</span>
+                                                            }
+                                                        })}
                                                 </span>
-                                            }
-                                        })}
+                                            </span>
+                                        </button>
+                                        {(!is_dir)
+                                            .then(|| {
+                                                view! {
+                                                    <span class="file-actions">
+                                                        <a
+                                                            class="icon-btn"
+                                                            title="Download"
+                                                            href=format!("/dav{}", encode_path(&download_path))
+                                                            download
+                                                        >
+                                                            <Icon name="download"/>
+                                                        </a>
+                                                    </span>
+                                                }
+                                            })}
                                     </li>
                                 }
                             }
@@ -913,7 +1033,12 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let meta = if is_dir {
                                                     "Folder".to_string()
                                                 } else {
-                                                    human_size(entry.size)
+                                                    let when = relative_time(entry.modified_at);
+                                                    if when.is_empty() {
+                                                        human_size(entry.size)
+                                                    } else {
+                                                        format!("{} · {}", human_size(entry.size), when)
+                                                    }
                                                 };
                                                 let open_entry = entry.clone();
                                                 let share_copy = entry.clone();
@@ -1020,7 +1145,12 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let meta = if is_dir {
                                                     "Folder".to_string()
                                                 } else {
-                                                    human_size(entry.size)
+                                                    let when = relative_time(entry.modified_at);
+                                                    if when.is_empty() {
+                                                        human_size(entry.size)
+                                                    } else {
+                                                        format!("{} · {}", human_size(entry.size), when)
+                                                    }
                                                 };
                                                 let open_entry = entry.clone();
                                                 let share_copy = entry.clone();
@@ -1132,40 +1262,66 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 }
                 Tab::Trash => {
                     view! {
-                        <ul class="files">
-                            <For
-                                each=move || trash.get()
-                                key=|item| item.id
-                                children=move |item| {
-                                    let restore_copy = item.clone();
-                                    let purge_copy = item.clone();
-                                    view! {
-                                        <li class="row">
-                                            <span class="name">
-                                                "🗑 "
-                                                {item.name.clone()}
-                                                <span class="muted">
-                                                    {item.original_path.clone().unwrap_or_default()}
-                                                </span>
-                                            </span>
-                                            <span class="size">{human_size(item.size)}</span>
-                                            <span class="row-actions">
-                                                <button on:click=move |_| restore(restore_copy.clone())>
-                                                    "Restore"
-                                                </button>
-                                                <button on:click=move |_| purge(purge_copy.clone())>
-                                                    "Delete forever"
-                                                </button>
-                                            </span>
-                                        </li>
-                                    }
+                        {move || {
+                            if trash.get().is_empty() {
+                                return view! {
+                                    <div class="empty">
+                                        <Icon name="trash"/>
+                                        <p>"Trash is empty"</p>
+                                        <small class="muted">
+                                            "Deleted files appear here for 30 days."
+                                        </small>
+                                    </div>
                                 }
-                            />
-                            <Show when=move || trash.get().is_empty()>
-                                <li class="row muted">"Trash is empty."</li>
-                            </Show>
-                        </ul>
-                    }.into_any()
+                                    .into_any();
+                            }
+                            view! {
+                                <ul class="files">
+                                    <For
+                                        each=move || trash.get()
+                                        key=|item| item.id
+                                        children=move |item| {
+                                            let restore_copy = item.clone();
+                                            let purge_copy = item.clone();
+                                            let original = item.original_path.clone().unwrap_or_default();
+                                            let size = human_size(item.size);
+                                            view! {
+                                                <li class="file">
+                                                    <div class="file-open">
+                                                        <span class="file-icon">
+                                                            <Icon name="trash"/>
+                                                        </span>
+                                                        <span class="file-body">
+                                                            <span class="file-name">{item.name.clone()}</span>
+                                                            <span class="file-meta">
+                                                                {size}
+                                                                <span class="muted">{original}</span>
+                                                            </span>
+                                                        </span>
+                                                    </div>
+                                                    <span class="file-actions">
+                                                        <button on:click=move |_| restore(restore_copy.clone())>
+                                                            <Icon name="refresh"/>
+                                                            "Restore"
+                                                        </button>
+                                                        <button
+                                                            class="danger"
+                                                            on:click=move |_| purge(purge_copy.clone())
+                                                        >
+                                                            <Icon name="trash"/>
+                                                            "Delete forever"
+                                                        </button>
+                                                    </span>
+                                                </li>
+                                            }
+                                        }
+                                    />
+                                </ul>
+                            }
+                                .into_any()
+                        }}
+                    }
+                        .into_any()
                 }
             }
         }}
@@ -1374,7 +1530,9 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
             <div class="card modal">
                 <div class="modal-head">
                     <h2>"Admin — users"</h2>
-                    <button on:click=close>"Close"</button>
+                    <button class="icon-btn" aria-label="Close" on:click=close>
+                        <Icon name="x"/>
+                    </button>
                 </div>
                 <p class="muted">
                     "Storage quotas, administrator rights, and account lifecycle."
@@ -1400,19 +1558,32 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
                             let r = username.clone();
                             let u = username.clone();
                             view! {
-                                <li class="row">
-                                    <span class="name">
-                                        {username}
-                                        {is_admin
-                                            .then(|| view! { <span class="muted">" · admin"</span> })}
-                                        {disabled
-                                            .then(|| view! { <span class="muted">" · disabled"</span> })}
-                                        <span class="muted">
-                                            "  " {fmt_bytes(used)} " / " {quota_label(quota)}
+                                <li class="file">
+                                    <div class="file-open">
+                                        <span class="file-icon">
+                                            <Icon name="users"/>
                                         </span>
-                                    </span>
-                                    <span class="row-actions">
-                                        <button on:click=move |_| recheck(r.clone())>"Usage"</button>
+                                        <span class="file-body">
+                                            <span class="file-name">{username}</span>
+                                            <span class="file-meta">
+                                                {is_admin
+                                                    .then(|| view! { <span class="badge">"admin"</span> })}
+                                                {disabled
+                                                    .then(|| view! { <span class="badge">"disabled"</span> })}
+                                                <span class="muted">
+                                                    {fmt_bytes(used)} " / " {quota_label(quota)}
+                                                </span>
+                                            </span>
+                                        </span>
+                                    </div>
+                                    <span class="file-actions">
+                                        <button
+                                            class="icon-btn"
+                                            title="Recheck usage"
+                                            on:click=move |_| recheck(r.clone())
+                                        >
+                                            <Icon name="refresh"/>
+                                        </button>
                                         <button on:click=move |_| set_quota(q.clone())>"Quota"</button>
                                         <button on:click=move |_| patch(a.clone(), json!({ "admin": !is_admin }), "role updated")>
                                             {if is_admin { "Revoke admin" } else { "Make admin" }}
@@ -1420,7 +1591,13 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
                                         <button on:click=move |_| patch(d.clone(), json!({ "disabled": !disabled }), "access updated")>
                                             {if disabled { "Enable" } else { "Disable" }}
                                         </button>
-                                        <button on:click=move |_| remove(u.clone())>"Delete"</button>
+                                        <button
+                                            class="icon-btn"
+                                            title="Delete user"
+                                            on:click=move |_| remove(u.clone())
+                                        >
+                                            <Icon name="trash"/>
+                                        </button>
                                     </span>
                                 </li>
                             }
@@ -1566,7 +1743,9 @@ fn PasskeysDialog(on_close: Callback<()>) -> impl IntoView {
             <div class="card modal">
                 <div class="modal-head">
                     <h2>"Passkeys"</h2>
-                    <button on:click=close>"Close"</button>
+                    <button class="icon-btn" aria-label="Close" on:click=close>
+                        <Icon name="x"/>
+                    </button>
                 </div>
                 <p class="muted">
                     "Passkeys sign you in without a password. Add one, then you can "
@@ -1581,9 +1760,17 @@ fn PasskeysDialog(on_close: Callback<()>) -> impl IntoView {
                             let name = passkey["name"].as_str().unwrap_or_default().to_string();
                             view! {
                                 <li class="row">
-                                    <span class="name">{name}</span>
+                                    <span class="name">
+                                        <span class="lead-icon">
+                                            <Icon name="key"/>
+                                        </span>
+                                        {name}
+                                    </span>
                                     <span class="row-actions">
-                                        <button on:click=move |_| remove(id)>"Remove"</button>
+                                        <button class="danger" on:click=move |_| remove(id)>
+                                            <Icon name="trash"/>
+                                            "Remove"
+                                        </button>
                                     </span>
                                 </li>
                             }
@@ -1594,7 +1781,8 @@ fn PasskeysDialog(on_close: Callback<()>) -> impl IntoView {
                     </Show>
                 </ul>
                 <div class="row-actions">
-                    <button disabled=move || busy.get() on:click=add>
+                    <button class="primary" disabled=move || busy.get() on:click=add>
+                        <Icon name="key"/>
                         {move || if busy.get() { "Waiting for authenticator…" } else { "Add passkey" }}
                     </button>
                 </div>
@@ -1760,8 +1948,11 @@ fn ShareDialog(path: String, name: String, on_close: Callback<()>) -> impl IntoV
             <div class="card modal">
                 <div class="modal-head">
                     <h2>{format!("Share “{name}”")}</h2>
-                    <button on:click=close>"Close"</button>
+                    <button class="icon-btn" aria-label="Close" on:click=close>
+                        <Icon name="x"/>
+                    </button>
                 </div>
+                <p class="muted">"Share with a user or group, or create a public link."</p>
 
                 <ul class="shares">
                     <For
@@ -1776,18 +1967,33 @@ fn ShareDialog(path: String, name: String, on_close: Callback<()>) -> impl IntoV
                             view! {
                                 <li class="row">
                                     <span class="name">
+                                        <span class="lead-icon">
+                                            <Icon name="share"/>
+                                        </span>
                                         {format!("{kind} → {recipient} ({permission})")}
-                                        {url.map(|url| view! {
-                                            <button on:click=move |_| {
-                                                let url = url.clone();
-                                                spawn_local(async move {
-                                                    api::copy_to_clipboard(&full_url(&url)).await;
-                                                });
-                                            }>"Copy link"</button>
-                                        })}
                                     </span>
                                     <span class="row-actions">
-                                        <button on:click=move |_| revoke(id)>"Revoke"</button>
+                                        {url
+                                            .map(|url| {
+                                                view! {
+                                                    <button
+                                                        class="ghost"
+                                                        on:click=move |_| {
+                                                            let url = url.clone();
+                                                            spawn_local(async move {
+                                                                api::copy_to_clipboard(&full_url(&url)).await;
+                                                            });
+                                                        }
+                                                    >
+                                                        <Icon name="share"/>
+                                                        "Copy link"
+                                                    </button>
+                                                }
+                                            })}
+                                        <button class="danger" on:click=move |_| revoke(id)>
+                                            <Icon name="trash"/>
+                                            "Revoke"
+                                        </button>
                                     </span>
                                 </li>
                             }
@@ -1838,7 +2044,10 @@ fn ShareDialog(path: String, name: String, on_close: Callback<()>) -> impl IntoV
                             </select>
                         </label>
                     </Show>
-                    <button on:click=create>"Create share"</button>
+                    <button class="primary" on:click=create>
+                        <Icon name="share"/>
+                        "Create share"
+                    </button>
                 </div>
 
                 {move || {
