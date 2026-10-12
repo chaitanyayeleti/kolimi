@@ -6,6 +6,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Multi-arch container image: `linux/amd64` + `linux/arm64`, built on native
+  runners and merged into one manifest on GHCR.
+
 ### Fixed
 - Storage usage now tracks **referenced** bytes and is refreshed when trash
   is emptied, so the admin panel and quota drop immediately after a file is

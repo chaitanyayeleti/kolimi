@@ -19,7 +19,7 @@ SBOM, signatures), the **container image on GHCR**, **Arch (AUR)**, and
 | --- | --- | --- |
 | GitHub Releases | gnu/musl/aarch64 tarballs, `.deb`, Helm, CycloneDX SBOM, cosign signatures | **shipped** (v0.1.0–v0.1.2); musl vendors OpenSSL for the `webauthn-rs` → `openssl-sys` edge |
 | `.deb` | cargo-deb build (metadata + postinst) | **attached** to each release |
-| Container | OCI image on GHCR | **published** (`ghcr.io/chaitanyayeleti/kolimi`); `amd64` today — **arm64 pending** |
+| Container | OCI image on GHCR | **published** (`ghcr.io/chaitanyayeleti/kolimi`); **multi-arch** (`linux/amd64` + `linux/arm64`) |
 | Arch (AUR) | `packaging/arch/PKGBUILD` | **automated**: the `aur` job bumps `pkgver`/`sha256sums` and pushes (gated on the `AUR_SSH_KEY` secret); `kolimi-server` is live |
 | Helm | chart (`packaging/helm/kolimi`) | packaged + **attached** on release |
 | `install.sh` | one-liner from the release tarball | downloads `latest` (or `--version TAG`), verifies checksum + cosign |
@@ -29,8 +29,9 @@ SBOM, signatures), the **container image on GHCR**, **Arch (AUR)**, and
 1. **build** — `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, and
    `aarch64-unknown-linux-gnu` (native arm runner); staged wasm UI, tarball
    + `.deb`, CycloneDX SBOM, cosign.
-2. **container** — `docker buildx` build + push to
-   `ghcr.io/chaitanyayeleti/kolimi:{vX.Y.Z, X.Y, latest}` (currently `amd64`).
+2. **container** — per-arch build (`amd64` on `ubuntu-latest`, `arm64` on the
+   native `ubuntu-24.04-arm` runner), pushed by digest, then a manifest job
+   merges them into `ghcr.io/chaitanyayeleti/kolimi:{vX.Y.Z, X.Y, latest}`.
 3. **helm** — `helm package` → attached `.tgz`.
 4. **publish** — attaches every artifact to the GitHub release.
 5. **aur** — bumps `pkgver`/`sha256sums`/`pkgrel` and pushes to
@@ -38,17 +39,13 @@ SBOM, signatures), the **container image on GHCR**, **Arch (AUR)**, and
 
 ## Remaining
 
-- **arm64 container image** — the `build` matrix already produces an
-  `aarch64` binary, but the image is `amd64` only. Add a native
-  `ubuntu-24.04-arm` image build and merge a multi-arch manifest (do **not**
-  build the wasmtime tree under QEMU).
 - Optional fast install: a `kolimi-bin` AUR package from the release tarball
   alongside the source-built `kolimi-server`.
 
 ## Container specifics
 
-- `linux/amd64` is published (distroless base; the build embeds the WASM
-  UI). **arm64** is the remaining work, via a native `ubuntu-24.04-arm`
+- Published for **`linux/amd64` and `linux/arm64`** (distroless base; the
+  build embeds the WASM UI). arm64 is built on a native `ubuntu-24.04-arm`
   runner — building the wasmtime tree under QEMU is far too slow.
 - The Helm chart's `image.repository` points at
   `ghcr.io/chaitanyayeleti/kolimi` (tag defaults to the chart appVersion);
