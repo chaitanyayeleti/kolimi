@@ -1,8 +1,8 @@
 //! WebDAV surface (RFC 4918 subset) for Kolimi.
 //!
-//! Implements OPTIONS, GET/HEAD, PUT, DELETE, MKCOL, PROPFIND, COPY, and
-//! MOVE over the VFS. LOCK/UNLOCK and streaming range requests are not
-//! implemented yet (see ROADMAP M1/M2).
+//! Implements OPTIONS, GET/HEAD (with byte ranges), PUT, DELETE, MKCOL,
+//! PROPFIND, PROPPATCH, COPY, MOVE, LOCK/UNLOCK, and REPORT over the VFS.
+//! Advertises DAV compliance classes 1 and 2.
 //!
 //! The router is stateless: `Vfs` and `CurrentUser` are injected via
 //! request extensions by the server crate.
@@ -11,9 +11,13 @@ mod caldav;
 mod cond;
 mod davpath;
 mod ical;
+mod lock;
+mod range;
 mod report;
 mod vcard;
 mod xml;
+
+pub use lock::LockManager;
 
 use std::sync::Arc;
 
@@ -32,7 +36,7 @@ use kolimi_vfs::{Node, NodeKind, SHARED_MOUNT, Vfs, VfsError};
 use crate::report::{Report, ReportProps, parse_report};
 
 const ALLOW: &str =
-    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, MKCOL, REPORT";
+    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, COPY, MOVE, MKCOL, LOCK, UNLOCK, REPORT";
 const MAX_PROPFIND_BODY: usize = 1024 * 1024;
 const MAX_UPLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_SYNC_CHANGES: i64 = 10_000;
@@ -51,6 +55,7 @@ where
 async fn handle(
     Extension(vfs): Extension<Arc<Vfs>>,
     Extension(user): Extension<CurrentUser>,
+    Extension(locks): Extension<Arc<LockManager>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -80,13 +85,15 @@ async fn handle(
         "OPTIONS" => options(),
         "GET" => get(&vfs, user_id, &vfs_path, &headers, false).await,
         "HEAD" => get(&vfs, user_id, &vfs_path, &headers, true).await,
-        "PUT" => put(&vfs, user_id, &vfs_path, &headers, body).await,
-        "DELETE" => delete(&vfs, user_id, &vfs_path).await,
-        "MKCOL" => mkcol(&vfs, user_id, &vfs_path, body).await,
-        "PROPFIND" => propfind(&vfs, &user, &segments, &vfs_path, &headers, body).await,
-        "PROPPATCH" => proppatch(&vfs, user_id, &segments, &vfs_path, body).await,
-        "COPY" => copy_move(&vfs, user_id, &vfs_path, &headers, false).await,
-        "MOVE" => copy_move(&vfs, user_id, &vfs_path, &headers, true).await,
+        "PUT" => put(&vfs, &locks, user_id, &vfs_path, &headers, body).await,
+        "DELETE" => delete(&vfs, &locks, user_id, &vfs_path, &headers).await,
+        "MKCOL" => mkcol(&vfs, &locks, user_id, &vfs_path, &headers, body).await,
+        "PROPFIND" => propfind(&vfs, &locks, &user, &segments, &vfs_path, &headers, body).await,
+        "PROPPATCH" => proppatch(&vfs, &locks, user_id, &segments, &vfs_path, &headers, body).await,
+        "COPY" => copy_move(&vfs, &locks, user_id, &vfs_path, &headers, false).await,
+        "MOVE" => copy_move(&vfs, &locks, user_id, &vfs_path, &headers, true).await,
+        "LOCK" => lock_node(&vfs, &locks, &user, &segments, &vfs_path, &headers, body).await,
+        "UNLOCK" => unlock_node(&locks, user_id, &vfs_path, &headers),
         "REPORT" => report_file_tree(&vfs, &user, &segments, &vfs_path, body).await,
         _ => method_not_allowed(),
     }
@@ -98,7 +105,7 @@ fn options() -> Response {
     headers.insert(header::ALLOW, HeaderValue::from_static(ALLOW));
     headers.insert(
         axum::http::HeaderName::from_static("dav"),
-        HeaderValue::from_static("1, sync-collection"),
+        HeaderValue::from_static("1, 2, sync-collection"),
     );
     headers.insert(
         axum::http::HeaderName::from_static("ms-author-via"),
@@ -116,12 +123,14 @@ fn method_not_allowed() -> Response {
 }
 
 async fn get(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, head: bool) -> Response {
-    let (access, data) = match vfs.read_access(user_id, path).await {
+    let (access, manifest) = match vfs.read_manifest_access(user_id, path).await {
         Ok(result) => result,
         Err(VfsError::IsCollection | VfsError::SharedRoot) => return method_not_allowed(),
         Err(e) => return vfs_error(e),
     };
     let node = access.node;
+    let owner_id = access.owner_id;
+    let size = manifest.size;
 
     let etag = node.etag();
     if let Some(value) = header_str(headers, header::IF_NONE_MATCH)
@@ -141,26 +150,87 @@ async fn get(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, head: boo
     let content_type = mime_guess::from_path(&node.name)
         .first_or_octet_stream()
         .to_string();
-    let length = data.len();
-    let body = if head {
-        Body::empty()
-    } else {
-        Body::from(data)
+
+    // Range handling, subject to `If-Range` (serve the whole entity when the
+    // validator does not match the current one).
+    let mut wanted = header_str(headers, header::RANGE)
+        .map(|value| range::parse(value, size))
+        .unwrap_or(range::RangeOutcome::Full);
+    if matches!(wanted, range::RangeOutcome::Satisfiable { .. })
+        && let Some(if_range) = header_str(headers, header::IF_RANGE)
+        && if_range.trim() != etag
+        && if_range.trim() != cond::http_date(node.modified_at)
+    {
+        wanted = range::RangeOutcome::Full;
+    }
+
+    let manifest = std::sync::Arc::new(manifest);
+    let base = || {
+        Response::builder()
+            .header(header::CONTENT_TYPE, content_type.clone())
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::ETAG, etag.clone())
+            .header(header::LAST_MODIFIED, cond::http_date(node.modified_at))
     };
 
-    let builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, length)
-        .header(header::ETAG, etag)
-        .header(header::LAST_MODIFIED, cond::http_date(node.modified_at));
-    match builder.body(body) {
-        Ok(response) => response,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    match wanted {
+        range::RangeOutcome::Unsatisfiable => {
+            let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            let out = response.headers_mut();
+            out.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{size}")) {
+                out.insert(header::CONTENT_RANGE, value);
+            }
+            response
+        }
+        range::RangeOutcome::Satisfiable { start, end } => {
+            let length = end - start;
+            let stream = vfs
+                .store()
+                .content_window_stream(owner_id, manifest, start, end);
+            let body = if head {
+                Body::empty()
+            } else {
+                Body::from_stream(stream)
+            };
+            let response = base()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_LENGTH, length)
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes {start}-{}/{size}", end - 1),
+                )
+                .body(body);
+            response.unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        range::RangeOutcome::Full => {
+            let stream = vfs.store().content_stream(owner_id, manifest);
+            let body = if head {
+                Body::empty()
+            } else {
+                Body::from_stream(stream)
+            };
+            let response = base()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_LENGTH, size)
+                .body(body);
+            response.unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
     }
 }
 
-async fn put(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, body: Body) -> Response {
+async fn put(
+    vfs: &Vfs,
+    locks: &LockManager,
+    user_id: i64,
+    path: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Response {
+    if !authorized(locks, user_id, path, headers) {
+        return StatusCode::LOCKED.into_response();
+    }
+
     let existing = match vfs.stat_access(user_id, path).await {
         Ok(existing) => existing.map(|access| access.node),
         Err(e) => return vfs_error(e),
@@ -204,7 +274,16 @@ async fn put(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, body: Bod
     }
 }
 
-async fn delete(vfs: &Vfs, user_id: i64, path: &str) -> Response {
+async fn delete(
+    vfs: &Vfs,
+    locks: &LockManager,
+    user_id: i64,
+    path: &str,
+    headers: &HeaderMap,
+) -> Response {
+    if !authorized(locks, user_id, path, headers) {
+        return StatusCode::LOCKED.into_response();
+    }
     match vfs.delete_access(user_id, path).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(VfsError::Root) => StatusCode::FORBIDDEN.into_response(),
@@ -212,7 +291,17 @@ async fn delete(vfs: &Vfs, user_id: i64, path: &str) -> Response {
     }
 }
 
-async fn mkcol(vfs: &Vfs, user_id: i64, path: &str, body: Body) -> Response {
+async fn mkcol(
+    vfs: &Vfs,
+    locks: &LockManager,
+    user_id: i64,
+    path: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Response {
+    if !authorized(locks, user_id, path, headers) {
+        return StatusCode::LOCKED.into_response();
+    }
     match to_bytes(body, 1).await {
         Ok(bytes) if bytes.is_empty() => {}
         _ => return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
@@ -226,6 +315,7 @@ async fn mkcol(vfs: &Vfs, user_id: i64, path: &str, body: Body) -> Response {
 
 async fn propfind(
     vfs: &Vfs,
+    locks: &LockManager,
     user: &CurrentUser,
     segments: &[String],
     path: &str,
@@ -304,6 +394,19 @@ async fn propfind(
         }
     }
 
+    if !entries.is_empty() {
+        let (used, available) = quota_props(vfs, user_id).await;
+        for entry in &mut entries {
+            if entry.is_dir {
+                entry.quota_used = used;
+                entry.quota_available = available;
+            }
+        }
+    }
+    if let Some(first) = entries.first_mut() {
+        first.locks = locks.discover(user_id, path);
+    }
+
     match xml::multistatus(&entries, &requested) {
         Ok(xml) => {
             let mut response = Response::new(Body::from(xml));
@@ -318,13 +421,36 @@ async fn propfind(
     }
 }
 
+/// The caller's RFC 4331 quota values: `(used, available)` bytes, both
+/// optional. `available` is `None` when the account is unlimited.
+async fn quota_props(vfs: &Vfs, user_id: i64) -> (Option<u64>, Option<u64>) {
+    let Ok(Some(user)) = vfs.db().get_user(user_id).await else {
+        return (None, None);
+    };
+    let used = u64::try_from(user.used_bytes).unwrap_or(0);
+    let cap = match user.quota_bytes {
+        Some(quota) if quota > 0 => Some(quota as u64),
+        Some(_) => None,
+        None => match vfs.store().default_quota() {
+            0 => None,
+            default => Some(default),
+        },
+    };
+    (Some(used), cap.map(|cap| cap.saturating_sub(used)))
+}
+
 async fn proppatch(
     vfs: &Vfs,
+    locks: &LockManager,
     user_id: i64,
     segments: &[String],
     path: &str,
+    headers: &HeaderMap,
     body: Body,
 ) -> Response {
+    if !authorized(locks, user_id, path, headers) {
+        return StatusCode::LOCKED.into_response();
+    }
     let body = match to_bytes(body, MAX_PROPFIND_BODY).await {
         Ok(bytes) => bytes,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
@@ -394,6 +520,7 @@ async fn proppatch(
 
 async fn copy_move(
     vfs: &Vfs,
+    locks: &LockManager,
     user_id: i64,
     source: &str,
     headers: &HeaderMap,
@@ -407,6 +534,13 @@ async fn copy_move(
     };
     if source == destination {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    // Moving writes to the destination (and removes the source); copying only
+    // writes to the destination.
+    if !authorized(locks, user_id, &destination, headers)
+        || (is_move && !authorized(locks, user_id, source, headers))
+    {
+        return StatusCode::LOCKED.into_response();
     }
     let overwrite = match header_str(headers, "overwrite") {
         None => true,
@@ -440,6 +574,117 @@ async fn copy_move(
 
 fn header_str(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) -> Option<&str> {
     headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+/// Whether the caller may write `path`, given any lock tokens in `If`.
+fn authorized(locks: &LockManager, user_id: i64, path: &str, headers: &HeaderMap) -> bool {
+    let tokens = header_str(headers, "if")
+        .map(lock::if_tokens)
+        .unwrap_or_default();
+    locks.authorize(user_id, path, &tokens)
+}
+
+/// `LOCK` (RFC 4918 §9.10): create a lock, or refresh one when the body is
+/// empty and the `If` header carries the token.
+async fn lock_node(
+    vfs: &Vfs,
+    locks: &LockManager,
+    user: &CurrentUser,
+    segments: &[String],
+    path: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Response {
+    let user_id = user.user_id;
+    let timeout = header_str(headers, "timeout")
+        .map(lock::parse_timeout)
+        .unwrap_or(0);
+    let depth_infinity = !matches!(
+        header_str(headers, "depth")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("0")
+    );
+
+    let bytes = match to_bytes(body, MAX_PROPFIND_BODY).await {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    if bytes.is_empty() {
+        // Refresh: the token must arrive via the `If` header.
+        let tokens = header_str(headers, "if")
+            .map(lock::if_tokens)
+            .unwrap_or_default();
+        for token in tokens {
+            if let Ok(held) = locks.refresh(user_id, path, &token, timeout) {
+                return lock_response(StatusCode::OK, segments, &held);
+            }
+        }
+        return StatusCode::PRECONDITION_FAILED.into_response();
+    }
+
+    let info = match xml::parse_lockinfo(&bytes) {
+        Ok(info) => info,
+        Err(()) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match locks.lock(
+        user_id,
+        path,
+        info.scope,
+        info.owner,
+        depth_infinity,
+        timeout,
+    ) {
+        Ok(held) => {
+            let exists = vfs
+                .stat_access(user_id, path)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            let status = if exists {
+                StatusCode::OK
+            } else {
+                // A lock on an unmapped URL creates a lock-null resource.
+                StatusCode::CREATED
+            };
+            lock_response(status, segments, &held)
+        }
+        Err(lock::LockError::Conflict) => StatusCode::LOCKED.into_response(),
+        Err(lock::LockError::NotFound) => StatusCode::PRECONDITION_FAILED.into_response(),
+    }
+}
+
+/// `UNLOCK` (RFC 4918 §9.11).
+fn unlock_node(locks: &LockManager, user_id: i64, path: &str, headers: &HeaderMap) -> Response {
+    let Some(value) = header_str(headers, "lock-token") else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let token = lock::lock_token_value(value);
+    match locks.unlock(user_id, path, &token) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::CONFLICT.into_response(),
+    }
+}
+
+/// Builds a `LOCK` response: the `Lock-Token` header plus a `lockdiscovery`
+/// body.
+fn lock_response(status: StatusCode, segments: &[String], held: &lock::Lock) -> Response {
+    let href = davpath::encode_href(segments);
+    let xml = xml::lockdiscovery_body(&href, std::slice::from_ref(held));
+    let mut response = Response::new(Body::from(xml));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/xml; charset=utf-8"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&format!("<{}>", held.token)) {
+        response
+            .headers_mut()
+            .insert(axum::http::HeaderName::from_static("lock-token"), value);
+    }
+    response
 }
 
 /// `REPORT` on the file tree: RFC 6578 `sync-collection` over the user's

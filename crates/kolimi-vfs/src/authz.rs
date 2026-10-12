@@ -10,7 +10,7 @@
 //! Inheritance is therefore by mount; per-node evaluation only considers
 //! shares on the node itself, and the strongest matching share wins.
 
-use kolimi_chunk::Hash;
+use kolimi_chunk::{Hash, Manifest};
 use kolimi_db::ReceivedShare;
 
 use crate::{Node, NodeKind, PathError, Vfs, VfsError, path};
@@ -280,6 +280,27 @@ impl Vfs {
             .await?;
         let data = self.store.read_content(access.owner_id, &manifest).await?;
         Ok((access, data))
+    }
+
+    /// Resolves a file through the permission engine and returns its
+    /// manifest, without loading the content into memory. Used by WebDAV to
+    /// stream and range-serve large files.
+    pub async fn read_manifest_access(
+        &self,
+        caller_id: i64,
+        raw: &str,
+    ) -> Result<(Access, Manifest), VfsError> {
+        let access = self.resolve_access(caller_id, raw).await?;
+        access.perm.require(Perm::Read)?;
+        if access.node.is_dir() {
+            return Err(VfsError::IsCollection);
+        }
+        let content_id = access.node.content_id.ok_or(VfsError::NotFound)?;
+        let manifest = self
+            .store
+            .get_manifest(access.owner_id, &content_id)
+            .await?;
+        Ok((access, manifest))
     }
 
     /// Lists a directory through the permission engine.

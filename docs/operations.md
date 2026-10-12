@@ -232,10 +232,16 @@ a 16 MiB memory cap; traps are contained and audited (`plugin.error`).
   planned.
 - **CLI** (`kolimi-sync`): one-shot sync; run it from a timer or
   watcher. `--e2ee-setup`, `--share/--unshare`, `--group`.
-- **WebDAV / CalDAV / CardDAV**: any client; use an app password —
-  currently the account password or a passkey-only account's session
-  are the only credentials, so prefer a dedicated account per device
-  until per-device app passwords land (pending work).
+- **WebDAV / CalDAV / CardDAV**: any client. WebDAV is class 1 **and 2**:
+  byte ranges (`Range`), streamed reads, and lock-based editing
+  (`LOCK`/`UNLOCK`) let it serve as a mounted network drive (Windows
+  Explorer *Map network drive*, macOS Finder, GNOME Files, davfs2/gvfs,
+  `rclone mount`) and as a backup destination (rclone/restic/duplicity);
+  `quota-used-bytes`/`quota-available-bytes` report free space. CalDAV and
+  CardDAV cover calendars and contacts (Thunderbird, iOS/macOS, DAVx5).
+  Credentials are the account password (or a passkey-only account's
+  session); prefer a dedicated account per device until per-device app
+  passwords land (pending work).
 
 ## Upgrades
 

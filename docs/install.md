@@ -299,8 +299,11 @@ Set `KOLIMI_ORIGIN=https://cloud.example.com` and
    - Register a passkey (toolbar → **Passkeys**) and then run
      `kolimi-server user passkey-only <name>` to drop the password.
    - Enable TOTP (same dialog) and store the recovery codes.
-   - Point a WebDAV client (rclone, davfs2, Finder) at
-     `https://cloud.example.com/dav/`.
+   - Point a WebDAV client (Windows *Map network drive*, macOS Finder,
+     GNOME Files, `rclone`, `davfs2`, or a mobile WebDAV app) at
+     `https://cloud.example.com/dav/`. Byte ranges and `LOCK`/`UNLOCK`
+     are supported, so it mounts read/write and works as a backup
+     destination (rclone/restic/duplicity).
    - CalDAV/CardDAV discovery works from the bare domain
      (`/.well-known/caldav`, `/.well-known/carddav`).
 

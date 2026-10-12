@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- WebDAV **mount-grade** features: byte-range requests (`Range`/`206`/
+  `Accept-Ranges`) and streamed downloads (one chunk in memory, not the
+  whole file), RFC 4918 **class 2** `LOCK`/`UNLOCK` with `If` conditionals
+  and `lockdiscovery`/`supportedlock`, and RFC 4331
+  `quota-used-bytes`/`quota-available-bytes`. This makes `/dav/` usable as
+  a read/write **network drive** (Windows Explorer *Map network drive*, MS
+  Office, macOS Finder, GNOME Files, davfs2/gvfs, `rclone mount`) and as a
+  **backup target** (rclone/restic/duplicity), including from mobile
+  clients (GrapheneOS file managers, DAVx5 for CalDAV/CardDAV).
+
 ## [0.1.2]
 
 ### Added

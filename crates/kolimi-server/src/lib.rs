@@ -82,6 +82,8 @@ pub struct AppState {
     pub db: Arc<Db>,
     /// Virtual filesystem.
     pub vfs: Arc<Vfs>,
+    /// WebDAV class-2 lock store.
+    pub locks: Arc<kolimi_webdav::LockManager>,
     /// Failed-login tracker.
     pub lockout: Arc<FailedAuthTracker>,
     /// Basic-auth verification cache.
@@ -143,6 +145,7 @@ impl AppState {
         Ok(Self {
             db: Arc::new(db),
             vfs,
+            locks: Arc::new(kolimi_webdav::LockManager::new()),
             lockout: Arc::new(FailedAuthTracker::new(
                 MAX_FAILED_LOGINS,
                 LOGIN_WINDOW,
@@ -294,6 +297,7 @@ pub fn build_app(state: AppState) -> Router {
         );
 
     let vfs = state.vfs.clone();
+    let locks = state.locks.clone();
     let metrics_state = state.clone();
     Router::new()
         .merge(public)
@@ -303,6 +307,7 @@ pub fn build_app(state: AppState) -> Router {
             metrics::record,
         ))
         .layer(Extension(vfs))
+        .layer(Extension(locks))
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

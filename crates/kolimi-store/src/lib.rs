@@ -17,10 +17,11 @@ use std::{
     fmt::Display,
     io,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, stream};
 use kolimi_chunk::{AVG_CHUNK_SIZE, ChunkRef, Hash, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, Manifest};
 use tokio::io::AsyncWriteExt;
 
@@ -465,6 +466,45 @@ impl BlobStore {
         Ok(out)
     }
 
+    /// Streams a manifest's content, verifying each chunk as it is read.
+    ///
+    /// Only one chunk is held in memory at a time, so large files stream
+    /// without buffering the whole body. Chunks are emitted in order.
+    pub fn content_stream(
+        &self,
+        user_id: i64,
+        manifest: Arc<Manifest>,
+    ) -> impl Stream<Item = Result<Vec<u8>, StoreError>> + Send + 'static {
+        self.content_window_stream(user_id, manifest, 0, u64::MAX)
+    }
+
+    /// Streams the byte window `[start, end_exclusive)` of a manifest.
+    ///
+    /// Only the chunks overlapping the window are read; the first and last
+    /// are trimmed to the window boundaries. Chunk verification still runs
+    /// in full for every chunk touched.
+    pub fn content_window_stream(
+        &self,
+        user_id: i64,
+        manifest: Arc<Manifest>,
+        start: u64,
+        end_exclusive: u64,
+    ) -> impl Stream<Item = Result<Vec<u8>, StoreError>> + Send + 'static {
+        let store = self.clone();
+        let segments = range_segments(&manifest, start, end_exclusive);
+        stream::iter(segments).then(move |(hash, skip, take)| {
+            let store = store.clone();
+            async move {
+                let data = store.get_chunk(user_id, &hash).await?;
+                if skip == 0 && take == data.len() {
+                    return Ok(data);
+                }
+                let end = (skip + take).min(data.len());
+                Ok(data[skip.min(end)..end].to_vec())
+            }
+        })
+    }
+
     /// Verifies every chunk of a manifest without keeping the content.
     pub async fn verify_manifest(
         &self,
@@ -557,6 +597,34 @@ impl BlobStore {
     pub async fn copy_tree_to(&self, dest: &Path) -> Result<u64, StoreError> {
         copy_tree(&self.root.join("users"), &dest.join("users")).await
     }
+}
+
+/// Byte segments of the window `[start, end_exclusive)` of a manifest, as
+/// `(chunk hash, skip, take)` triples. Chunks outside the window are
+/// omitted; the first and last are trimmed to the window boundaries.
+fn range_segments(
+    manifest: &Manifest,
+    start: u64,
+    end_exclusive: u64,
+) -> Vec<(Hash, usize, usize)> {
+    let mut segments = Vec::new();
+    let mut offset = 0u64;
+    for chunk in &manifest.chunks {
+        let chunk_start = offset;
+        let chunk_end = offset + u64::from(chunk.len);
+        offset = chunk_end;
+        if chunk_end <= start || chunk_start >= end_exclusive {
+            continue;
+        }
+        let from = start.max(chunk_start);
+        let to = end_exclusive.min(chunk_end);
+        segments.push((
+            chunk.hash,
+            (from - chunk_start) as usize,
+            (to - from) as usize,
+        ));
+    }
+    segments
 }
 
 /// Splits `path` into chunks under `chunks_dir`. Returns the manifest and

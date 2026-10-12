@@ -7,6 +7,7 @@ use quick_xml::{
 
 use crate::cond;
 use crate::davpath;
+use crate::lock::{Lock, Scope as LockScope};
 
 type QResult<T = ()> = Result<T, quick_xml::Error>;
 
@@ -21,6 +22,10 @@ const SUPPORTED: &[&str] = &[
     "getetag",
     "creationdate",
     "current-user-principal",
+    "supportedlock",
+    "lockdiscovery",
+    "quota-used-bytes",
+    "quota-available-bytes",
 ];
 
 /// A property requested in a PROPFIND body, with its namespace resolved.
@@ -497,6 +502,12 @@ pub struct PropEntry {
     pub dead_props: Vec<(String, String, String)>,
     /// `current-user-principal` href (for DAV discovery), if known.
     pub principal_href: Option<String>,
+    /// `quota-used-bytes` for collections (RFC 4331), when known.
+    pub quota_used: Option<u64>,
+    /// `quota-available-bytes` for collections (`None` = unlimited).
+    pub quota_available: Option<u64>,
+    /// Active locks on the resource (`lockdiscovery`).
+    pub locks: Vec<Lock>,
 }
 
 impl PropEntry {
@@ -527,6 +538,9 @@ impl PropEntry {
             etag: node.etag(),
             dead_props: Vec::new(),
             principal_href: None,
+            quota_used: None,
+            quota_available: None,
+            locks: Vec::new(),
         }
     }
 }
@@ -758,6 +772,22 @@ fn write_prop(w: &mut Writer<Vec<u8>>, local: &str, entry: &PropEntry) -> QResul
                 w.write_event(Event::End(BytesEnd::new("d:current-user-principal")))?;
             }
         }
+        "quota-used-bytes" => {
+            if let Some(used) = entry.quota_used {
+                text(w, "d:quota-used-bytes", &used.to_string())?;
+            }
+        }
+        "quota-available-bytes" => {
+            if let Some(available) = entry.quota_available {
+                text(w, "d:quota-available-bytes", &available.to_string())?;
+            }
+        }
+        "supportedlock" => write_supported_lock(w)?,
+        "lockdiscovery" => {
+            w.write_event(Event::Start(BytesStart::new("d:lockdiscovery")))?;
+            write_active_locks(w, &entry.href, &entry.locks)?;
+            w.write_event(Event::End(BytesEnd::new("d:lockdiscovery")))?;
+        }
         _ => {}
     }
     Ok(())
@@ -795,6 +825,138 @@ fn text(w: &mut Writer<Vec<u8>>, name: &str, value: &str) -> QResult {
     w.create_element(name)
         .write_text_content(BytesText::new(value))?;
     Ok(())
+}
+
+/// The parsed contents of an RFC 4918 `LOCK` request body.
+pub struct LockInfo {
+    /// Requested lock scope.
+    pub scope: LockScope,
+    /// Text of the `<owner>` element, if present.
+    pub owner: Option<String>,
+}
+
+/// Parses a `<d:lockinfo>` body. Errors when no lock scope is present.
+pub fn parse_lockinfo(body: &[u8]) -> Result<LockInfo, ()> {
+    let mut reader = Reader::from_reader(body);
+    reader.config_mut().trim_text(true);
+    let mut scope: Option<LockScope> = None;
+    let mut owner: Option<String> = None;
+    let mut in_owner = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                "exclusive" => scope = Some(LockScope::Exclusive),
+                "shared" => scope = Some(LockScope::Shared),
+                "owner" => {
+                    owner = Some(String::new());
+                    in_owner = true;
+                }
+                _ => {}
+            },
+            Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
+                "exclusive" => scope = Some(LockScope::Exclusive),
+                "shared" => scope = Some(LockScope::Shared),
+                _ => {}
+            },
+            Ok(Event::Text(e)) if in_owner => {
+                let raw = e.into_inner();
+                let text = quick_xml::escape::unescape(raw.as_ref()).map_err(|_| ())?;
+                if let Some(owner) = owner.as_mut() {
+                    owner.push_str(&text);
+                }
+            }
+            Ok(Event::End(e)) => {
+                if local_name(e.name().as_ref()) == "owner" {
+                    in_owner = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return Err(()),
+            _ => {}
+        }
+    }
+    match scope {
+        Some(scope) => Ok(LockInfo { scope, owner }),
+        None => Err(()),
+    }
+}
+
+/// Strips any namespace prefix from a qualified XML name.
+fn local_name(name: &str) -> &str {
+    match name.rfind(':') {
+        Some(pos) => &name[pos + 1..],
+        None => name,
+    }
+}
+
+fn write_supported_lock(w: &mut Writer<Vec<u8>>) -> QResult {
+    w.write_event(Event::Start(BytesStart::new("d:supportedlock")))?;
+    for scope in ["d:exclusive", "d:shared"] {
+        w.write_event(Event::Start(BytesStart::new("d:lockentry")))?;
+        w.write_event(Event::Start(BytesStart::new("d:lockscope")))?;
+        w.write_event(Event::Empty(BytesStart::new(scope)))?;
+        w.write_event(Event::End(BytesEnd::new("d:lockscope")))?;
+        w.write_event(Event::Start(BytesStart::new("d:locktype")))?;
+        w.write_event(Event::Empty(BytesStart::new("d:write")))?;
+        w.write_event(Event::End(BytesEnd::new("d:locktype")))?;
+        w.write_event(Event::End(BytesEnd::new("d:lockentry")))?;
+    }
+    w.write_event(Event::End(BytesEnd::new("d:supportedlock")))?;
+    Ok(())
+}
+
+fn write_active_locks(w: &mut Writer<Vec<u8>>, href: &str, locks: &[Lock]) -> QResult {
+    for lock in locks {
+        w.write_event(Event::Start(BytesStart::new("d:activelock")))?;
+        w.write_event(Event::Start(BytesStart::new("d:locktype")))?;
+        w.write_event(Event::Empty(BytesStart::new("d:write")))?;
+        w.write_event(Event::End(BytesEnd::new("d:locktype")))?;
+        w.write_event(Event::Start(BytesStart::new("d:lockscope")))?;
+        let scope = match lock.scope {
+            LockScope::Exclusive => "d:exclusive",
+            LockScope::Shared => "d:shared",
+        };
+        w.write_event(Event::Empty(BytesStart::new(scope)))?;
+        w.write_event(Event::End(BytesEnd::new("d:lockscope")))?;
+        text(
+            w,
+            "d:depth",
+            if lock.depth_infinity { "infinity" } else { "0" },
+        )?;
+        if let Some(owner) = &lock.owner_xml {
+            text(w, "d:owner", owner)?;
+        }
+        text(w, "d:timeout", &lock.timeout_header())?;
+        w.write_event(Event::Start(BytesStart::new("d:locktoken")))?;
+        text(w, "d:href", &lock.token)?;
+        w.write_event(Event::End(BytesEnd::new("d:locktoken")))?;
+        w.write_event(Event::Start(BytesStart::new("d:lockroot")))?;
+        text(w, "d:href", href)?;
+        w.write_event(Event::End(BytesEnd::new("d:lockroot")))?;
+        w.write_event(Event::End(BytesEnd::new("d:activelock")))?;
+    }
+    Ok(())
+}
+
+/// Serializes the `LOCK` response body: a `prop`/`lockdiscovery`/`activelock`
+/// document.
+pub fn lockdiscovery_body(href: &str, locks: &[Lock]) -> Vec<u8> {
+    let mut w = Writer::new(Vec::new());
+    let result = (|| -> QResult {
+        w.write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)))?;
+        let mut prop = BytesStart::new("d:prop");
+        prop.push_attribute(("xmlns:d", "DAV:"));
+        w.write_event(Event::Start(prop))?;
+        w.write_event(Event::Start(BytesStart::new("d:lockdiscovery")))?;
+        write_active_locks(&mut w, href, locks)?;
+        w.write_event(Event::End(BytesEnd::new("d:lockdiscovery")))?;
+        w.write_event(Event::End(BytesEnd::new("d:prop")))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        return Vec::new();
+    }
+    w.into_inner()
 }
 
 fn is_valid_ncname(name: &str) -> bool {
@@ -993,6 +1155,9 @@ mod tests {
             etag: "\"abc\"".to_string(),
             dead_props: Vec::new(),
             principal_href: None,
+            quota_used: None,
+            quota_available: None,
+            locks: Vec::new(),
         }
     }
 

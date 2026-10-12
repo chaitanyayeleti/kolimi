@@ -160,6 +160,274 @@ async fn put_get_roundtrip_with_conditional_requests() {
 }
 
 #[tokio::test]
+async fn range_requests_serve_partial_content() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let data = b"0123456789abcdefghij";
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/dav/range.bin",
+            &auth,
+            "application/octet-stream",
+            data,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // A full response advertises byte-range support.
+    let (status, headers, got) =
+        send(&server.app, request("GET", "/dav/range.bin", Some(&auth))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get(header::ACCEPT_RANGES).unwrap(), "bytes");
+    assert_eq!(got, data);
+
+    // Bounded range.
+    let mut req = request("GET", "/dav/range.bin", Some(&auth));
+    req.headers_mut()
+        .insert(header::RANGE, "bytes=2-5".parse().unwrap());
+    let (status, headers, got) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(got, b"2345");
+    assert_eq!(headers.get(header::CONTENT_RANGE).unwrap(), "bytes 2-5/20");
+    assert_eq!(headers.get(header::CONTENT_LENGTH).unwrap(), "4");
+
+    // Suffix range.
+    let mut req = request("GET", "/dav/range.bin", Some(&auth));
+    req.headers_mut()
+        .insert(header::RANGE, "bytes=-3".parse().unwrap());
+    let (status, headers, got) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(got, b"hij");
+    assert_eq!(
+        headers.get(header::CONTENT_RANGE).unwrap(),
+        "bytes 17-19/20"
+    );
+
+    // Start past the end is unsatisfiable.
+    let mut req = request("GET", "/dav/range.bin", Some(&auth));
+    req.headers_mut()
+        .insert(header::RANGE, "bytes=99-".parse().unwrap());
+    let (status, headers, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(headers.get(header::CONTENT_RANGE).unwrap(), "bytes */20");
+
+    // HEAD carries range headers but no body.
+    let mut req = request("HEAD", "/dav/range.bin", Some(&auth));
+    req.headers_mut()
+        .insert(header::RANGE, "bytes=0-3".parse().unwrap());
+    let (status, headers, got) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert!(got.is_empty());
+    assert_eq!(headers.get(header::CONTENT_LENGTH).unwrap(), "4");
+}
+
+#[tokio::test]
+async fn range_spans_multiple_chunks() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/dav/big.bin",
+            &auth,
+            "application/octet-stream",
+            &data,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let start = 1_000_000u64;
+    let end = 1_200_000u64;
+    let mut req = request("GET", "/dav/big.bin", Some(&auth));
+    req.headers_mut().insert(
+        header::RANGE,
+        format!("bytes={start}-{}", end - 1).parse().unwrap(),
+    );
+    let (status, headers, got) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(got, data[start as usize..end as usize]);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_RANGE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("bytes {start}-{}/{size}", end - 1, size = data.len())
+    );
+}
+
+#[tokio::test]
+async fn lock_enforces_writes_and_unlock_releases() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/locked.txt", &auth, "text/plain", b"v1"),
+    )
+    .await;
+
+    let lockinfo = r#"<?xml version="1.0"?><d:lockinfo xmlns:d="DAV:"><d:lockscope><d:exclusive/></d:lockscope><d:locktype><d:write/></d:locktype><d:owner>alice</d:owner></d:lockinfo>"#;
+    let lock = |uri: &str, body: &str| {
+        Request::builder()
+            .method("LOCK")
+            .uri(uri)
+            .header(header::AUTHORIZATION, &auth)
+            .header(header::CONTENT_TYPE, "application/xml")
+            .header("timeout", "Second-600")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    let (status, headers, body) = send(&server.app, lock("/dav/locked.txt", lockinfo)).await;
+    assert_eq!(status, StatusCode::OK);
+    let token = headers
+        .get("lock-token")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(token.starts_with('<') && token.ends_with('>'), "{token}");
+    let xml = String::from_utf8(body).unwrap();
+    assert!(xml.contains("<d:activelock>"), "{xml}");
+    assert!(xml.contains("alice"), "{xml}");
+
+    // Writes without the token are refused with 423.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/locked.txt", &auth, "text/plain", b"v2"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::LOCKED);
+
+    // Supplying the token in `If` allows the write.
+    let mut req = request_with_body("PUT", "/dav/locked.txt", &auth, "text/plain", b"v2");
+    req.headers_mut()
+        .insert("if", format!("({token})").parse().unwrap());
+    let (status, _, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // A second exclusive lock conflicts.
+    let (status, _, _) = send(&server.app, lock("/dav/locked.txt", lockinfo)).await;
+    assert_eq!(status, StatusCode::LOCKED);
+
+    // lockdiscovery reports it.
+    let pf = r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:lockdiscovery/></d:prop></d:propfind>"#;
+    let (_, _, body) = send(
+        &server.app,
+        request_with_body(
+            "PROPFIND",
+            "/dav/locked.txt",
+            &auth,
+            "application/xml",
+            pf.as_bytes(),
+        ),
+    )
+    .await;
+    let xml = String::from_utf8(body).unwrap();
+    assert!(xml.contains("<d:activelock>"), "{xml}");
+
+    // UNLOCK releases it, and writes flow again.
+    let req = Request::builder()
+        .method("UNLOCK")
+        .uri("/dav/locked.txt")
+        .header(header::AUTHORIZATION, &auth)
+        .header("lock-token", &token)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/locked.txt", &auth, "text/plain", b"v3"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn lock_on_unmapped_url_creates_then_put() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let lockinfo = r#"<d:lockinfo xmlns:d="DAV:"><d:lockscope><d:exclusive/></d:lockscope><d:locktype><d:write/></d:locktype></d:lockinfo>"#;
+
+    let req = Request::builder()
+        .method("LOCK")
+        .uri("/dav/fresh.txt")
+        .header(header::AUTHORIZATION, &auth)
+        .header(header::CONTENT_TYPE, "application/xml")
+        .body(Body::from(lockinfo))
+        .unwrap();
+    let (status, headers, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let token = headers
+        .get("lock-token")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/fresh.txt", &auth, "text/plain", b"body"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::LOCKED);
+
+    let mut req = request_with_body("PUT", "/dav/fresh.txt", &auth, "text/plain", b"body");
+    req.headers_mut()
+        .insert("if", format!("({token})").parse().unwrap());
+    let (status, _, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // OPTIONS advertises DAV class 2.
+    let (status, headers, _) = send(&server.app, request("OPTIONS", "/dav", Some(&auth))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("dav").unwrap().to_str().unwrap().contains('2'));
+}
+
+#[tokio::test]
+async fn propfind_exposes_quota_properties() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/dav/fill.bin",
+            &auth,
+            "application/octet-stream",
+            b"0123456789",
+        ),
+    )
+    .await;
+
+    let body = r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:quota-used-bytes/><d:quota-available-bytes/></d:prop></d:propfind>"#;
+    let (status, _, out) = send(
+        &server.app,
+        request_with_body(
+            "PROPFIND",
+            "/dav/",
+            &auth,
+            "application/xml",
+            body.as_bytes(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::from_u16(207).unwrap());
+    let xml = String::from_utf8(out).unwrap();
+    assert!(
+        xml.contains("<d:quota-used-bytes>10</d:quota-used-bytes>"),
+        "{xml}"
+    );
+}
+
+#[tokio::test]
 async fn propfind_lists_files_with_properties() {
     let server = setup().await;
     let auth = basic(USER, PASS);
