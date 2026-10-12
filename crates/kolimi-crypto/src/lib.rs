@@ -30,7 +30,10 @@ mod keys;
 
 pub use error::CryptoError;
 pub use file::FileKey;
-pub use identity::{Identity, SHARE_KEY_LEN, wrap_with_ephemeral, wrap_with_ephemeral_nonce};
+pub use identity::{
+    DEVICE_KEY_LEN, Identity, SHARE_KEY_LEN, unwrap_secret, wrap_secret_for,
+    wrap_secret_with_ephemeral_nonce, wrap_with_ephemeral, wrap_with_ephemeral_nonce,
+};
 pub use keyring::{
     Keyring, Wrap, generate_recovery_code, recovery_code_display, recovery_code_parse,
 };
