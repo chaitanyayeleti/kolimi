@@ -115,8 +115,8 @@ is silently skipped.
 | **MLS groups (RFC 9420)** | Group E2EE today is per-member X25519 wrapping: no forward secrecy or post-compromise security across membership changes | Milestone M8 next week; `openmls`, key packages, commits/welcomes, epoch exporter, re-wrap on membership change; land with the external audit |
 | **External crypto audit** | The v1+v2 crypto is internally reviewed only | Audit package ready (`docs/audit/`); freeze the surface, engage a reviewer; MLS changes land as a reviewed delta |
 | **Account recovery** | ✅ **Landed**: `kolimi-server user recover <user>` sets a new password, drops live sessions, clears TOTP by default, and can remove all passkeys; audited as `user.recover` (see [docs/operations.md](docs/operations.md)) | — |
-| **Web-UI E2EE** | The browser UI shows encrypted files as ciphertext | wasm E2EE client (kolimi-crypto already compiles to wasm) or an explicit "download via sync client" UX; decide after M8 |
-| **Public links to encrypted files** | Links have no key-distribution channel | Key-in-fragment (`#k=…`) design in RFC 0007 open questions; needs its own threat analysis |
+| **Web-UI E2EE** | ✅ **Landed**: unlock the keyring in the browser and decrypt files with wasm `kolimi-crypto` (sidebar → Encryption → Decrypt) | — |
+| **Public links to encrypted files** | ✅ **Landed**: key-in-fragment (`#k=…&l=…`) — the browser never sends the fragment, so the server stays blind; the public page decrypts (RFC 0007 open question 3) | — |
 | **Group write sharing of encrypted files** | Encrypted shares are read-only today | Needs key rotation per writer / shared epoch keys; do after MLS |
 | **Multi-device E2EE** | ✅ Landed (RFC 0008): enrollment API + `kolimi-crypto::wrap_secret_for`, and `kolimi-sync --e2ee-enroll/--e2ee-approve` (device file, `0600`) | Remaining: a UI QR for the enrollment code, and moving the device key into the OS keystore / a passkey-PRF wrap |
 | **Postgres backend** | Stack promises "Postgres-ready queries" | sqlx is already the layer; port migrations + connection plumbing behind the same `Db` API; decide demand-driven |

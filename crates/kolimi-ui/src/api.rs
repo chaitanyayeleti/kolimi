@@ -46,6 +46,15 @@ pub async fn get(url: &str) -> Result<ApiResponse, String> {
     to_api(response).await
 }
 
+/// GET a raw binary endpoint (E2EE ciphertext chunks).
+pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let response = Request::get(url).send().await.map_err(|e| e.to_string())?;
+    if response.status() != 200 {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    response.binary().await.map_err(|e| e.to_string())
+}
+
 /// POST/PATCH a JSON endpoint with a CSRF token.
 pub async fn send_json(method: &str, url: &str, value: &Value) -> Result<ApiResponse, String> {
     let mut builder = match method {

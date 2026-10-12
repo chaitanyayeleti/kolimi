@@ -60,11 +60,10 @@ pub async fn create(
         return api::bad_request("the root cannot be shared");
     }
     // Encrypted content can be shared with named users and groups (the
-    // owner's client wraps file keys per member, RFC 0007 v2). Public
-    // links would hand out ciphertext nobody can read.
-    if req.kind == "link" && subtree_has_encrypted(&state, access.owner_id, access.node.id).await {
-        return api::bad_request("encrypted files cannot be shared with public links");
-    }
+    // owner's client wraps file keys per member, RFC 0007 v2). Public links
+    // to encrypted files are allowed too: the file key travels in the URL
+    // **fragment** (`#k=…`), which the browser never sends to the server, so
+    // the server stays blind (RFC 0007 open question 3).
 
     let (result, generated): (Result<ShareRow, DbError>, Option<String>) = match req.kind.as_str() {
         "user" => {
@@ -867,35 +866,6 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 
 fn not_found() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response()
-}
-
-/// Whether `node_id` or any descendant of it is encrypted.
-async fn subtree_has_encrypted(state: &AppState, owner_id: i64, node_id: i64) -> bool {
-    let Ok(encrypted) = state.db.encrypted_node_ids(owner_id).await else {
-        return false;
-    };
-    if encrypted.is_empty() {
-        return false;
-    }
-    let set: std::collections::HashSet<i64> = encrypted.into_iter().collect();
-    if set.contains(&node_id) {
-        return true;
-    }
-    let Ok(nodes) = state.db.all_live_nodes(owner_id).await else {
-        return false;
-    };
-    let parents: std::collections::HashMap<i64, Option<i64>> =
-        nodes.iter().map(|node| (node.id, node.parent_id)).collect();
-    for id in &set {
-        let mut current = parents.get(id).copied().flatten();
-        while let Some(parent) = current {
-            if parent == node_id {
-                return true;
-            }
-            current = parents.get(&parent).copied().flatten();
-        }
-    }
-    false
 }
 
 fn forbidden(message: &str) -> Response {

@@ -1,0 +1,8 @@
+# Build configuration.
+#
+# The web UI decrypts end-to-end encrypted files in the browser, so
+# `kolimi-crypto` is compiled to wasm. getrandom 0.4 selects its backend at
+# compile time; for `wasm32-unknown-unknown` it needs the `wasm_js` backend
+# (Web Crypto `getRandomValues`), enabled here plus the `wasm_js` feature.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

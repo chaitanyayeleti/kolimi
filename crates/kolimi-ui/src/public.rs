@@ -1,5 +1,6 @@
 //! The anonymous public-link page served at `/s/{token}`.
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -7,6 +8,24 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
 use crate::api;
+
+/// The file key and chunk lengths carried in the URL fragment of a link to
+/// an encrypted file (`#k=<base64url>&l=<len,len,…>`). The fragment is never
+/// sent to the server, so the server cannot decrypt.
+fn parse_fragment() -> Option<([u8; 32], Vec<u32>)> {
+    let hash = web_sys::window()?.location().hash().ok()?;
+    let mut key: Option<[u8; 32]> = None;
+    let mut lengths: Vec<u32> = Vec::new();
+    for part in hash.trim_start_matches('#').split('&') {
+        if let Some(value) = part.strip_prefix("k=") {
+            let bytes = URL_SAFE_NO_PAD.decode(value).ok()?;
+            key = Some(bytes.try_into().ok()?);
+        } else if let Some(value) = part.strip_prefix("l=") {
+            lengths = value.split(',').filter_map(|n| n.parse().ok()).collect();
+        }
+    }
+    key.map(|key| (key, lengths))
+}
 
 #[derive(Clone, PartialEq)]
 enum Meta {
@@ -101,6 +120,7 @@ pub fn PublicApp(token: String) -> impl IntoView {
     };
 
     let token_sv = StoredValue::new(token);
+    let link_key = StoredValue::new(parse_fragment());
 
     view! {
         <header class="top">
@@ -242,6 +262,38 @@ pub fn PublicApp(token: String) -> impl IntoView {
                                             />
                                         </ul>
                                     }.into_any()
+                                } else if let Some((key, lengths)) = link_key.get_value() {
+                                    let file_name = name.clone();
+                                    let download = download_url.clone();
+                                    let decrypt = move |_| {
+                                        let key = key;
+                                        let lengths = lengths.clone();
+                                        let file_name = file_name.clone();
+                                        let download = download.clone();
+                                        spawn_local(async move {
+                                            match api::get_bytes(&download).await {
+                                                Ok(bytes) => {
+                                                    match crate::e2ee::decrypt_public(
+                                                        &key, &lengths, &bytes,
+                                                    ) {
+                                                        Ok(plain) => {
+                                                            crate::e2ee::save_bytes(&file_name, &plain)
+                                                        }
+                                                        Err(e) => error.set(e),
+                                                    }
+                                                }
+                                                Err(e) => error.set(e),
+                                            }
+                                        });
+                                    };
+                                    view! {
+                                        <p class="muted">"This file is end-to-end encrypted."</p>
+                                        <button class="primary" on:click=decrypt>
+                                            "Decrypt & download"
+                                        </button>
+                                        <p class="error">{move || error.get()}</p>
+                                    }
+                                        .into_any()
                                 } else {
                                     view! {
                                         <p>
@@ -254,7 +306,8 @@ pub fn PublicApp(token: String) -> impl IntoView {
                                         <a class="button" href=download_url download>
                                             "Download"
                                         </a>
-                                    }.into_any()
+                                    }
+                                        .into_any()
                                 }}
                             </div>
                         }.into_any()

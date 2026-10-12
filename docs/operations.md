@@ -230,10 +230,18 @@ scrape_configs:
   `kolimi-sync --e2ee-approve <id>`. The new device saves
   `.kolimi/device.json` (`0600`) and unlocks from it thereafter. Devices
   are listed/removed via `/api/e2ee/devices`.
-- **Not implemented**: MLS group messaging (per-member wrapping today),
-  forward secrecy, web-UI decryption. Device removal is **advisory** — a
-  device keeps any master key it already holds, so true revocation needs
-  master-key rotation (MLS). See RFC 0007 / RFC 0008 and the roadmap.
+- **Web UI**: unlock the keyring (sidebar → **Encryption**) with your
+  passphrase and use **Decrypt** on an encrypted file to download its
+  plaintext in the browser. Decryption happens locally (wasm); the
+  passphrase never leaves the browser.
+- **Public links to encrypted files**: allowed. The file key and chunk
+  lengths travel in the URL **fragment** (`#k=…&l=…`), which the browser
+  never sends to the server, so the server stays blind. The recipient
+  opens the link and clicks **Decrypt & download**.
+- **Not implemented**: MLS group messaging (per-member wrapping today) and
+  forward secrecy. Device removal is **advisory** — a device keeps any
+  master key it already holds, so true revocation needs master-key
+  rotation (MLS). See RFC 0007 / RFC 0008 and the roadmap.
 
 ## Plugins
 

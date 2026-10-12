@@ -6,7 +6,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.5]
+
 ### Added
+- **Web-UI E2EE**: unlock the keyring (sidebar → Encryption) and decrypt
+  encrypted files in the browser (wasm `kolimi-crypto`); the passphrase is
+  never sent to the server.
+- **Public links to encrypted files**: the file key and chunk lengths ride in
+  the URL fragment (`#k=…&l=…`), so the server stays blind; the public page
+  decrypts and downloads the plaintext.
 - Multi-arch container image: `linux/amd64` + `linux/arm64`, built on native
   runners and merged into one manifest on GHCR.
 - **Account recovery**: `kolimi-server user recover <user>` sets a new

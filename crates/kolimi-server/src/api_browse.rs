@@ -55,10 +55,24 @@ pub async fn browse(
     // The caller's own root also shows mounts.
     if segments.is_empty() {
         let mut entries = Vec::new();
+        let encrypted: std::collections::HashSet<i64> = state
+            .db
+            .encrypted_node_ids(user.user_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         match state.vfs.list_access(user.user_id, "/").await {
             Ok((_, children)) => {
                 for child in children {
-                    entries.push(node_entry(&child, "", false, None, None));
+                    entries.push(node_entry(
+                        &child,
+                        "",
+                        false,
+                        None,
+                        None,
+                        encrypted.contains(&child.id),
+                    ));
                 }
             }
             Err(e) => return vfs_error(e),
@@ -90,6 +104,13 @@ pub async fn browse(
                 None
             };
             let permission = shared.then(|| access.perm.as_str().to_string());
+            let encrypted: std::collections::HashSet<i64> = state
+                .db
+                .encrypted_node_ids(access.owner_id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
             let entries: Vec<Value> = children
                 .iter()
                 .map(|child| {
@@ -99,6 +120,7 @@ pub async fn browse(
                         shared,
                         owner.clone(),
                         permission.clone(),
+                        encrypted.contains(&child.id),
                     )
                 })
                 .collect();
@@ -141,6 +163,7 @@ fn node_entry(
     shared: bool,
     owner: Option<String>,
     permission: Option<String>,
+    encrypted: bool,
 ) -> Value {
     let path = if base.is_empty() || base == "/" {
         format!("/{}", node.name)
@@ -157,6 +180,7 @@ fn node_entry(
         "shared": shared,
         "owner": owner,
         "permission": permission,
+        "encrypted": encrypted,
     })
 }
 

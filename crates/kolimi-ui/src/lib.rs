@@ -8,6 +8,7 @@
 
 mod api;
 mod app;
+mod e2ee;
 mod passkey;
 mod public;
 

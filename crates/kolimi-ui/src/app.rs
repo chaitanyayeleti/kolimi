@@ -1,5 +1,7 @@
 //! The authenticated application: login, file browser, shares, trash.
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use kolimi_crypto::MasterKey;
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -32,6 +34,7 @@ struct Entry {
     shared: bool,
     owner: Option<String>,
     permission: Option<String>,
+    encrypted: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -112,6 +115,7 @@ fn parse_entries(body: &Value) -> Vec<Entry> {
                     shared: item["shared"].as_bool().unwrap_or(false),
                     owner: item["owner"].as_str().map(str::to_string),
                     permission: item["permission"].as_str().map(str::to_string),
+                    encrypted: item["encrypted"].as_bool().unwrap_or(false),
                 })
                 .collect()
         })
@@ -434,6 +438,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let nav_open = RwSignal::new(false);
     let grid = RwSignal::new(false);
     let dragging = RwSignal::new(false);
+    let e2ee_master = RwSignal::new(Option::<MasterKey>::None);
+    let e2ee_open = RwSignal::new(false);
     // Administrators get the user-management panel.
     spawn_local(async move {
         if let Ok(r) = api::get("/api/me").await
@@ -690,6 +696,24 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
 
     let share_entry = move |entry: Entry| share_target.set(Some(entry));
 
+    let decrypt_entry = move |entry: Entry| {
+        let Some(master) = e2ee_master.get_untracked() else {
+            error.set("Unlock encryption first (sidebar → Encryption).".to_string());
+            e2ee_open.set(true);
+            return;
+        };
+        let path = entry.path.clone();
+        spawn_local(async move {
+            match crate::e2ee::decrypt_file(&master, &path).await {
+                Ok((name, bytes)) => {
+                    crate::e2ee::save_bytes(&name, &bytes);
+                    notice.set(format!("Decrypted {name}"));
+                }
+                Err(e) => error.set(e),
+            }
+        });
+    };
+
     let search_submit = move |ev: ev::SubmitEvent| {
         ev.prevent_default();
         let text = query.get_untracked();
@@ -770,6 +794,16 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     <button class="nav-item" on:click=move |_| passkeys_open.set(true)>
                         <Icon name="key"/>
                         "Passkeys"
+                    </button>
+                    <button class="nav-item" on:click=move |_| e2ee_open.set(true)>
+                        <Icon name="lock"/>
+                        {move || {
+                            if e2ee_master.get().is_some() {
+                                "Encryption (unlocked)"
+                            } else {
+                                "Encryption"
+                            }
+                        }}
                     </button>
                     {move || {
                         is_admin
@@ -1046,6 +1080,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let delete_copy = entry.clone();
                                                 let preview = entry.path.clone();
                                                 let download = entry.path.clone();
+                                                let encrypted = entry.encrypted;
+                                                let decrypt_copy = entry.clone();
                                                 view! {
                                                     <div class="tile">
                                                         <button
@@ -1078,6 +1114,18 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                             <span class="tile-meta">{meta}</span>
                                                         </button>
                                                         <div class="tile-actions">
+                                                            {encrypted
+                                                                .then(|| {
+                                                                    view! {
+                                                                        <button
+                                                                            class="icon-btn"
+                                                                            title="Decrypt"
+                                                                            on:click=move |_| decrypt_entry(decrypt_copy.clone())
+                                                                        >
+                                                                            <Icon name="lock"/>
+                                                                        </button>
+                                                                    }
+                                                                })}
                                                             {(!is_dir)
                                                                 .then(|| {
                                                                     view! {
@@ -1158,6 +1206,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let delete_copy = entry.clone();
                                                 let preview = entry.path.clone();
                                                 let download = entry.path.clone();
+                                                let encrypted = entry.encrypted;
+                                                let decrypt_copy = entry.clone();
                                                 view! {
                                                     <li class="file">
                                                         <button
@@ -1208,6 +1258,18 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                             </span>
                                                         </button>
                                                         <span class="file-actions">
+                                                            {encrypted
+                                                                .then(|| {
+                                                                    view! {
+                                                                        <button
+                                                                            class="icon-btn"
+                                                                            title="Decrypt"
+                                                                            on:click=move |_| decrypt_entry(decrypt_copy.clone())
+                                                                        >
+                                                                            <Icon name="lock"/>
+                                                                        </button>
+                                                                    }
+                                                                })}
                                                             {(!is_dir)
                                                                 .then(|| {
                                                                     view! {
@@ -1363,6 +1425,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         <ShareDialog
                             path=entry.path.clone()
                             name=entry.name.clone()
+                            encrypted=entry.encrypted
+                            master=e2ee_master.get()
                             on_close=Callback::new(move |_| share_target.set(None))
                         />
                     }
@@ -1385,6 +1449,18 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 .then(|| {
                     view! {
                         <AdminDialog on_close=Callback::new(move |_| admin_open.set(false))/>
+                    }
+                })
+        }}
+        {move || {
+            e2ee_open
+                .get()
+                .then(|| {
+                    view! {
+                        <E2eeDialog
+                            master=e2ee_master
+                            on_close=Callback::new(move |_| e2ee_open.set(false))
+                        />
                     }
                 })
         }}
@@ -1604,6 +1680,79 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
                         }
                     />
                 </ul>
+            </div>
+        </div>
+    }
+}
+
+/// Unlock end-to-end encryption in the browser (passphrase).
+#[component]
+fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> impl IntoView {
+    let passphrase = RwSignal::new(String::new());
+    let error = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let close = move |_| on_close.run(());
+    let unlock = move |_| {
+        let secret = passphrase.get_untracked();
+        if secret.is_empty() {
+            error.set("Enter your E2EE passphrase".to_string());
+            return;
+        }
+        busy.set(true);
+        spawn_local(async move {
+            match crate::e2ee::unlock(&secret).await {
+                Ok(key) => {
+                    master.set(Some(key));
+                    busy.set(false);
+                    on_close.run(());
+                }
+                Err(e) => {
+                    busy.set(false);
+                    error.set(e);
+                }
+            }
+        });
+    };
+    view! {
+        <div class="backdrop">
+            <div class="card modal">
+                <div class="modal-head">
+                    <h2>"End-to-end encryption"</h2>
+                    <button class="icon-btn" aria-label="Close" on:click=close>
+                        <Icon name="x"/>
+                    </button>
+                </div>
+                <p class="muted">
+                    "Unlock your keyring to decrypt encrypted files in this browser. "
+                    "The passphrase is used locally and is never sent to the server."
+                </p>
+                <label>
+                    "Passphrase"
+                    <input
+                        type="password"
+                        autocomplete="off"
+                        prop:value=move || passphrase.get()
+                        on:input=move |ev| passphrase.set(event_target_value(&ev))
+                    />
+                </label>
+                <div class="row-actions">
+                    <button class="primary" disabled=move || busy.get() on:click=unlock>
+                        <Icon name="lock"/>
+                        {move || if busy.get() { "Unlocking…" } else { "Unlock" }}
+                    </button>
+                    <Show when=move || master.get().is_some()>
+                        <button
+                            class="ghost"
+                            on:click=move |_| {
+                                master.set(None);
+                                on_close.run(());
+                            }
+                        >
+                            "Lock again"
+                        </button>
+                    </Show>
+                </div>
+                <p class="error">{move || error.get()}</p>
             </div>
         </div>
     }
@@ -1864,7 +2013,13 @@ fn PasskeysDialog(on_close: Callback<()>) -> impl IntoView {
 }
 
 #[component]
-fn ShareDialog(path: String, name: String, on_close: Callback<()>) -> impl IntoView {
+fn ShareDialog(
+    path: String,
+    name: String,
+    encrypted: bool,
+    master: Option<MasterKey>,
+    on_close: Callback<()>,
+) -> impl IntoView {
     let shares = RwSignal::new(Vec::<Value>::new());
     let users = RwSignal::new(Vec::<String>::new());
     let groups = RwSignal::new(Vec::<String>::new());
@@ -1897,6 +2052,7 @@ fn ShareDialog(path: String, name: String, on_close: Callback<()>) -> impl IntoV
 
     let create = {
         let path = path.clone();
+        let master = master.clone();
         move |_| {
             let kind_value = kind.get_untracked();
             let mut payload = json!({
@@ -1912,15 +2068,32 @@ fn ShareDialog(path: String, name: String, on_close: Callback<()>) -> impl IntoV
                 }
                 payload["recipient"] = json!(target);
             }
+            let path = path.clone();
+            let master = master.clone();
             spawn_local(async move {
                 match api::send_json("POST", "/api/shares", &payload).await {
                     Ok(r) if r.status == 201 => {
                         error.set(String::new());
                         if r.body["kind"] == "link" {
-                            created.set(Some((
-                                r.body["url"].as_str().unwrap_or_default().to_string(),
-                                r.body["password"].as_str().map(str::to_string),
-                            )));
+                            let mut url = r.body["url"].as_str().unwrap_or_default().to_string();
+                            // For encrypted files, carry the file key + chunk
+                            // lengths in the URL fragment (never sent to the
+                            // server).
+                            if encrypted
+                                && let Some(master) = &master
+                                && let Ok((key, lengths)) =
+                                    crate::e2ee::file_key_and_lengths(master, &path).await
+                            {
+                                let key = URL_SAFE_NO_PAD.encode(key);
+                                let lengths = lengths
+                                    .iter()
+                                    .map(|len| len.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                url = format!("{url}#k={key}&l={lengths}");
+                            }
+                            created
+                                .set(Some((url, r.body["password"].as_str().map(str::to_string))));
                         }
                         load.run(());
                     }

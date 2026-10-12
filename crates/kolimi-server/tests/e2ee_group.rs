@@ -162,7 +162,8 @@ async fn group_share_reaches_members_and_removal_revokes() {
         );
     }
 
-    // Public links to encrypted files stay refused.
+    // Public links to encrypted files are allowed: the file key travels in
+    // the URL fragment, which the browser never sends to the server.
     let status = post_json(
         &server.url,
         "alice",
@@ -173,7 +174,7 @@ async fn group_share_reaches_members_and_removal_revokes() {
         }),
     )
     .await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 201);
 
     // Remove carol through the CLI: membership and wrapped keys go away.
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_kolimi-server"))
