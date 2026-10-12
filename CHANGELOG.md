@@ -13,6 +13,10 @@ follow [Semantic Versioning](https://semver.org/).
   password, drops the account's sessions, and by default clears TOTP
   (optionally removes passkeys) for a user who lost every credential;
   recorded as `user.recover` in the audit log.
+- **Multi-device E2EE (RFC 0008), server + crypto**: a device-enrollment
+  handshake (`/api/e2ee/enrollments`, `/api/e2ee/devices`) lets an unlocked
+  device wrap the master key to a new device's X25519 key
+  (`kolimi-crypto::wrap_secret_for`); the sync-client commands and UI follow.
 
 ### Fixed
 - Storage usage now tracks **referenced** bytes and is refreshed when trash

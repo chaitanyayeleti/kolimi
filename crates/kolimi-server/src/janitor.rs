@@ -40,6 +40,8 @@ pub struct Report {
     pub manifests_deleted: u64,
     /// Expired public-link unlock sessions removed.
     pub expired_link_sessions: u64,
+    /// Expired device enrollments removed.
+    pub expired_enrollments: u64,
     /// Blobs re-verified by the scrubber.
     pub scrubbed: u64,
     /// Blobs found corrupt by the scrubber.
@@ -81,6 +83,7 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
         scrub_user(state, user.id, &mut report).await?;
     }
     report.expired_link_sessions = state.db.delete_expired_link_sessions(now).await?;
+    report.expired_enrollments = state.db.purge_expired_enrollments().await?;
 
     // Recompute a bounded batch of usage counters from *referenced* bytes so
     // the cached numbers cannot drift; the request path never walks the tree.
@@ -139,6 +142,7 @@ pub async fn run(state: AppState) {
                     chunks_deleted = report.chunks_deleted,
                     manifests_deleted = report.manifests_deleted,
                     expired_link_sessions = report.expired_link_sessions,
+                    expired_enrollments = report.expired_enrollments,
                     scrubbed = report.scrubbed,
                     corrupt = report.corrupt,
                     reconciled = report.reconciled,

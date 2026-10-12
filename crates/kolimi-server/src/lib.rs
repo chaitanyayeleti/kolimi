@@ -222,6 +222,20 @@ pub fn build_app(state: AppState) -> Router {
             "/api/e2ee/share-key",
             get(api_e2ee::get_share_key).put(api_e2ee::put_share_key),
         )
+        .route(
+            "/api/e2ee/enrollments",
+            get(api_e2ee::list_enrollments).post(api_e2ee::create_enrollment),
+        )
+        .route(
+            "/api/e2ee/enrollments/{id}",
+            get(api_e2ee::get_enrollment).delete(api_e2ee::delete_enrollment),
+        )
+        .route(
+            "/api/e2ee/enrollments/{id}/approve",
+            post(api_e2ee::approve_enrollment),
+        )
+        .route("/api/e2ee/devices", get(api_e2ee::list_devices))
+        .route("/api/e2ee/devices/{id}", delete(api_e2ee::delete_device))
         .route("/api/sync/shared-tree", get(api_sync::shared_tree))
         .route("/api/plugins", get(plugins::list))
         .route(

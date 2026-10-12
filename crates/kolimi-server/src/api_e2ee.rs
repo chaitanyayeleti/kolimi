@@ -9,7 +9,7 @@
 use axum::{
     Extension, Json,
     body::{Body, to_bytes},
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -330,5 +330,207 @@ async fn read_body(body: Body, limit: usize) -> Result<Vec<u8>, Response> {
     match to_bytes(body, limit).await {
         Ok(bytes) => Ok(bytes.to_vec()),
         Err(_) => Err(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
+    }
+}
+
+/// Body for creating an enrollment (RFC 0008).
+#[derive(Deserialize)]
+pub struct CreateEnrollment {
+    /// Operator-visible label for the new device.
+    device_name: String,
+    /// The new device's X25519 public key (base64).
+    device_public_key: String,
+}
+
+/// Body for approving an enrollment.
+#[derive(Deserialize)]
+pub struct ApproveEnrollment {
+    /// The master key wrapped for the new device (base64).
+    wrapped_master_key: String,
+}
+
+/// `GET /api/e2ee/enrollments` — pending enrollments awaiting approval.
+pub async fn list_enrollments(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    match state.db.pending_enrollments(user.user_id).await {
+        Ok(items) => {
+            let list: Vec<_> = items
+                .iter()
+                .map(|e| {
+                    json!({
+                        "id": e.id,
+                        "device_name": e.device_name,
+                        "device_public_key": STANDARD.encode(&e.device_public_key),
+                        "created_at": e.created_at,
+                        "expires_at": e.expires_at,
+                    })
+                })
+                .collect();
+            Json(json!({ "enrollments": list })).into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `POST /api/e2ee/enrollments` — a new device requests enrollment.
+pub async fn create_enrollment(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(req): Json<CreateEnrollment>,
+) -> Response {
+    let Ok(public_key) = STANDARD.decode(req.device_public_key.as_bytes()) else {
+        return api::bad_request("device_public_key must be base64");
+    };
+    let name = req.device_name.trim();
+    if name.is_empty() || name.len() > 64 {
+        return api::bad_request("device_name must be 1..=64 characters");
+    }
+    match state
+        .db
+        .create_enrollment(user.user_id, name, &public_key)
+        .await
+    {
+        Ok(id) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "e2ee.enrollment_created",
+                &user.username,
+                json!({ "device_name": name, "enrollment": id }),
+            )
+            .await;
+            Json(json!({ "id": id })).into_response()
+        }
+        Err(kolimi_db::DbError::Conflict(_)) => api::bad_request("too many pending enrollments"),
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `GET /api/e2ee/enrollments/{id}` — poll one enrollment.
+pub async fn get_enrollment(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+) -> Response {
+    match state.db.enrollment(user.user_id, id).await {
+        Ok(Some(e)) => Json(json!({
+            "id": e.id,
+            "device_name": e.device_name,
+            "approved": e.approved_at.is_some(),
+            "wrapped_master_key": e.wrapped_master_key.as_ref().map(|k| STANDARD.encode(k)),
+        }))
+        .into_response(),
+        Ok(None) => api::not_found(),
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `POST /api/e2ee/enrollments/{id}/approve` — an unlocked device uploads the
+/// master key wrapped for the new device.
+pub async fn approve_enrollment(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+    Json(req): Json<ApproveEnrollment>,
+) -> Response {
+    let Ok(wrapped) = STANDARD.decode(req.wrapped_master_key.as_bytes()) else {
+        return api::bad_request("wrapped_master_key must be base64");
+    };
+    let Some(enrollment) = state.db.enrollment(user.user_id, id).await.ok().flatten() else {
+        return api::not_found();
+    };
+    match state
+        .db
+        .approve_enrollment(user.user_id, id, &wrapped)
+        .await
+    {
+        Ok(true) => {
+            let _ = state
+                .db
+                .register_device(
+                    user.user_id,
+                    &enrollment.device_name,
+                    &enrollment.device_public_key,
+                )
+                .await;
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "e2ee.enrollment_approved",
+                &user.username,
+                json!({ "device_name": enrollment.device_name, "enrollment": id }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => api::bad_request("enrollment is not pending"),
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `DELETE /api/e2ee/enrollments/{id}` — discard an enrollment.
+pub async fn delete_enrollment(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+) -> Response {
+    match state.db.delete_enrollment(user.user_id, id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api::not_found(),
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `GET /api/e2ee/devices` — the account's registered devices.
+pub async fn list_devices(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    match state.db.devices(user.user_id).await {
+        Ok(items) => {
+            let list: Vec<_> = items
+                .iter()
+                .map(|d| {
+                    json!({
+                        "id": d.id,
+                        "name": d.name,
+                        "public_key": STANDARD.encode(&d.public_key),
+                        "created_at": d.created_at,
+                        "last_seen_at": d.last_seen_at,
+                    })
+                })
+                .collect();
+            Json(json!({ "devices": list })).into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `DELETE /api/e2ee/devices/{id}` — remove a device record (advisory: the
+/// device keeps any master key it already holds; see RFC 0008).
+pub async fn delete_device(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+) -> Response {
+    match state.db.delete_device(user.user_id, id).await {
+        Ok(true) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "e2ee.device_removed",
+                &user.username,
+                json!({ "device": id }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => api::not_found(),
+        Err(_) => api::internal_error(),
     }
 }

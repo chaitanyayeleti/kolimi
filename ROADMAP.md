@@ -118,7 +118,7 @@ is silently skipped.
 | **Web-UI E2EE** | The browser UI shows encrypted files as ciphertext | wasm E2EE client (kolimi-crypto already compiles to wasm) or an explicit "download via sync client" UX; decide after M8 |
 | **Public links to encrypted files** | Links have no key-distribution channel | Key-in-fragment (`#k=…`) design in RFC 0007 open questions; needs its own threat analysis |
 | **Group write sharing of encrypted files** | Encrypted shares are read-only today | Needs key rotation per writer / shared epoch keys; do after MLS |
-| **Multi-device E2EE** | One master key per user; devices share it out-of-band | Device enrollment (QR + ephemeral key), wrapped-key replication; after MLS |
+| **Multi-device E2EE** | ✅ Server + crypto landed (RFC 0008): `/api/e2ee/enrollments` + `/api/e2ee/devices`, `kolimi-crypto::wrap_secret_for`; enrollment is approved by an unlocked device | Wire `kolimi-sync` enroll/approve commands and show a QR in the UI |
 | **Postgres backend** | Stack promises "Postgres-ready queries" | sqlx is already the layer; port migrations + connection plumbing behind the same `Db` API; decide demand-driven |
 | **HTTP/3 (quinn), zero-copy uploads** | Stack mentions both; performance targets are met without them | Only if benchmarks show a gap; not on the critical path |
 | **Compression + broader rate limiting** | Per-client limits cover auth, passkey, public-unlock and preview endpoints (with `KOLIMI_TRUST_PROXY` for proxies); lockout is scoped per (account, source). Compression and a wider global limiter are still missing | Add `tower-http` compression; consider a broader global request limiter |

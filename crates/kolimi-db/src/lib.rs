@@ -10,11 +10,13 @@ use sqlx::{
 
 mod audit;
 mod dav;
+mod devices;
 mod e2ee;
 mod search_state;
 mod sharing;
 pub use audit::{AuditEntry, AuditVerify};
 pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
+pub use devices::{Device, Enrollment, MAX_DEVICE_KEY_BYTES};
 pub use e2ee::{MAX_KEYRING_BYTES, MAX_WRAPPED_KEY_BYTES};
 pub use sharing::{Group, LinkSession, ReceivedShare, ShareRow};
 
