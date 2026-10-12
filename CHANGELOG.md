@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.7]
+
 ### Added
 - **Admin storage management**: `GET /api/users` now supports
   `sort`/`order`/`filter` (`used_bytes`, `over_quota`, `disabled`,
