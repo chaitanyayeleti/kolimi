@@ -27,6 +27,8 @@ wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "Clipboard",
     "Document",
+    "DomTokenList",
+    "Element",
     "Event",
     "File",
     "FileList",
@@ -34,10 +36,12 @@ web-sys = { version = "0.3", features = [
     "HtmlDocument",
     "HtmlInputElement",
     "Location",
+    "MediaQueryList",
     "Navigator",
     "Request",
     "RequestCredentials",
     "RequestInit",
     "Response",
+    "Storage",
     "Window",
 ] }

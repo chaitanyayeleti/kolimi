@@ -149,6 +149,109 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Inline SVG path data for the icon set.
+fn icon_svg(name: &str) -> String {
+    let body = match name {
+        "folder" => {
+            r#"<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"#
+        }
+        "file" => {
+            r#"<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>"#
+        }
+        "image" => {
+            r#"<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m5 18 4.5-4.5L13 17l3-2.5L21 18"/>"#
+        }
+        "trash" => {
+            r#"<path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M7 7l1 13a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-13"/>"#
+        }
+        "search" => r#"<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>"#,
+        "menu" => r#"<path d="M4 7h16M4 12h16M4 17h16"/>"#,
+        "upload" => r#"<path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 20h16"/>"#,
+        "folder-plus" => {
+            r#"<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6M9 13h6"/>"#
+        }
+        "share" => {
+            r#"<circle cx="6" cy="12" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="18" cy="18" r="2.4"/><path d="m8.2 10.8 7.6-3.6M8.2 13.2l7.6 3.6"/>"#
+        }
+        "edit" => r#"<path d="M4 20h4l10-10-4-4L4 16z"/><path d="m14 6 4 4"/>"#,
+        "download" => r#"<path d="M12 4v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/>"#,
+        "users" => {
+            r#"<circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8"/><path d="M17 20a5.5 5.5 0 0 0-3-4.9"/>"#
+        }
+        "key" => r#"<circle cx="8" cy="15" r="4"/><path d="m11 12 8-8 2 2-2 2 2 2-3 3-2-2-3 3"/>"#,
+        "sun" => {
+            r#"<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>"#
+        }
+        "logout" => {
+            r#"<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="m10 17-5-5 5-5"/><path d="M5 12h12"/>"#
+        }
+        "dots" => {
+            r#"<circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>"#
+        }
+        "grid" => {
+            r#"<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>"#
+        }
+        "list" => {
+            r#"<path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4.5" cy="6" r="1.3"/><circle cx="4.5" cy="12" r="1.3"/><circle cx="4.5" cy="18" r="1.3"/>"#
+        }
+        "x" => r#"<path d="M6 6l12 12M18 6 6 18"/>"#,
+        "cloud" => r#"<path d="M6 18a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.5A3.5 3.5 0 0 1 18 18z"/>"#,
+        "lock" => {
+            r#"<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#
+        }
+        _ => r#"<circle cx="12" cy="12" r="8"/>"#,
+    };
+    format!(
+        r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{body}</svg>"#
+    )
+}
+
+/// A single inline SVG icon.
+#[component]
+fn Icon(name: &'static str) -> impl IntoView {
+    view! { <span class="icon" inner_html=icon_svg(name)></span> }
+}
+
+/// The icon used for a file-list entry.
+fn file_icon(name: &str, kind: &str) -> &'static str {
+    if kind == "dir" {
+        return "folder";
+    }
+    if is_image_name(name) {
+        return "image";
+    }
+    "file"
+}
+
+/// Flips the `.dark` / `.light` class on `<html>` and persists the choice.
+fn toggle_theme() {
+    let Some(root) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+    else {
+        return;
+    };
+    let classes = root.class_list();
+    let prefers_dark = web_sys::window()
+        .and_then(|window| {
+            window
+                .match_media("(prefers-color-scheme: dark)")
+                .ok()
+                .flatten()
+        })
+        .map(|media| media.matches())
+        .unwrap_or(false);
+    let is_dark = classes.contains("dark") || (!classes.contains("light") && prefers_dark);
+    let _ = classes.remove_1("dark");
+    let _ = classes.remove_1("light");
+    let _ = classes.add_1(if is_dark { "light" } else { "dark" });
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    {
+        let _ = storage.set_item("kolimi-theme", if is_dark { "light" } else { "dark" });
+    }
+}
+
 /// Root component.
 #[component]
 pub fn App() -> impl IntoView {
@@ -165,11 +268,13 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
-        <header class="top">
-            <a class="brand" href="/app/">"Kolimi"</a>
-        </header>
         {move || match view.get() {
-            View::Loading => view! { <p class="muted pad">"Loading…"</p> }.into_any(),
+            View::Loading => view! {
+                <div class="login-wrap">
+                    <span class="muted">"Loading…"</span>
+                </div>
+            }
+                .into_any(),
             View::Login => view! { <Login view=view/> }.into_any(),
             View::Browser => view! { <Browser view=view/> }.into_any(),
         }}
@@ -231,8 +336,13 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
     };
 
     view! {
+        <div class="login-wrap">
         <form class="card login" on:submit=submit>
-            <h2>"Sign in"</h2>
+            <div class="hero">
+                <span class="logo">"K"</span>
+                <h2>"Sign in to Kolimi"</h2>
+                <p class="muted">"Your self-hosted cloud."</p>
+            </div>
             <label>
                 "Username"
                 <input
@@ -263,14 +373,19 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
                     />
                 </label>
             </Show>
-            <button type="submit" disabled=move || busy.get()>
+            <button class="primary" type="submit" disabled=move || busy.get()>
                 {move || if busy.get() { "Signing in…" } else { "Sign in" }}
             </button>
-            <button type="button" disabled=move || busy.get() on:click=passkey_login>
+            <div class="divider">"or"</div>
+            <button class="ghost" type="button" disabled=move || busy.get() on:click=passkey_login>
+                <Icon name="key"/>
                 "Sign in with a passkey"
             </button>
-            <p class="error">{move || error.get()}</p>
+            <Show when=move || !error.get().is_empty()>
+                <p class="error">{move || error.get()}</p>
+            </Show>
         </form>
+        </div>
     }
 }
 
@@ -291,12 +406,16 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let passkeys_open = RwSignal::new(false);
     let admin_open = RwSignal::new(false);
     let is_admin = RwSignal::new(false);
+    let username = RwSignal::new(String::new());
+    let nav_open = RwSignal::new(false);
+    let grid = RwSignal::new(false);
     // Administrators get the user-management panel.
     spawn_local(async move {
         if let Ok(r) = api::get("/api/me").await
             && r.status == 200
         {
             is_admin.set(r.body["is_admin"].as_bool().unwrap_or(false));
+            username.set(r.body["username"].as_str().unwrap_or_default().to_string());
         }
     });
 
@@ -507,80 +626,201 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     };
 
     view! {
-        <div class="toolbar">
-            <nav class="crumbs">
-                {move || {
-                    let current = path.get();
-                    let segments: Vec<&str> = current.split('/').filter(|s| !s.is_empty()).collect();
-                    let mut crumbs = vec![
-                        view! {
-                            <button class="crumb" on:click=move |_| load("/".to_string())>
-                                "Home"
-                            </button>
-                        }.into_any(),
-                    ];
-                    let mut accumulated = String::new();
-                    for segment in segments {
-                        accumulated.push('/');
-                        accumulated.push_str(segment);
-                        let target = accumulated.clone();
-                        let label = segment.to_string();
-                        crumbs.push(
-                            view! {
-                                <span class="sep">"/"</span>
-                                <button class="crumb" on:click=move |_| load(target.clone())>
-                                    {label}
-                                </button>
-                            }.into_any(),
-                        );
-                    }
-                    crumbs
-                }}
-            </nav>
-            <div class="actions">
-                <form class="search" on:submit=search_submit>
-                    <input
-                        type="search"
-                        placeholder="Search files…"
-                        prop:value=move || query.get()
-                        on:input=move |ev| query.set(event_target_value(&ev))
-                    />
-                    <button type="submit">"Search"</button>
-                </form>
-                <label class="button">
-                    {move || if uploading.get() { "Uploading…" } else { "Upload" }}
-                    <input type="file" class="hidden" on:change=upload/>
-                </label>
-                <button on:click=mkdir>"New folder"</button>
-                <button
-                    class:active=move || tab.get() == Tab::Trash
-                    on:click=move |_| {
-                        if tab.get_untracked() == Tab::Trash {
+        <div class="shell" class:nav-open=move || nav_open.get()>
+            <div class="nav-scrim" on:click=move |_| nav_open.set(false)></div>
+            <aside class="sidebar">
+                <a class="side-brand" href="/app/">
+                    <span class="logo">"K"</span>
+                    "Kolimi"
+                </a>
+                <nav class="nav">
+                    <button
+                        class="nav-item"
+                        class:active=move || tab.get() == Tab::Files && !search_active.get()
+                        on:click=move |_| {
+                            search_active.set(false);
                             tab.set(Tab::Files);
-                        } else {
+                            load(path.get_untracked());
+                            nav_open.set(false);
+                        }
+                    >
+                        <Icon name="folder"/>
+                        "Files"
+                    </button>
+                    <button
+                        class="nav-item"
+                        class:active=move || tab.get() == Tab::Trash
+                        on:click=move |_| {
+                            search_active.set(false);
                             tab.set(Tab::Trash);
                             load_trash();
+                            nav_open.set(false);
                         }
-                    }
-                >
-                    "Trash"
-                </button>
-                <button on:click=move |_| passkeys_open.set(true)>"Passkeys"</button>
-                {move || {
-                    is_admin
-                        .get()
-                        .then(|| {
-                            view! {
-                                <button on:click=move |_| admin_open.set(true)>"Admin"</button>
-                            }
-                        })
-                }}
-                <button on:click=sign_out>"Sign out"</button>
-            </div>
-        </div>
+                    >
+                        <Icon name="trash"/>
+                        "Trash"
+                    </button>
+                    <div class="nav-sep"></div>
+                    <button class="nav-item" on:click=move |_| passkeys_open.set(true)>
+                        <Icon name="key"/>
+                        "Passkeys"
+                    </button>
+                    {move || {
+                        is_admin
+                            .get()
+                            .then(|| {
+                                view! {
+                                    <button
+                                        class="nav-item"
+                                        on:click=move |_| admin_open.set(true)
+                                    >
+                                        <Icon name="users"/>
+                                        "Admin"
+                                    </button>
+                                }
+                            })
+                    }}
+                </nav>
+                <div class="side-foot">
+                    <div class="account">
+                        <span class="avatar">
+                            {move || {
+                                username
+                                    .get()
+                                    .chars()
+                                    .next()
+                                    .map(|c| c.to_ascii_uppercase().to_string())
+                                    .unwrap_or_else(|| "?".to_string())
+                            }}
+                        </span>
+                        <div class="who">
+                            <b>
+                                {move || {
+                                    if username.get().is_empty() {
+                                        "Signed in".to_string()
+                                    } else {
+                                        username.get()
+                                    }
+                                }}
+                            </b>
+                            <small>"Account"</small>
+                        </div>
+                    </div>
+                    <button class="nav-item" on:click=move |_| toggle_theme()>
+                        <Icon name="sun"/>
+                        "Theme"
+                    </button>
+                    <button class="nav-item" on:click=sign_out>
+                        <Icon name="logout"/>
+                        "Sign out"
+                    </button>
+                </div>
+            </aside>
 
-        <p class="error pad">{move || error.get()}</p>
-        <p class="notice pad">{move || notice.get()}</p>
+            <div class="main">
+                <header class="topbar">
+                    <button
+                        class="icon-btn menu-btn"
+                        aria-label="Menu"
+                        on:click=move |_| nav_open.set(!nav_open.get_untracked())
+                    >
+                        <Icon name="menu"/>
+                    </button>
+                    <div class="crumbs">
+                        {move || {
+                            if search_active.get() {
+                                return vec![
+                                    view! { <span class="crumb current">"Search"</span> }
+                                        .into_any(),
+                                ];
+                            }
+                            if tab.get() == Tab::Trash {
+                                return vec![
+                                    view! { <span class="crumb current">"Trash"</span> }
+                                        .into_any(),
+                                ];
+                            }
+                            let current = path.get();
+                            let segments: Vec<&str> = current
+                                .split('/')
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            let mut crumbs = vec![
+                                view! {
+                                    <button
+                                        class="crumb"
+                                        on:click=move |_| load("/".to_string())
+                                    >
+                                        <Icon name="cloud"/>
+                                    </button>
+                                }
+                                    .into_any(),
+                            ];
+                            let mut accumulated = String::new();
+                            for segment in segments {
+                                accumulated.push('/');
+                                accumulated.push_str(segment);
+                                let target = accumulated.clone();
+                                let label = segment.to_string();
+                                crumbs.push(
+                                    view! {
+                                        <span class="sep">"/"</span>
+                                        <button
+                                            class="crumb"
+                                            on:click=move |_| load(target.clone())
+                                        >
+                                            {label}
+                                        </button>
+                                    }
+                                        .into_any(),
+                                );
+                            }
+                            crumbs
+                        }}
+                    </div>
+                    <div class="topbar-spacer"></div>
+                    <div class="topbar-actions">
+                        <form class="search" on:submit=search_submit>
+                            <Icon name="search"/>
+                            <input
+                                type="search"
+                                placeholder="Search files…"
+                                prop:value=move || query.get()
+                                on:input=move |ev| query.set(event_target_value(&ev))
+                            />
+                        </form>
+                        <label class="button primary">
+                            <Icon name="upload"/>
+                            <span>
+                                {move || if uploading.get() { "Uploading…" } else { "Upload" }}
+                            </span>
+                            <input type="file" class="hidden" on:change=upload/>
+                        </label>
+                        <button on:click=mkdir title="New folder">
+                            <Icon name="folder-plus"/>
+                            <span class="hide-sm">"New folder"</span>
+                        </button>
+                        <div class="segmented" role="group" aria-label="View">
+                            <button
+                                class="icon-btn"
+                                class:active=move || !grid.get()
+                                on:click=move |_| grid.set(false)
+                                aria-label="List view"
+                            >
+                                <Icon name="list"/>
+                            </button>
+                            <button
+                                class="icon-btn"
+                                class:active=move || grid.get()
+                                on:click=move |_| grid.set(true)
+                                aria-label="Grid view"
+                            >
+                                <Icon name="grid"/>
+                            </button>
+                        </div>
+                    </div>
+                </header>
+                <main class="content">
 
         {move || {
             if search_active.get() {
@@ -633,101 +873,262 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             match tab.get() {
                 Tab::Files => {
                     view! {
-                        <ul class="files">
-                            {move || {
-                                parent.get().map(|parent| {
-                                    let target = parent.clone();
+                        {move || {
+                            parent
+                                .get()
+                                .map(|target| {
                                     view! {
-                                        <li class="row up">
-                                            <button class="name" on:click=move |_| load(target.clone())>
-                                                "↑ .."
-                                            </button>
-                                        </li>
+                                        <button class="nav-item" on:click=move |_| load(target.clone())>
+                                            <Icon name="folder"/>
+                                            "Up one level"
+                                        </button>
                                     }
                                 })
-                            }}
-                            <For
-                                each=move || entries.get()
-                                key=|entry| entry.path.clone()
-                                children=move |entry| {
-                                    let is_dir = entry.kind == "dir";
-                                    let open_entry = entry.clone();
-                                    let delete_copy = entry.clone();
-                                    let rename_copy = entry.clone();
-                                    let share_copy = entry.clone();
-                                    view! {
-                                        <li class="row">
-                                            <button class="name" on:click=move |_| open(open_entry.clone())>
-                                                {(!is_dir && is_image_name(&entry.name)).then(|| {
-                                                    view! {
-                                                        <img
-                                                            class="thumb"
-                                                            loading="lazy"
-                                                            alt=""
-                                                            src=format!(
-                                                                "/api/preview?path={}&size=64",
-                                                                encode(&entry.path),
-                                                            )
-                                                        />
-                                                    }
-                                                })}
-                                                {if is_dir { "📁 " } else { "📄 " }}
-                                                {entry.name.clone()}
-                                                {entry.shared.then(|| view! {
-                                                    <span class="badge">
-                                                        {format!(
-                                                            "shared by {} ({})",
-                                                            entry.owner.clone().unwrap_or_default(),
-                                                            entry.permission.clone().unwrap_or_default(),
-                                                        )}
-                                                    </span>
-                                                })}
-                                            </button>
-                                            <span class="size">
-                                                {if is_dir { String::new() } else { human_size(entry.size) }}
-                                            </span>
-                                            <span class="row-actions">
-                                                {(!is_dir).then(|| {
-                                                    view! {
-                                                        <a class="button" href=format!(
-                                                            "/dav{}",
-                                                            encode_path(&entry.path),
-                                                        ) download>
-                                                            "Download"
-                                                        </a>
-                                                    }
-                                                })}
-                                                {(!entry.shared).then(|| {
-                                                    view! {
-                                                        <button on:click=move |_| share_entry(share_copy.clone())>
-                                                            "Share"
-                                                        </button>
-                                                    }
-                                                })}
-                                                {(!entry.shared).then(|| {
-                                                    view! {
-                                                        <button on:click=move |_| rename_entry(rename_copy.clone())>
-                                                            "Rename"
-                                                        </button>
-                                                    }
-                                                })}
-                                                {(!entry.shared).then(|| {
-                                                    view! {
-                                                        <button on:click=move |_| delete_entry(delete_copy.clone())>
-                                                            "Delete"
-                                                        </button>
-                                                    }
-                                                })}
-                                            </span>
-                                        </li>
-                                    }
+                        }}
+                        {move || {
+                            if entries.get().is_empty() {
+                                return view! {
+                                    <div class="empty">
+                                        <Icon name="folder"/>
+                                        <p>"This folder is empty"</p>
+                                        <small class="muted">
+                                            "Upload a file or create a folder to get started."
+                                        </small>
+                                    </div>
                                 }
-                            />
-                            <Show when=move || entries.get().is_empty()>
-                                <li class="row muted">"This folder is empty."</li>
-                            </Show>
-                        </ul>
-                    }.into_any()
+                                    .into_any();
+                            }
+                            if grid.get() {
+                                view! {
+                                    <div class="grid">
+                                        <For
+                                            each=move || entries.get()
+                                            key=|entry| entry.path.clone()
+                                            children=move |entry| {
+                                                let is_dir = entry.kind == "dir";
+                                                let is_img = !is_dir && is_image_name(&entry.name);
+                                                let shared = entry.shared;
+                                                let name = entry.name.clone();
+                                                let kind = entry.kind.clone();
+                                                let meta = if is_dir {
+                                                    "Folder".to_string()
+                                                } else {
+                                                    human_size(entry.size)
+                                                };
+                                                let open_entry = entry.clone();
+                                                let share_copy = entry.clone();
+                                                let rename_copy = entry.clone();
+                                                let delete_copy = entry.clone();
+                                                let preview = entry.path.clone();
+                                                let download = entry.path.clone();
+                                                view! {
+                                                    <div class="tile">
+                                                        <button
+                                                            class="tile-open"
+                                                            on:click=move |_| open(open_entry.clone())
+                                                        >
+                                                            <span class=format!(
+                                                                "tile-thumb {}",
+                                                                if is_dir { "folder" } else { "" },
+                                                            )>
+                                                                {is_img
+                                                                    .then(|| {
+                                                                        view! {
+                                                                            <img
+                                                                                loading="lazy"
+                                                                                alt=""
+                                                                                src=format!(
+                                                                                    "/api/preview?path={}&size=256",
+                                                                                    encode(&preview),
+                                                                                )
+                                                                            />
+                                                                        }
+                                                                    })}
+                                                                {(!is_img)
+                                                                    .then(|| {
+                                                                        view! { <Icon name=file_icon(&name, &kind)/> }
+                                                                    })}
+                                                            </span>
+                                                            <span class="tile-name">{name.clone()}</span>
+                                                            <span class="tile-meta">{meta}</span>
+                                                        </button>
+                                                        <div class="tile-actions">
+                                                            {(!is_dir)
+                                                                .then(|| {
+                                                                    view! {
+                                                                        <a
+                                                                            class="icon-btn"
+                                                                            title="Download"
+                                                                            href=format!("/dav{}", encode_path(&download))
+                                                                            download
+                                                                        >
+                                                                            <Icon name="download"/>
+                                                                        </a>
+                                                                    }
+                                                                })}
+                                                            {(!shared)
+                                                                .then(|| {
+                                                                    view! {
+                                                                        <button
+                                                                            class="icon-btn"
+                                                                            title="Share"
+                                                                            on:click=move |_| share_entry(share_copy.clone())
+                                                                        >
+                                                                            <Icon name="share"/>
+                                                                        </button>
+                                                                        <button
+                                                                            class="icon-btn"
+                                                                            title="Rename"
+                                                                            on:click=move |_| rename_entry(rename_copy.clone())
+                                                                        >
+                                                                            <Icon name="edit"/>
+                                                                        </button>
+                                                                        <button
+                                                                            class="icon-btn"
+                                                                            title="Delete"
+                                                                            on:click=move |_| delete_entry(delete_copy.clone())
+                                                                        >
+                                                                            <Icon name="trash"/>
+                                                                        </button>
+                                                                    }
+                                                                })}
+                                                        </div>
+                                                    </div>
+                                                }
+                                            }
+                                        />
+                                    </div>
+                                }
+                                    .into_any()
+                            } else {
+                                view! {
+                                    <ul class="files">
+                                        <For
+                                            each=move || entries.get()
+                                            key=|entry| entry.path.clone()
+                                            children=move |entry| {
+                                                let is_dir = entry.kind == "dir";
+                                                let is_img = !is_dir && is_image_name(&entry.name);
+                                                let shared = entry.shared;
+                                                let owner = entry.owner.clone().unwrap_or_default();
+                                                let permission = entry
+                                                    .permission
+                                                    .clone()
+                                                    .unwrap_or_default();
+                                                let name = entry.name.clone();
+                                                let kind = entry.kind.clone();
+                                                let meta = if is_dir {
+                                                    "Folder".to_string()
+                                                } else {
+                                                    human_size(entry.size)
+                                                };
+                                                let open_entry = entry.clone();
+                                                let share_copy = entry.clone();
+                                                let rename_copy = entry.clone();
+                                                let delete_copy = entry.clone();
+                                                let preview = entry.path.clone();
+                                                let download = entry.path.clone();
+                                                view! {
+                                                    <li class="file">
+                                                        <button
+                                                            class="file-open"
+                                                            on:click=move |_| open(open_entry.clone())
+                                                        >
+                                                            <span class=format!(
+                                                                "file-icon {}",
+                                                                if is_dir {
+                                                                    "folder"
+                                                                } else if is_img {
+                                                                    "img"
+                                                                } else {
+                                                                    ""
+                                                                },
+                                                            )>
+                                                                {is_img
+                                                                    .then(|| {
+                                                                        view! {
+                                                                            <img
+                                                                                loading="lazy"
+                                                                                alt=""
+                                                                                src=format!(
+                                                                                    "/api/preview?path={}&size=64",
+                                                                                    encode(&preview),
+                                                                                )
+                                                                            />
+                                                                        }
+                                                                    })}
+                                                                {(!is_img)
+                                                                    .then(|| {
+                                                                        view! { <Icon name=file_icon(&name, &kind)/> }
+                                                                    })}
+                                                            </span>
+                                                            <span class="file-body">
+                                                                <span class="file-name">{name.clone()}</span>
+                                                                <span class="file-meta">
+                                                                    {meta}
+                                                                    {shared
+                                                                        .then(|| {
+                                                                            view! {
+                                                                                <span class="badge">
+                                                                                    {format!("shared by {owner} ({permission})")}
+                                                                                </span>
+                                                                            }
+                                                                        })}
+                                                                </span>
+                                                            </span>
+                                                        </button>
+                                                        <span class="file-actions">
+                                                            {(!is_dir)
+                                                                .then(|| {
+                                                                    view! {
+                                                                        <a
+                                                                            class="icon-btn"
+                                                                            title="Download"
+                                                                            href=format!("/dav{}", encode_path(&download))
+                                                                            download
+                                                                        >
+                                                                            <Icon name="download"/>
+                                                                        </a>
+                                                                    }
+                                                                })}
+                                                            {(!shared)
+                                                                .then(|| {
+                                                                    view! {
+                                                                        <button
+                                                                            class="icon-btn"
+                                                                            title="Share"
+                                                                            on:click=move |_| share_entry(share_copy.clone())
+                                                                        >
+                                                                            <Icon name="share"/>
+                                                                        </button>
+                                                                        <button
+                                                                            class="icon-btn"
+                                                                            title="Rename"
+                                                                            on:click=move |_| rename_entry(rename_copy.clone())
+                                                                        >
+                                                                            <Icon name="edit"/>
+                                                                        </button>
+                                                                        <button
+                                                                            class="icon-btn"
+                                                                            title="Delete"
+                                                                            on:click=move |_| delete_entry(delete_copy.clone())
+                                                                        >
+                                                                            <Icon name="trash"/>
+                                                                        </button>
+                                                                    }
+                                                                })}
+                                                        </span>
+                                                    </li>
+                                                }
+                                            }
+                                        />
+                                    </ul>
+                                }
+                                    .into_any()
+                            }
+                        }}
+                    }
+                        .into_any()
                 }
                 Tab::Trash => {
                     view! {
@@ -768,9 +1169,38 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 }
             }
         }}
+                </main>
+            </div>
 
-        {move || {
-            share_target
+            <div class="toasts">
+                <Show when=move || !error.get().is_empty()>
+                    <div class="toast error">
+                        <span class="toast-msg">{move || error.get()}</span>
+                        <button
+                            class="icon-btn"
+                            aria-label="Dismiss"
+                            on:click=move |_| error.set(String::new())
+                        >
+                            <Icon name="x"/>
+                        </button>
+                    </div>
+                </Show>
+                <Show when=move || !notice.get().is_empty()>
+                    <div class="toast ok">
+                        <span class="toast-msg">{move || notice.get()}</span>
+                        <button
+                            class="icon-btn"
+                            aria-label="Dismiss"
+                            on:click=move |_| notice.set(String::new())
+                        >
+                            <Icon name="x"/>
+                        </button>
+                    </div>
+                </Show>
+            </div>
+
+            {move || {
+                share_target
                 .get()
                 .map(|entry| {
                     view! {
@@ -802,6 +1232,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     }
                 })
         }}
+        </div>
     }
 }
 
