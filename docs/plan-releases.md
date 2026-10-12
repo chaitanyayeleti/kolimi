@@ -17,32 +17,42 @@ SBOM, signatures), the **container image on GHCR**, **Arch (AUR)**, and
 
 | Channel | Artifact | Status |
 | --- | --- | --- |
-| GitHub Releases | gnu tarball, CycloneDX SBOM, cosign signatures | **exists** (`release.yml`); **musl/aarch64 tarballs** need a vendored OpenSSL (`webauthn-rs` → `openssl-sys`) — follow-up |
-| `.deb` | cargo-deb build (metadata + postinst exist) | built in the CI `packaging` job, **not attached to releases** → add to `release.yml` |
-| Container | OCI image | built locally only, **never published** → add buildx push to GHCR |
-| Arch (AUR) | `packaging/arch/PKGBUILD` | exists; `pkgver`/`sha256sums` updated by hand → automate |
-| Helm | chart (`packaging/helm/kolimi`) | exists; package + attach on release |
-| `install.sh` | one-liner from the release tarball | exists; point it at the new tag |
+| GitHub Releases | gnu/musl/aarch64 tarballs, `.deb`, Helm, CycloneDX SBOM, cosign signatures | **shipped** (v0.1.0–v0.1.2); musl vendors OpenSSL for the `webauthn-rs` → `openssl-sys` edge |
+| `.deb` | cargo-deb build (metadata + postinst) | **attached** to each release |
+| Container | OCI image on GHCR | **published** (`ghcr.io/chaitanyayeleti/kolimi`); `amd64` today — **arm64 pending** |
+| Arch (AUR) | `packaging/arch/PKGBUILD` | **automated**: the `aur` job bumps `pkgver`/`sha256sums` and pushes (gated on the `AUR_SSH_KEY` secret); `kolimi-server` is live |
+| Helm | chart (`packaging/helm/kolimi`) | packaged + **attached** on release |
+| `install.sh` | one-liner from the release tarball | downloads `latest` (or `--version TAG`), verifies checksum + cosign |
 
-## Pipeline per tag (target state)
+## Pipeline per tag
 
-1. **build** (existing, extended) — `x86_64-unknown-linux-gnu` + `musl`,
-   staged wasm UI, then package tarball + `.deb`, emit SBOM, cosign-sign.
-2. **container** (new) — `docker buildx` multi-arch (`amd64`, `arm64`),
-   push `ghcr.io/chaitanyayeleti/kolimi:{vX.Y.Z, X.Y, latest}`.
-3. **helm** (new) — `helm package` → attach `.tgz`.
-4. **publish** (existing) — attach every artifact to the GitHub release.
-5. **aur** (optional) — bump `pkgver`/`sha256sums`/`pkgrel` and push to
-   `aur.archlinux.org/kolimi-server` (needs an AUR SSH-key secret); until
-   then, a documented manual step.
+1. **build** — `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, and
+   `aarch64-unknown-linux-gnu` (native arm runner); staged wasm UI, tarball
+   + `.deb`, CycloneDX SBOM, cosign.
+2. **container** — `docker buildx` build + push to
+   `ghcr.io/chaitanyayeleti/kolimi:{vX.Y.Z, X.Y, latest}` (currently `amd64`).
+3. **helm** — `helm package` → attached `.tgz`.
+4. **publish** — attaches every artifact to the GitHub release.
+5. **aur** — bumps `pkgver`/`sha256sums`/`pkgrel` and pushes to
+   `aur.archlinux.org/kolimi-server` (gated on `AUR_SSH_KEY`).
+
+## Remaining
+
+- **arm64 container image** — the `build` matrix already produces an
+  `aarch64` binary, but the image is `amd64` only. Add a native
+  `ubuntu-24.04-arm` image build and merge a multi-arch manifest (do **not**
+  build the wasmtime tree under QEMU).
+- Optional fast install: a `kolimi-bin` AUR package from the release tarball
+  alongside the source-built `kolimi-server`.
 
 ## Container specifics
 
-- `linux/amd64` first (distroless base; the build embeds the WASM UI).
-  **arm64** lands later via a native `ubuntu-24.04-arm` runner — building
-  the wasmtime tree under QEMU is far too slow.
-- Publishing to GHCR makes the Helm chart's `image.repository` real
-  (currently a placeholder) and lets users `docker run ghcr.io/…`.
+- `linux/amd64` is published (distroless base; the build embeds the WASM
+  UI). **arm64** is the remaining work, via a native `ubuntu-24.04-arm`
+  runner — building the wasmtime tree under QEMU is far too slow.
+- The Helm chart's `image.repository` points at
+  `ghcr.io/chaitanyayeleti/kolimi` (tag defaults to the chart appVersion);
+  `docker run ghcr.io/…` works without a local build.
 - Tags: `vX.Y.Z`, `X.Y`, `latest`.
 - CI runners are ephemeral, so the large local build cache is a
   non-issue in CI.
@@ -63,13 +73,16 @@ SBOM, signatures), the **container image on GHCR**, **Arch (AUR)**, and
 
 ## First-release checklist (`v0.1.0`)
 
-- [ ] `main` green; version bumped; CHANGELOG written.
-- [ ] Tag `v0.1.0`; `release.yml` completes.
-- [ ] Container image published and pullable from GHCR.
-- [ ] `.deb` installs and creates the `kolimi` user + systemd unit.
-- [ ] AUR `PKGBUILD` updated and pushed.
-- [ ] `install.sh` one-liner verified against the tag.
-- [ ] Helm chart points at the published image.
+- [x] `main` green; version bumped; CHANGELOG written.
+- [x] Tag `v0.1.0`; `release.yml` completes.
+- [x] Container image published and pullable from GHCR.
+- [x] `.deb` installs and creates the `kolimi` user + systemd unit.
+- [x] AUR `PKGBUILD` updated and pushed (automated via `AUR_SSH_KEY`).
+- [x] `install.sh` one-liner verified against the tag.
+- [x] Helm chart points at the published image.
+
+Releases since: **v0.1.1** (musl/aarch64 tarballs + AUR automation),
+**v0.1.2** (web admin panel).
 
 ## Cadence
 
