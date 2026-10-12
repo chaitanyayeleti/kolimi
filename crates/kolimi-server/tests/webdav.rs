@@ -392,6 +392,64 @@ async fn lock_on_unmapped_url_creates_then_put() {
 }
 
 #[tokio::test]
+async fn conditional_put_with_unknown_token_is_412() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/c.txt", &auth, "text/plain", b"x"),
+    )
+    .await;
+    let mut req = request_with_body("PUT", "/dav/c.txt", &auth, "text/plain", b"y");
+    req.headers_mut()
+        .insert("if", "(<opaquelocktoken:bogus>)".parse().unwrap());
+    let (status, _, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+}
+
+#[tokio::test]
+async fn indirect_lock_refresh_via_member() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(&server.app, request("MKCOL", "/dav/coll", Some(&auth))).await;
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/coll/f.txt", &auth, "text/plain", b"x"),
+    )
+    .await;
+
+    let info = r#"<d:lockinfo xmlns:d="DAV:"><d:lockscope><d:exclusive/></d:lockscope><d:locktype><d:write/></d:locktype></d:lockinfo>"#;
+    let req = Request::builder()
+        .method("LOCK")
+        .uri("/dav/coll")
+        .header(header::AUTHORIZATION, &auth)
+        .header(header::CONTENT_TYPE, "application/xml")
+        .header("depth", "infinity")
+        .body(Body::from(info))
+        .unwrap();
+    let (status, headers, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let token = headers
+        .get("lock-token")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Refresh the collection lock indirectly through a member.
+    let req = Request::builder()
+        .method("LOCK")
+        .uri("/dav/coll/f.txt")
+        .header(header::AUTHORIZATION, &auth)
+        .header(header::CONTENT_TYPE, "application/xml")
+        .header("if", format!("({token})"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn propfind_exposes_quota_properties() {
     let server = setup().await;
     let auth = basic(USER, PASS);

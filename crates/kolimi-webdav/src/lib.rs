@@ -227,8 +227,8 @@ async fn put(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    if !authorized(locks, user_id, path, headers) {
-        return StatusCode::LOCKED.into_response();
+    if let Some(response) = lock_check(vfs, locks, user_id, path, headers).await {
+        return response;
     }
 
     let existing = match vfs.stat_access(user_id, path).await {
@@ -281,8 +281,8 @@ async fn delete(
     path: &str,
     headers: &HeaderMap,
 ) -> Response {
-    if !authorized(locks, user_id, path, headers) {
-        return StatusCode::LOCKED.into_response();
+    if let Some(response) = lock_check(vfs, locks, user_id, path, headers).await {
+        return response;
     }
     match vfs.delete_access(user_id, path).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -299,8 +299,8 @@ async fn mkcol(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    if !authorized(locks, user_id, path, headers) {
-        return StatusCode::LOCKED.into_response();
+    if let Some(response) = lock_check(vfs, locks, user_id, path, headers).await {
+        return response;
     }
     match to_bytes(body, 1).await {
         Ok(bytes) if bytes.is_empty() => {}
@@ -448,8 +448,8 @@ async fn proppatch(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    if !authorized(locks, user_id, path, headers) {
-        return StatusCode::LOCKED.into_response();
+    if let Some(response) = lock_check(vfs, locks, user_id, path, headers).await {
+        return response;
     }
     let body = match to_bytes(body, MAX_PROPFIND_BODY).await {
         Ok(bytes) => bytes,
@@ -537,10 +537,11 @@ async fn copy_move(
     }
     // Moving writes to the destination (and removes the source); copying only
     // writes to the destination.
-    if !authorized(locks, user_id, &destination, headers)
-        || (is_move && !authorized(locks, user_id, source, headers))
-    {
-        return StatusCode::LOCKED.into_response();
+    if let Some(response) = lock_check(vfs, locks, user_id, &destination, headers).await {
+        return response;
+    }
+    if is_move && let Some(response) = lock_check(vfs, locks, user_id, source, headers).await {
+        return response;
     }
     let overwrite = match header_str(headers, "overwrite") {
         None => true,
@@ -576,12 +577,34 @@ fn header_str(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) 
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
-/// Whether the caller may write `path`, given any lock tokens in `If`.
-fn authorized(locks: &LockManager, user_id: i64, path: &str, headers: &HeaderMap) -> bool {
-    let tokens = header_str(headers, "if")
-        .map(lock::if_tokens)
-        .unwrap_or_default();
-    locks.authorize(user_id, path, &tokens)
+/// Enforces locks on a write to `path`: `Some(response)` when the request
+/// must be rejected (`423 Locked` or `412 Precondition Failed`).
+async fn lock_check(
+    vfs: &Vfs,
+    locks: &LockManager,
+    user_id: i64,
+    path: &str,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let covering = locks.covering_tokens(user_id, path);
+    let if_header = header_str(headers, "if");
+    let supplied = if_header.map(lock::if_tokens).unwrap_or_default();
+    // A governing lock requires its token, whatever else the `If` says.
+    if !covering.is_empty() && !covering.iter().any(|token| supplied.contains(token)) {
+        return Some(StatusCode::LOCKED.into_response());
+    }
+    let header = if_header?;
+    let etag = vfs
+        .stat_access(user_id, path)
+        .await
+        .ok()
+        .flatten()
+        .map(|access| access.node.etag());
+    if lock::evaluate_if(header, etag.as_deref(), &covering) {
+        None
+    } else {
+        Some(StatusCode::PRECONDITION_FAILED.into_response())
+    }
 }
 
 /// `LOCK` (RFC 4918 §9.10): create a lock, or refresh one when the body is

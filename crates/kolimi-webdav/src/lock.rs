@@ -57,6 +57,17 @@ pub enum LockError {
     NotFound,
 }
 
+/// Result of evaluating a write against the active locks.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WriteAccess {
+    /// No lock governs the write, or the `If` conditions are satisfied.
+    Allow,
+    /// A lock governs the write but no matching token was supplied.
+    Locked,
+    /// An `If` header was present whose conditions do not hold.
+    PreconditionFailed,
+}
+
 const MIN_TIMEOUT: u64 = 60;
 const DEFAULT_TIMEOUT: u64 = 3600;
 const MAX_TIMEOUT: u64 = 604_800;
@@ -114,6 +125,10 @@ impl LockManager {
     }
 
     /// Refreshes an existing lock identified by `token`.
+    ///
+    /// The token may be presented at any URI within the lock's scope, so a
+    /// lock on a collection can be refreshed through a member (RFC 4918
+    /// §9.10.2, "indirect refresh").
     pub fn refresh(
         &self,
         owner: i64,
@@ -125,7 +140,10 @@ impl LockManager {
         let timeout = clamp_timeout(timeout_secs);
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.purge(now);
-        let Some(entries) = inner.locks.get_mut(path) else {
+        let root = inner
+            .find_covering_root(owner, path, token)
+            .ok_or(LockError::NotFound)?;
+        let Some(entries) = inner.locks.get_mut(&root) else {
             return Err(LockError::NotFound);
         };
         let Some((_, lock)) = entries
@@ -174,6 +192,45 @@ impl LockManager {
         let covering = inner.covering(owner, path);
         covering.is_empty() || covering.iter().any(|lock| tokens.contains(&lock.token))
     }
+
+    /// Tokens of the locks that govern writes to `path`.
+    pub fn covering_tokens(&self, owner: i64, path: &str) -> Vec<String> {
+        let now = Instant::now();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.purge(now);
+        inner
+            .covering(owner, path)
+            .into_iter()
+            .map(|lock| lock.token.clone())
+            .collect()
+    }
+
+    /// Evaluates a write against active locks and any `If` header.
+    pub fn evaluate(
+        &self,
+        owner: i64,
+        path: &str,
+        if_present: bool,
+        tokens: &[String],
+    ) -> WriteAccess {
+        let now = Instant::now();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.purge(now);
+        let covering = inner.covering(owner, path);
+        if if_present {
+            // Only lock-token conditions are evaluated. An `If` whose tokens
+            // match no covering lock is a false condition -> 412. An `If`
+            // carrying no lock tokens is treated as satisfied.
+            if !tokens.is_empty() && !covering.iter().any(|lock| tokens.contains(&lock.token)) {
+                return WriteAccess::PreconditionFailed;
+            }
+            WriteAccess::Allow
+        } else if covering.is_empty() {
+            WriteAccess::Allow
+        } else {
+            WriteAccess::Locked
+        }
+    }
 }
 
 impl Inner {
@@ -199,6 +256,18 @@ impl Inner {
             }
         }
         found
+    }
+
+    /// The root path of the owner's lock with `token` that covers `path`.
+    fn find_covering_root(&self, owner: i64, path: &str, token: &str) -> Option<String> {
+        for (locked, entries) in &self.locks {
+            for (who, lock) in entries {
+                if *who == owner && lock.token == token && covers(locked, lock, path) {
+                    return Some(locked.clone());
+                }
+            }
+        }
+        None
     }
 
     fn conflicts(&self, path: &str, scope: Scope) -> bool {
@@ -250,7 +319,8 @@ fn new_token(counter: &mut u64, owner: i64, path: &str) -> String {
 
 /// Parses the state tokens from an RFC 4918 `If` header.
 ///
-/// Only `opaquelocktoken` URIs are returned; `Not` and ETag conditions are
+/// Every `<...>` value that is not an absolute resource URL (a tagged-list
+/// resource) is treated as a state token; `Not` and entity-tag conditions are
 /// ignored by this implementation.
 pub fn if_tokens(header: &str) -> Vec<String> {
     let mut tokens = Vec::new();
@@ -261,7 +331,8 @@ pub fn if_tokens(header: &str) -> Vec<String> {
             break;
         };
         let token = &after[..end];
-        if token.starts_with("opaquelocktoken:") {
+        let lower = token.to_ascii_lowercase();
+        if !token.is_empty() && !lower.starts_with("http://") && !lower.starts_with("https://") {
             tokens.push(token.to_string());
         }
         rest = &after[end + 1..];
@@ -290,6 +361,101 @@ pub fn lock_token_value(header: &str) -> String {
         .trim_start_matches('<')
         .trim_end_matches('>')
         .to_string()
+}
+
+/// One condition inside an `If` header list.
+enum Condition {
+    Token { negated: bool, value: String },
+    Etag { negated: bool, value: String },
+}
+
+/// Evaluates an RFC 4918 `If` header against the resource's current ETag and
+/// the lock tokens that hold it.
+///
+/// Only untagged lists (applying to the request URI) are evaluated, which is
+/// what write clients use; tagged resource lists are ignored. The header is
+/// satisfied when at least one list is true, and a list is a conjunction of
+/// its token and entity-tag conditions (`Not` negates a condition).
+pub fn evaluate_if(header: &str, current_etag: Option<&str>, covering: &[String]) -> bool {
+    for group in if_groups(header) {
+        let conditions = parse_conditions(&group);
+        if !conditions.is_empty()
+            && conditions.iter().all(|condition| match condition {
+                Condition::Token { negated, value } => {
+                    covering.iter().any(|token| token == value) != *negated
+                }
+                Condition::Etag { negated, value } => {
+                    (current_etag == Some(value.as_str())) != *negated
+                }
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn if_groups(header: &str) -> Vec<String> {
+    let mut groups = Vec::new();
+    let mut rest = header;
+    while let Some(start) = rest.find('(') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find(')') else {
+            break;
+        };
+        groups.push(after[..end].to_string());
+        rest = &after[end + 1..];
+    }
+    groups
+}
+
+fn parse_conditions(group: &str) -> Vec<Condition> {
+    let mut conditions = Vec::new();
+    let mut negated = false;
+    let mut rest = group;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(after) = rest.strip_prefix("Not")
+            && (after.is_empty()
+                || after.starts_with(char::is_whitespace)
+                || after.starts_with('<')
+                || after.starts_with('['))
+        {
+            negated = true;
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('<')
+            && let Some(end) = after.find('>')
+        {
+            conditions.push(Condition::Token {
+                negated,
+                value: after[..end].to_string(),
+            });
+            negated = false;
+            rest = &after[end + 1..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('[')
+            && let Some(end) = after.find(']')
+        {
+            conditions.push(Condition::Etag {
+                negated,
+                value: after[..end].to_string(),
+            });
+            negated = false;
+            rest = &after[end + 1..];
+            continue;
+        }
+        match rest.find(char::is_whitespace) {
+            Some(pos) => rest = &rest[pos..],
+            None => break,
+        }
+    }
+    conditions
 }
 
 #[cfg(test)]
@@ -355,15 +521,43 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_etag_and_not_conditions() {
+        let covering = vec!["opaquelocktoken:abc".to_string()];
+        let etag = "\"v1\"";
+        assert!(evaluate_if(
+            "(<opaquelocktoken:abc>)",
+            Some(etag),
+            &covering
+        ));
+        assert!(!evaluate_if(
+            "(<opaquelocktoken:nope>)",
+            Some(etag),
+            &covering
+        ));
+        // litmus fail_complex_cond_put: matching token but corrupted ETag.
+        let complex = "(<opaquelocktoken:abc> [\"bad\"]) (Not <DAV:no-lock> [\"bad\"])";
+        assert!(!evaluate_if(complex, Some(etag), &covering));
+        assert!(evaluate_if(
+            "(<opaquelocktoken:abc> [\"v1\"])",
+            Some(etag),
+            &covering
+        ));
+    }
+
+    #[test]
     fn parses_if_and_timeout() {
         let header = "(<opaquelocktoken:abc> <urn:other:x>) Not <opaquelocktoken:def>";
         assert_eq!(
             if_tokens(header),
             vec![
                 "opaquelocktoken:abc".to_string(),
+                "urn:other:x".to_string(),
                 "opaquelocktoken:def".to_string()
             ]
         );
+        // Tagged-list resource URLs are not state tokens.
+        let tagged = "<http://host/dav/a> (<opaquelocktoken:abc>)";
+        assert_eq!(if_tokens(tagged), vec!["opaquelocktoken:abc".to_string()]);
         assert_eq!(parse_timeout("Second-120"), 120);
         assert_eq!(parse_timeout("Infinite"), MAX_TIMEOUT);
         assert_eq!(parse_timeout("garbage"), 0);
