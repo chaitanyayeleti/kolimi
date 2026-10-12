@@ -73,6 +73,41 @@ pub struct User {
     pub usage_updated_at: Option<i64>,
 }
 
+/// Sort key for the admin user list (`GET /api/users`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserSort {
+    /// Account id (default).
+    Id,
+    /// Username.
+    Username,
+    /// Used storage bytes.
+    UsedBytes,
+    /// Per-user quota bytes.
+    QuotaBytes,
+}
+
+/// Sort direction for the admin user list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortOrder {
+    /// Ascending (default).
+    Asc,
+    /// Descending.
+    Desc,
+}
+
+/// Filter for the admin user list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserFilter {
+    /// No filter (default).
+    None,
+    /// Only users at or above their effective quota.
+    OverQuota,
+    /// Only disabled accounts.
+    Disabled,
+    /// Only administrators.
+    Admin,
+}
+
 /// A login session.
 #[derive(Debug, Clone, FromRow)]
 pub struct Session {
@@ -454,6 +489,71 @@ impl Db {
                 .fetch_all(&self.pool)
                 .await?,
         )
+    }
+
+    /// A page of users with an admin-chosen sort, order, and filter.
+    ///
+    /// Keyset pagination (`after_id`) only applies to the default `Id`
+    /// order; other orders return the first `limit` rows. `default_quota`
+    /// is the server-wide quota in bytes (`0` = unlimited), used to decide
+    /// which users are over quota when they have no per-user override.
+    pub async fn users_page_sorted(
+        &self,
+        after_id: i64,
+        limit: i64,
+        sort: UserSort,
+        order: SortOrder,
+        filter: UserFilter,
+        default_quota: u64,
+    ) -> Result<Vec<User>, DbError> {
+        let column = match sort {
+            UserSort::Id => "id",
+            UserSort::Username => "username",
+            UserSort::UsedBytes => "used_bytes",
+            UserSort::QuotaBytes => "COALESCE(quota_bytes, 0)",
+        };
+        let direction = match order {
+            SortOrder::Asc => "ASC",
+            SortOrder::Desc => "DESC",
+        };
+        let mut clauses: Vec<String> = Vec::new();
+        if sort == UserSort::Id {
+            clauses.push("id > ?".to_string());
+        }
+        match filter {
+            UserFilter::OverQuota => {
+                // Effective quota: per-user override, else the server
+                // default; `0` means unlimited (never over quota).
+                let fallback = if default_quota == 0 {
+                    i64::MAX
+                } else {
+                    default_quota as i64
+                };
+                clauses.push(format!(
+                    "used_bytes >= (CASE WHEN quota_bytes IS NULL THEN {fallback} \
+                     WHEN quota_bytes <= 0 THEN 9223372036854775807 ELSE quota_bytes END)"
+                ));
+            }
+            UserFilter::Disabled => clauses.push("disabled = 1".to_string()),
+            UserFilter::Admin => clauses.push("is_admin = 1".to_string()),
+            UserFilter::None => {}
+        }
+        let mut sql = String::from("SELECT * FROM users");
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(&format!(" ORDER BY {column} {direction}, id ASC LIMIT ?"));
+
+        let mut query = sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(sql));
+        if sort == UserSort::Id {
+            query = query.bind(after_id);
+        }
+        query
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Into::into)
     }
 
     /// Lists all users ordered by name.

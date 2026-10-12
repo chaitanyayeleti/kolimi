@@ -122,6 +122,7 @@ is silently skipped.
 | **E2EE onboarding** | E2EE is opt-in and CLI-only: web-only users can't enable it, and nothing is encrypted by default | Draft [RFC 0009](docs/rfc/0009-e2ee-onboarding.md): first-login **browser** keyring setup (wasm), encrypt-by-default with opt-out folders, passkey unlock; crypto unchanged, passphrase still client-only |
 | **WebDAV / E2EE boundary** | ✅ **Option A landed**: DAV refuses `GET`/`HEAD`/`PUT`/`COPY`/`MOVE` on encrypted nodes (no ciphertext download, no plaintext overwrite). Full marker-based dir-level boundary ([RFC 0010](docs/rfc/0010-webdav-e2ee-boundary.md)) deferred | Add the encrypted-root marker + `dav_roots` allow-list if dir-level enforcement is wanted; local decrypting gateway remains out of scope |
 | **Dependency advisories** | ✅ Documented: `paste` (unmaintained, compile-time only) and `lru` (unsound, unreachable path) accepted with reasons + revisit conditions | See [docs/known-advisories.md](docs/known-advisories.md); revisit on Leptos → `pastey` and tantivy → `lru 0.18` |
+| **Admin storage management** | ✅ **Landed** (#15): `GET /api/users` `sort`/`order`/`filter`; near-quota warnings (usage API flags, `X-Kolimi-Quota-Warning` on commits, `quota.warn` audit, admin badges + user toast); per-user usage gauges (`kolimi_users_by_usage_bucket`, opt-in `kolimi_user_used_bytes`) | — |
 | **Postgres backend** | Stack promises "Postgres-ready queries" | sqlx is already the layer; port migrations + connection plumbing behind the same `Db` API; decide demand-driven |
 | **HTTP/3 (quinn), zero-copy uploads** | Stack mentions both; performance targets are met without them | Only if benchmarks show a gap; not on the critical path |
 | **Compression + broader rate limiting** | Per-client limits cover auth, passkey, public-unlock and preview endpoints (with `KOLIMI_TRUST_PROXY` for proxies); lockout is scoped per (account, source). Compression and a wider global limiter are still missing | Add `tower-http` compression; consider a broader global request limiter |
@@ -133,7 +134,7 @@ is silently skipped.
 | **Self-heal from replicas** | Scrubber detects corruption but single-node has no replica to heal from | Replication is out of v1 scope; document the single-node reality (done) and revisit with object storage |
 | **Restore drills in CI** | backup/verify exist; drills are manual | Add a CI job: seed → backup → destroy → restore → verify → byte-compare |
 | **Plugin SDK polish + signing** | Plugins are unsigned; SDK is one example | WIT docs, a plugin template, optional signature verification (cosign) before load |
-| **OTel traces** | Prometheus metrics exist; traces do not | Add `tracing-opentelemetry` behind a feature flag; only if operators ask |
+| **OTel traces** | ✅ **Landed**: OTLP/gRPC trace export behind the `otel` feature flag (`KOLIMI_OTEL_ENDPOINT`); request spans come from the existing `tracing`/`tower-http` instrumentation | — |
 
 ## 9. Non-goals
 

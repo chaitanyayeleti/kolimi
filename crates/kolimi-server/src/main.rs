@@ -183,13 +183,62 @@ enum GroupCommand {
     Delete { name: String },
 }
 
+/// Initializes tracing: plain `fmt` by default, plus OTLP export when built
+/// with `--features otel` and `KOLIMI_OTEL_ENDPOINT` is set.
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    #[cfg(feature = "otel")]
+    {
+        if let Ok(endpoint) = std::env::var("KOLIMI_OTEL_ENDPOINT") {
+            match init_otel(&endpoint) {
+                Ok(tracer) => {
+                    use tracing_subscriber::layer::SubscriberExt;
+                    use tracing_subscriber::util::SubscriberInitExt;
+                    tracing_subscriber::registry()
+                        .with(filter)
+                        .with(tracing_subscriber::fmt::layer())
+                        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                        .init();
+                    tracing::info!(%endpoint, "OpenTelemetry OTLP trace export enabled");
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("OpenTelemetry init failed ({error}); continuing without traces");
+                }
+            }
+        }
+    }
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+/// Builds the OTLP/gRPC trace exporter and installs it as the global
+/// tracer provider. Returns the tracer for the `tracing` layer.
+#[cfg(feature = "otel")]
+fn init_otel(
+    endpoint: &str,
+) -> Result<opentelemetry_sdk::trace::SdkTracer, Box<dyn std::error::Error>> {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::WithExportConfig as _;
+    use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()?;
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(Resource::builder().with_service_name("kolimi").build())
+        .build();
+    let tracer = provider.tracer("kolimi");
+    opentelemetry::global::set_tracer_provider(provider);
+    Ok(tracer)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing();
 
     let cli = Cli::parse();
     match cli.command {

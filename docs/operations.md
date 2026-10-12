@@ -156,6 +156,11 @@ request counts and latency histograms by route template, uploads,
 preview outcomes, login failures. Labels never contain paths, file
 names, or user identifiers. `/healthz` is the liveness endpoint.
 
+Opening `/metrics` in a browser (which sends `Accept: text/html`) shows a
+read-only **HTML dashboard** instead — metric families as cards, with a
+15-second auto-refresh; append `?format=text` to force the Prometheus
+format. Scrapers (no `text/html` in `Accept`) always get the text format.
+
 `/metrics` is **administrators only**. A signed-in admin can open it in
 the browser (the session cookie is enough — no separate credential), and
 a scraper authenticates with HTTP Basic using an admin's username and
@@ -175,6 +180,38 @@ scrape_configs:
     static_configs:
       - targets: ["cloud.example.com"]
 ```
+
+### Storage-usage metrics
+
+`/metrics` also exposes `kolimi_users_by_usage_bucket{bucket}` — a
+low-cardinality count of accounts by how full their quota is
+(`0`, `1-50`, `50-90`, `90-100`, `over`, `unlimited`). Per-user gauges
+(`kolimi_user_used_bytes{user}`) are **opt-in** via
+`KOLIMI_METRICS_PER_USER=1` because they scale with the account count.
+
+### Tracing (OpenTelemetry)
+
+Traces are optional. Build the server with the `otel` feature and set
+`KOLIMI_OTEL_ENDPOINT` to an OTLP/gRPC collector:
+
+```sh
+KOLIMI_OTEL_ENDPOINT=http://localhost:4317 kolimi-server serve
+```
+
+The default build has no OTLP dependency; without the feature or the env
+var, only the normal `fmt` logs are emitted. Request spans come from the
+existing `tracing`/`tower-http` instrumentation.
+
+### Quota warnings
+
+When a commit pushes an account to or over **90%** of its effective
+quota, the server emits a `quota.warn` audit event and adds an
+`X-Kolimi-Quota-Warning` header (the usage percentage) to the commit
+response; the web UI shows a toast. `GET /api/users/{name}/usage` returns
+`over_quota`, `warning`, `warning_percent`, and `used_percent`, and the
+admin panel marks near/over-quota accounts. `GET /api/users` accepts
+`sort` (`id`, `username`, `used_bytes`, `quota_bytes`), `order`
+(`asc`/`desc`), and `filter` (`over_quota`, `disabled`, `admin`).
 
 ## Hardening
 

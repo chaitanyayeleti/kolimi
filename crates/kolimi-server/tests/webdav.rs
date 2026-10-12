@@ -976,6 +976,123 @@ async fn admin_api_creates_users_and_respects_permissions() {
 }
 
 #[tokio::test]
+async fn admin_users_list_sorts_filters_and_warns_on_quota() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+
+    for name in ["bob", "carol"] {
+        let create = json_request(
+            "POST",
+            "/api/users",
+            Some(&auth),
+            &format!(r#"{{"username":"{name}","password":"{name} password 1"}}"#),
+        );
+        let (status, _, _) = send(&server.app, create).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    // Give both a small quota.
+    for name in ["bob", "carol"] {
+        let patch = json_request(
+            "PATCH",
+            &format!("/api/users/{name}"),
+            Some(&auth),
+            r#"{"quota_bytes":100}"#,
+        );
+        let (status, _, _) = send(&server.app, patch).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // Bob really uses 95/100 bytes (uploaded), which is in the warning band.
+    let bob = basic("bob", "bob password 1");
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/dav/bob.bin",
+            &bob,
+            "application/octet-stream",
+            &[0u8; 95],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Carol has no files but a cached over-quota figure (as the janitor
+    // would leave after a large delete-then-account-change).
+    let carol = server.state.db.find_user("carol").await.unwrap().unwrap();
+    server
+        .state
+        .db
+        .set_used_bytes(carol.id, 120, 0)
+        .await
+        .unwrap();
+
+    // Sorting by used_bytes desc puts carol (120) above bob (95).
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/users?sort=used_bytes&order=desc", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(list["users"][0]["username"], "carol");
+    assert_eq!(list["users"][1]["username"], "bob");
+
+    // filter=over_quota returns only carol (cached 120 >= 100).
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/users?filter=over_quota", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list: Value = serde_json::from_slice(&body).unwrap();
+    let names: Vec<&str> = list["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|account| account["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["carol"]);
+
+    // filter=admin returns only alice.
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/users?filter=admin", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list: Value = serde_json::from_slice(&body).unwrap();
+    let names: Vec<&str> = list["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|account| account["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alice"]);
+
+    // An unknown sort is rejected.
+    let (status, _, _) = send(
+        &server.app,
+        request("GET", "/api/users?sort=bogus", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Bob is at 95%: warning, but not over quota.
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/users/bob/usage", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let usage: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(usage["warning"], true);
+    assert_eq!(usage["over_quota"], false);
+    assert_eq!(usage["warning_percent"].as_u64(), Some(95));
+}
+
+#[tokio::test]
 async fn users_cannot_reach_each_others_files() {
     let server = setup().await;
     server

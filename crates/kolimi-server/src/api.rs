@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use kolimi_auth::{CurrentUser, password, token};
-use kolimi_db::DbError;
+use kolimi_db::{DbError, SortOrder, UserFilter, UserSort};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -400,18 +400,30 @@ pub async fn create_user(
 /// Query for `GET /api/users`.
 #[derive(Deserialize)]
 pub struct UsersQuery {
-    /// Keyset cursor: return users with a larger id.
+    /// Keyset cursor: return users with a larger id (default order only).
     #[serde(default)]
     cursor: Option<i64>,
     #[serde(default)]
     limit: Option<i64>,
+    /// Sort key: `id` (default), `username`, `used_bytes`, `quota_bytes`.
+    #[serde(default)]
+    sort: Option<String>,
+    /// Sort direction: `asc` (default) or `desc`.
+    #[serde(default)]
+    order: Option<String>,
+    /// Filter: `over_quota`, `disabled`, or `admin`.
+    #[serde(default)]
+    filter: Option<String>,
 }
 
-/// `GET /api/users?cursor=&limit=` — admin-only, paginated account list.
+/// `GET /api/users?cursor=&limit=&sort=&order=&filter=` — admin-only list.
 ///
 /// Reads the cached `quota_bytes`/`used_bytes` columns only, so listing
 /// never walks the blob store (safe with thousands of users). Use
 /// `GET /api/users/{username}/usage` for a freshly measured number.
+/// Keyset pagination applies to the default `id` order; `sort=used_bytes&
+/// order=desc` finds the heaviest users, `filter=over_quota` the ones at
+/// or above their quota.
 pub async fn list_users(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
@@ -422,13 +434,37 @@ pub async fn list_users(
     }
     let limit = query.limit.unwrap_or(100).clamp(1, 1000);
     let after = query.cursor.unwrap_or(0).max(0);
-    match state.db.users_page(after, limit + 1).await {
+    let sort = match query.sort.as_deref() {
+        None | Some("id") => UserSort::Id,
+        Some("username") => UserSort::Username,
+        Some("used_bytes" | "usage") => UserSort::UsedBytes,
+        Some("quota_bytes" | "quota") => UserSort::QuotaBytes,
+        Some(other) => return bad_request(&format!("unknown sort: {other}")),
+    };
+    let order = match query.order.as_deref() {
+        None | Some("asc") => SortOrder::Asc,
+        Some("desc") => SortOrder::Desc,
+        Some(other) => return bad_request(&format!("unknown order: {other}")),
+    };
+    let filter = match query.filter.as_deref() {
+        None => UserFilter::None,
+        Some("over_quota") => UserFilter::OverQuota,
+        Some("disabled") => UserFilter::Disabled,
+        Some("admin") => UserFilter::Admin,
+        Some(other) => return bad_request(&format!("unknown filter: {other}")),
+    };
+    let default_quota = state.vfs.store().default_quota();
+    match state
+        .db
+        .users_page_sorted(after, limit + 1, sort, order, filter, default_quota)
+        .await
+    {
         Ok(mut users) => {
             let has_more = users.len() as i64 > limit;
             if has_more {
                 users.pop();
             }
-            let next_cursor = if has_more {
+            let next_cursor = if has_more && sort == UserSort::Id {
                 users.last().map(|account| account.id)
             } else {
                 None
@@ -464,6 +500,20 @@ fn effective_quota(state: &AppState, override_bytes: Option<i64>) -> u64 {
     }
 }
 
+/// Usage as a whole percentage of the effective quota (`0` when unlimited).
+pub(crate) fn quota_percent(used: u64, quota: u64) -> u64 {
+    used.saturating_mul(100).checked_div(quota).unwrap_or(0)
+}
+
+/// The warning percentage (at or above 90% of quota) when a user is close
+/// to or over their quota; `None` when unlimited or comfortably under.
+pub(crate) fn quota_warning_percent(used: u64, quota: u64) -> Option<u8> {
+    if quota == 0 || used.saturating_mul(10) < quota.saturating_mul(9) {
+        return None;
+    }
+    Some(quota_percent(used, quota).min(u64::from(u8::MAX)) as u8)
+}
+
 /// `GET /api/users/{username}/usage` — admin-only, freshly measured usage.
 ///
 /// Walks the user's blob tree, refreshes the cached counter, and returns
@@ -483,11 +533,17 @@ pub async fn user_usage(
         Ok(bytes) => bytes,
         Err(_) => target.used_bytes.max(0) as u64,
     };
+    let quota = effective_quota(&state, target.quota_bytes);
+    let warning = quota_warning_percent(used, quota);
     Json(json!({
         "username": target.username,
         "used_bytes": used,
         "quota_bytes": target.quota_bytes,
-        "effective_quota_bytes": effective_quota(&state, target.quota_bytes),
+        "effective_quota_bytes": quota,
+        "used_percent": quota_percent(used, quota),
+        "over_quota": quota > 0 && used >= quota,
+        "warning": warning.is_some(),
+        "warning_percent": warning,
     }))
     .into_response()
 }
@@ -701,4 +757,20 @@ pub(crate) fn not_found() -> Response {
 
 pub(crate) fn forbidden(message: &str) -> Response {
     (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::{quota_percent, quota_warning_percent};
+
+    #[test]
+    fn quota_warning_threshold_is_ninety_percent() {
+        assert_eq!(quota_warning_percent(0, 0), None, "unlimited never warns");
+        assert_eq!(quota_warning_percent(89, 100), None);
+        assert_eq!(quota_warning_percent(90, 100), Some(90));
+        assert_eq!(quota_warning_percent(120, 100), Some(120));
+        assert_eq!(quota_percent(50, 100), 50);
+        assert_eq!(quota_percent(1, 0), 0);
+    }
 }

@@ -10,6 +10,15 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# OpenTelemetry OTLP trace export (set KOLIMI_OTEL_ENDPOINT to enable).
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
 [dependencies]
 axum.workspace = true
 axum-server.workspace = true
@@ -26,6 +35,9 @@ kolimi-store.workspace = true
 kolimi-vfs.workspace = true
 kolimi-webdav.workspace = true
 mime_guess.workspace = true
+opentelemetry = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
 percent-encoding.workspace = true
 prometheus.workspace = true
 qrcode.workspace = true
@@ -37,6 +49,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 
 [dev-dependencies]

@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Admin storage management**: `GET /api/users` now supports
+  `sort`/`order`/`filter` (`used_bytes`, `over_quota`, `disabled`,
+  `admin`); near-quota warnings (usage API flags, an
+  `X-Kolimi-Quota-Warning` header on commits, a `quota.warn` audit event,
+  and admin badges + a user toast); and per-user usage metrics
+  (`kolimi_users_by_usage_bucket`, plus opt-in `kolimi_user_used_bytes` via
+  `KOLIMI_METRICS_PER_USER=1`).
+- **OpenTelemetry traces** (optional): build with `--features otel` and set
+  `KOLIMI_OTEL_ENDPOINT` to export OTLP/gRPC spans (request spans come from
+  the existing `tracing` instrumentation).
+- **Metrics dashboard**: `/metrics` now renders a read-only HTML dashboard
+  for browsers (metric families as cards, auto-refresh) while scrapers still
+  get the Prometheus text format; `?format=text` forces text.
+
 ## [0.1.6]
 
 ### Fixed

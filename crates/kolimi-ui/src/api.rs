@@ -81,13 +81,21 @@ pub async fn delete(url: &str) -> Result<ApiResponse, String> {
     to_api(response).await
 }
 
+/// A raw WebDAV response: status plus the near-quota warning, if any.
+pub struct DavResponse {
+    /// HTTP status.
+    pub status: u16,
+    /// Quota-usage percentage when the server warns (at or above 90%).
+    pub quota_warning: Option<u8>,
+}
+
 /// A raw `fetch` for WebDAV methods (PUT, MKCOL, MOVE, DELETE).
 pub async fn dav(
     method: &str,
     url: &str,
     body: Option<Vec<u8>>,
     headers: &[(&str, &str)],
-) -> Result<u16, String> {
+) -> Result<DavResponse, String> {
     let window = web_sys::window().ok_or("no window")?;
     let init = RequestInit::new();
     init.set_method(method);
@@ -106,7 +114,17 @@ pub async fn dav(
         .await
         .map_err(|e| format!("{e:?}"))?;
     let response: web_sys::Response = response.dyn_into().map_err(|e| format!("{e:?}"))?;
-    Ok(response.status())
+    let status = response.status();
+    let quota_warning = response
+        .headers()
+        .get("x-kolimi-quota-warning")
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<u8>().ok());
+    Ok(DavResponse {
+        status,
+        quota_warning,
+    })
 }
 
 /// Reads a file input's bytes.

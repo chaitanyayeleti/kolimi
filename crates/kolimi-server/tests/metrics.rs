@@ -145,3 +145,59 @@ async fn metrics_require_an_admin() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("kolimi_"));
 }
+
+#[tokio::test]
+async fn metrics_render_html_for_browsers() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
+    state
+        .db
+        .create_user("alice", &hash_password(PASS).unwrap())
+        .await
+        .unwrap();
+    let app = build_app(state);
+    let auth = basic("alice", PASS);
+
+    // A browser (Accept: text/html) gets the HTML dashboard.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .header(header::AUTHORIZATION, &auth)
+                .header(header::ACCEPT, "text/html,application/xhtml+xml")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    let body = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.starts_with("<!doctype html>"), "{body}");
+    assert!(body.contains("kolimi_users_by_usage_bucket"), "{body}");
+
+    // `?format=text` forces the Prometheus format even from a browser.
+    let (status, content_type, body) = get(&app, "/metrics?format=text", Some(&auth)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(content_type.starts_with("text/plain"), "{content_type}");
+    assert!(
+        body.contains("# TYPE kolimi_users_by_usage_bucket"),
+        "{body}"
+    );
+}

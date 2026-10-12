@@ -440,6 +440,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let dragging = RwSignal::new(false);
     let e2ee_master = RwSignal::new(Option::<MasterKey>::None);
     let e2ee_open = RwSignal::new(false);
+    let quota_warn = RwSignal::new(Option::<u8>::None);
     // Administrators get the user-management panel.
     spawn_local(async move {
         if let Ok(r) = api::get("/api/me").await
@@ -550,7 +551,12 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     Err(e) => Err(e),
                 };
                 match result {
-                    Ok(201 | 204) => uploaded += 1,
+                    Ok(r) if matches!(r.status, 201 | 204) => {
+                        uploaded += 1;
+                        if let Some(percent) = r.quota_warning {
+                            quota_warn.set(Some(percent));
+                        }
+                    }
                     _ => failed += 1,
                 }
             }
@@ -618,8 +624,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 encode_path(&format!("{}/{}", current.trim_end_matches('/'), name))
             );
             match api::dav("MKCOL", &url, None, &[]).await {
-                Ok(201) => load(current),
-                Ok(status) => error.set(format!("Could not create folder (HTTP {status})")),
+                Ok(r) if r.status == 201 => load(current),
+                Ok(r) => error.set(format!("Could not create folder (HTTP {})", r.status)),
                 Err(e) => error.set(e),
             }
         });
@@ -633,8 +639,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         spawn_local(async move {
             let url = format!("/dav{}", encode_path(&entry.path));
             match api::dav("DELETE", &url, None, &[]).await {
-                Ok(204) => load(current),
-                Ok(status) => error.set(format!("Delete failed (HTTP {status})")),
+                Ok(r) if r.status == 204 => load(current),
+                Ok(r) => error.set(format!("Delete failed (HTTP {})", r.status)),
                 Err(e) => error.set(e),
             }
         });
@@ -655,8 +661,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             );
             let url = format!("/dav{}", encode_path(&entry.path));
             match api::dav("MOVE", &url, None, &[("destination", &destination)]).await {
-                Ok(201 | 204) => load(current),
-                Ok(status) => error.set(format!("Rename failed (HTTP {status})")),
+                Ok(r) if matches!(r.status, 201 | 204) => load(current),
+                Ok(r) => error.set(format!("Rename failed (HTTP {})", r.status)),
                 Err(e) => error.set(e),
             }
         });
@@ -1415,6 +1421,29 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         </button>
                     </div>
                 </Show>
+                <Show when=move || quota_warn.get().is_some()>
+                    <div class="toast error">
+                        <span class="toast-msg">
+                            {move || {
+                                quota_warn
+                                    .get()
+                                    .map(|percent| {
+                                        format!(
+                                            "Storage almost full: {percent}% of your quota used.",
+                                        )
+                                    })
+                                    .unwrap_or_default()
+                            }}
+                        </span>
+                        <button
+                            class="icon-btn"
+                            aria-label="Dismiss"
+                            on:click=move |_| quota_warn.set(None)
+                        >
+                            <Icon name="x"/>
+                        </button>
+                    </div>
+                </Show>
             </div>
 
             {move || {
@@ -1500,10 +1529,20 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
     let users = RwSignal::new(Vec::<Value>::new());
     let error = RwSignal::new(String::new());
     let notice = RwSignal::new(String::new());
+    let sort_usage = RwSignal::new(false);
+    let over_only = RwSignal::new(false);
 
     let load = Callback::new(move |_: ()| {
         spawn_local(async move {
-            match api::get("/api/users?limit=200").await {
+            let mut url = if sort_usage.get() {
+                "/api/users?limit=200&sort=used_bytes&order=desc".to_string()
+            } else {
+                "/api/users?limit=200".to_string()
+            };
+            if over_only.get() {
+                url.push_str("&filter=over_quota");
+            }
+            match api::get(&url).await {
                 Ok(r) if r.status == 200 => {
                     error.set(String::new());
                     users.set(r.body["users"].as_array().cloned().unwrap_or_default());
@@ -1617,6 +1656,18 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
                 <p class="notice">{move || notice.get()}</p>
                 <div class="row-actions">
                     <button on:click=move |_| load.run(())>"Refresh"</button>
+                    <button on:click=move |_| {
+                        sort_usage.update(|value| *value = !*value);
+                        load.run(());
+                    }>
+                        {move || if sort_usage.get() { "By usage ▾" } else { "By name" }}
+                    </button>
+                    <button on:click=move |_| {
+                        over_only.update(|value| *value = !*value);
+                        load.run(());
+                    }>
+                        {move || if over_only.get() { "Over quota only ✓" } else { "Over quota only" }}
+                    </button>
                 </div>
                 <ul class="shares">
                     <For
@@ -1628,6 +1679,12 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
                             let disabled = user["disabled"].as_bool().unwrap_or(false);
                             let used = user["used_bytes"].as_u64().unwrap_or(0);
                             let quota = user["quota_bytes"].as_i64();
+                            let near = quota.is_some_and(|q| {
+                                q > 0
+                                    && used < q as u64
+                                    && used.saturating_mul(10) >= (q as u64).saturating_mul(9)
+                            });
+                            let over = quota.is_some_and(|q| q > 0 && used >= q as u64);
                             let q = username.clone();
                             let a = username.clone();
                             let d = username.clone();
@@ -1646,6 +1703,10 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
                                                     .then(|| view! { <span class="badge">"admin"</span> })}
                                                 {disabled
                                                     .then(|| view! { <span class="badge">"disabled"</span> })}
+                                                {over
+                                                    .then(|| view! { <span class="badge">"over quota"</span> })}
+                                                {near
+                                                    .then(|| view! { <span class="badge">"near quota"</span> })}
                                                 <span class="muted">
                                                     {fmt_bytes(used)} " / " {quota_label(quota)}
                                                 </span>

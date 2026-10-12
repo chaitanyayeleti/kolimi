@@ -218,7 +218,7 @@ impl Vfs {
 
     /// The effective quota (bytes; `0` = unlimited) and current usage for a
     /// user's storage. The per-user override wins over the server default.
-    pub(crate) async fn quota_state(&self, user_id: i64) -> Result<(u64, u64), VfsError> {
+    pub async fn quota_state(&self, user_id: i64) -> Result<(u64, u64), VfsError> {
         match self.db.get_user(user_id).await? {
             Some(user) => {
                 let quota = match user.quota_bytes {

@@ -22,7 +22,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::AppState;
-use crate::api::{bad_request, forbidden, internal_error, not_found};
+use crate::api::{bad_request, forbidden, internal_error, not_found, quota_warning_percent};
+use crate::audit;
 
 const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMMIT_BYTES: usize = 64 * 1024 * 1024;
@@ -439,6 +440,7 @@ pub async fn commit_file(
         return bad_request("manifest size does not match chunk lengths");
     }
 
+    let usage_before = state.vfs.quota_state(user.user_id).await.ok();
     match state
         .vfs
         .commit_manifest(
@@ -451,14 +453,40 @@ pub async fn commit_file(
     {
         Ok(Some(node)) => {
             state.metrics.upload();
-            json_response(
+            let mut response = json_response(
                 StatusCode::OK,
                 json!({
                     "content_id": node.content_id.map(|hash| hash.to_hex()),
                     "size": node.size,
                     "etag": node.etag(),
                 }),
-            )
+            );
+            // Near-quota notification: warn (and audit once per crossing)
+            // when a commit pushes the user to/over 90% of their quota.
+            if let Ok((quota, used)) = state.vfs.quota_state(user.user_id).await
+                && let Some(percent) = quota_warning_percent(used, quota)
+            {
+                let crossed = usage_before
+                    .map(|(_, before)| quota_warning_percent(before, quota).is_none())
+                    .unwrap_or(true);
+                if crossed {
+                    audit(
+                        &state,
+                        Some(user.user_id),
+                        Some(&user.username),
+                        "quota.warn",
+                        &query.path,
+                        json!({ "used_bytes": used, "quota_bytes": quota, "percent": percent }),
+                    )
+                    .await;
+                }
+                if let Ok(value) = HeaderValue::from_str(&percent.to_string()) {
+                    response
+                        .headers_mut()
+                        .insert("x-kolimi-quota-warning", value);
+                }
+            }
+            response
         }
         Ok(None) => {
             let current = state
