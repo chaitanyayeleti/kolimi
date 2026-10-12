@@ -704,6 +704,17 @@ impl Db {
         Ok(())
     }
 
+    /// Drops every session belonging to a user, returning how many were
+    /// removed. Used by account recovery so a lost/compromised credential
+    /// cannot keep an existing session alive.
+    pub async fn delete_user_sessions(&self, user_id: i64) -> Result<u64, DbError> {
+        let result = sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Deletes expired sessions, returning how many were removed.
     pub async fn delete_expired_sessions(&self, now: i64) -> Result<u64, DbError> {
         let result = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")

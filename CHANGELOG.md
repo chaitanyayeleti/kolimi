@@ -9,6 +9,10 @@ follow [Semantic Versioning](https://semver.org/).
 ### Added
 - Multi-arch container image: `linux/amd64` + `linux/arm64`, built on native
   runners and merged into one manifest on GHCR.
+- **Account recovery**: `kolimi-server user recover <user>` sets a new
+  password, drops the account's sessions, and by default clears TOTP
+  (optionally removes passkeys) for a user who lost every credential;
+  recorded as `user.recover` in the audit log.
 
 ### Fixed
 - Storage usage now tracks **referenced** bytes and is refreshed when trash

@@ -3,6 +3,7 @@
 //! Wires the database, blob store, VFS, WebDAV surface, and session API
 //! into a single axum application. TLS termination lives in the binary.
 
+pub mod admin;
 pub mod api;
 pub mod api_2fa;
 pub mod api_browse;

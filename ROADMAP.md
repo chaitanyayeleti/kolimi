@@ -114,7 +114,7 @@ is silently skipped.
 | --- | --- | --- |
 | **MLS groups (RFC 9420)** | Group E2EE today is per-member X25519 wrapping: no forward secrecy or post-compromise security across membership changes | Milestone M8 next week; `openmls`, key packages, commits/welcomes, epoch exporter, re-wrap on membership change; land with the external audit |
 | **External crypto audit** | The v1+v2 crypto is internally reviewed only | Audit package ready (`docs/audit/`); freeze the surface, engage a reviewer; MLS changes land as a reviewed delta |
-| **Passkey recovery / account recovery** | A user who loses every passkey (and recovery code) needs an admin path | Admin CLI reset exists for TOTP and passwords; add a documented, audited `user recover` flow (out-of-band verification) |
+| **Account recovery** | ✅ **Landed**: `kolimi-server user recover <user>` sets a new password, drops live sessions, clears TOTP by default, and can remove all passkeys; audited as `user.recover` (see [docs/operations.md](docs/operations.md)) | — |
 | **Web-UI E2EE** | The browser UI shows encrypted files as ciphertext | wasm E2EE client (kolimi-crypto already compiles to wasm) or an explicit "download via sync client" UX; decide after M8 |
 | **Public links to encrypted files** | Links have no key-distribution channel | Key-in-fragment (`#k=…`) design in RFC 0007 open questions; needs its own threat analysis |
 | **Group write sharing of encrypted files** | Encrypted shares are read-only today | Needs key rotation per writer / shared epoch keys; do after MLS |

@@ -118,6 +118,20 @@ enum UserCommand {
     PasskeyOnly { username: String },
     /// Disable TOTP for a user (admin escape hatch when codes are lost).
     TotpDisable { username: String },
+    /// Recover an account: set a new password, drop sessions, and (by
+    /// default) clear TOTP. Verify the user's identity out-of-band first.
+    Recover {
+        username: String,
+        /// Password (prompted if omitted).
+        #[arg(long)]
+        password: Option<String>,
+        /// Keep TOTP enabled (default: disabled).
+        #[arg(long)]
+        keep_totp: bool,
+        /// Also delete all of the user's registered passkeys.
+        #[arg(long)]
+        remove_passkeys: bool,
+    },
     /// Disable a user (rejects logins and drops their sessions).
     Disable { username: String },
     /// Re-enable a disabled user.
@@ -330,6 +344,36 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             )
             .await?;
             println!("two-factor disabled for {username}");
+        }
+        UserCommand::Recover {
+            username,
+            password,
+            keep_totp,
+            remove_passkeys,
+        } => {
+            let password = match password {
+                Some(password) => password,
+                None => read_password(&format!("New password for {username}: "))?,
+            };
+            let hash = kolimi_auth::password::hash_password(&password)?;
+            let report = kolimi_server::admin::recover_user(
+                &db,
+                &username,
+                &hash,
+                keep_totp,
+                remove_passkeys,
+            )
+            .await?;
+            println!(
+                "recovered {username}: password set, {} session(s) dropped, TOTP {}, {} passkey(s) removed",
+                report.sessions_dropped,
+                if report.totp_disabled {
+                    "disabled"
+                } else {
+                    "kept"
+                },
+                report.passkeys_removed,
+            );
         }
         UserCommand::Disable { username } => {
             db.set_disabled(&username, true).await?;

@@ -13,6 +13,7 @@ kolimi-server user passwd alice              # change the password
 kolimi-server user list                      # id, name, flags
 kolimi-server user passkey-only alice        # drop the password (needs >= 1 passkey)
 kolimi-server user totp-disable alice        # lose TOTP codes? admin escape hatch
+kolimi-server user recover alice             # lost everything? new password + reset 2FA
 kolimi-server user disable alice             # block logins, drop live sessions
 kolimi-server user enable alice              # restore access
 kolimi-server user delete alice --yes        # delete the user and everything they own
@@ -33,6 +34,30 @@ the reversible alternative.
 Passkeys are registered in the web UI (toolbar → **Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is
 rejected (and audited).
+
+## Account recovery
+
+A user who has lost **every** passkey *and* the recovery code — or has a
+forgotten password while TOTP is still enrolled — cannot sign in. Recovery
+is a **privileged** action and requires **out-of-band verification of the
+user's identity** first; it is not a self-service flow.
+
+```sh
+kolimi-server user recover alice             # prompts for a new password
+```
+
+`user recover` sets a new password, drops all of the account's live
+sessions (so a lost or compromised credential cannot keep a session
+alive), and by default **clears TOTP** so the new password alone works.
+Options:
+
+- `--keep-totp` — keep two-factor enabled (the user must still have codes).
+- `--remove-passkeys` — also delete every registered passkey so the user
+  re-enrols fresh (use if a device was lost or the account was compromised).
+
+The action is recorded in the audit log as `user.recover`. Afterwards, have
+the user sign in with the new password and re-enrol their passkey and
+two-factor from the **Passkeys** panel.
 
 The same operations are available to an authenticated administrator over
 HTTP (JSON API, `Authorization: Basic` or a session cookie):
