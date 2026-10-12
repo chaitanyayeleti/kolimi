@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.6]
+
 ### Fixed
 - WebDAV no longer serves end-to-end encrypted files as ciphertext or lets a
   plaintext `PUT` overwrite one: `GET`/`HEAD`/`PUT`/`COPY`/`MOVE` on an

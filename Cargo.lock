@@ -2603,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-auth"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "argon2",
  "blake3",
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-chunk"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-crypto"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-db"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "blake3",
  "hex",
@@ -2669,7 +2669,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-ffi"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "axum",
  "kolimi-auth",
@@ -2684,7 +2684,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-plugins"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-preview"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "image",
  "landlock",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-search"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "tantivy",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-server"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "axum",
  "axum-server",
@@ -2764,7 +2764,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-store"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-sync"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -2797,7 +2797,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-ui"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.23.1",
  "console_error_panic_hook",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-vfs"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "futures-util",
  "kolimi-chunk",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-webdav"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "axum",
  "blake3",
