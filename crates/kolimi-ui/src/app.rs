@@ -1905,29 +1905,48 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                             children=move |item| {
                                 let id = item.id;
                                 let name = item.name.clone();
-                                let progress = item.progress;
-                                let status = item.status;
                                 let retry_file = item.file.clone();
                                 let retry_dir = item.dir.clone();
+                                // A keyed <For> keeps the row's DOM while the id is
+                                // unchanged, so read live from the signal instead
+                                // of capturing progress/status once at creation.
+                                let progress = move || {
+                                    uploads
+                                        .get()
+                                        .iter()
+                                        .find(|it| it.id == id)
+                                        .map(|it| it.progress)
+                                        .unwrap_or(0)
+                                };
+                                let status = move || {
+                                    uploads
+                                        .get()
+                                        .iter()
+                                        .find(|it| it.id == id)
+                                        .map(|it| it.status)
+                                        .unwrap_or(UploadStatus::Uploading)
+                                };
                                 view! {
                                     <li class="upload-item">
                                         <span class="upload-name">{name}</span>
                                         <span class="upload-bar">
                                             <span
                                                 class="upload-bar-fill"
-                                                style=format!("width:{progress}%")
+                                                style=move || format!("width:{}%", progress())
                                             ></span>
                                         </span>
                                         <span class="upload-status">
-                                            {match status {
+                                            {move || match status() {
                                                 UploadStatus::Uploading => {
-                                                    view! { <span class="muted">{format!("{progress}%")}</span> }
+                                                    view! { <span class="muted">{format!("{}%", progress())}</span> }
                                                         .into_any()
                                                 }
                                                 UploadStatus::Done => {
                                                     view! { <span class="ok">"done"</span> }.into_any()
                                                 }
                                                 UploadStatus::Failed => {
+                                                    let retry_file = retry_file.clone();
+                                                    let retry_dir = retry_dir.clone();
                                                     view! {
                                                         <button
                                                             class="icon-btn"

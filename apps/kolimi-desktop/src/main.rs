@@ -44,8 +44,9 @@ use tauri::{
 };
 use url::Url;
 
-/// Background sync cadence.
-const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Background sync cadence. Kept short so remote changes land promptly;
+/// opening the window also triggers a sync (see `open_main`).
+const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Whether the "close to tray" tip has been shown this session.
 static CLOSE_TIP_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -575,6 +576,8 @@ fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
+        // Opening the app should reflect the server right away.
+        run_sync(app.clone());
         return Ok(());
     }
     let base = server.trim_end_matches('/');
@@ -631,6 +634,7 @@ fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
             }
         }
     });
+    run_sync(app.clone());
     Ok(())
 }
 

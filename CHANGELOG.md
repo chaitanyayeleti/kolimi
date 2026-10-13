@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-10-13
+
+### Fixed
+- **Web-UI upload progress** now moves. The upload tray's keyed list reused the
+  row DOM, so the bar (and percentage) stayed frozen at 0% even though the file
+  uploaded; progress/status are now read reactively.
+- **Faster remote→local sync**: the desktop poll interval is now **60s** (was
+  5 min) and **opening the window triggers a sync**, so changes made on the web
+  land on disk promptly.
+
 ## [0.1.12] - 2026-10-13
 
 ### Added
