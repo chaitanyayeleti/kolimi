@@ -3,120 +3,241 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kolimi — setup</title>
+<title>Kolimi — Accounts &amp; Sync</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body {
-    margin: 0;
-    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     background: #10141c; color: #e6e9f0;
-    display: flex; justify-content: center;
   }
-  main { width: 100%; max-width: 520px; padding: 28px 24px 40px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  p.lede { margin: 0 0 20px; color: #9aa4b8; }
-  label { display: block; margin-bottom: 14px; font-weight: 600; }
-  label small { display: block; font-weight: 400; color: #9aa4b8; margin-top: 2px; }
-  label.check { display: flex; align-items: center; gap: 8px; }
-  label.check input { width: auto; margin: 0; }
+  main { max-width: 640px; margin: 0 auto; padding: 22px 20px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  h1 { font-size: 18px; margin: 0; }
+  p.lede { color: #9aa4b8; margin: 0 0 18px; }
+  .card { background: #171d27; border: 1px solid #2c3546; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .spread { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .who { font-weight: 700; }
+  .host { color: #9aa4b8; font-size: 13px; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; }
+  .badge.on { background: #12351f; color: #59d98a; }
+  .badge.off { background: #3a2416; color: #e0a76b; }
+  label { display: block; font-weight: 600; margin: 10px 0 4px; }
   input {
-    display: block; width: 100%; margin-top: 6px; padding: 9px 11px;
-    border: 1px solid #2c3546; border-radius: 8px;
-    background: #171d27; color: inherit; font: inherit;
+    width: 100%; padding: 9px 11px; border: 1px solid #2c3546; border-radius: 8px;
+    background: #10141c; color: inherit; font: inherit;
   }
   input:focus { outline: none; border-color: #5b8def; }
   button {
-    width: 100%; margin-top: 8px; padding: 11px; border: 0; border-radius: 8px;
-    background: #5b8def; color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+    padding: 8px 13px; border: 0; border-radius: 8px; background: #5b8def; color: #fff;
+    font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
   }
   button:hover { background: #4a7be0; }
-  #msg { margin-top: 14px; min-height: 20px; color: #ff8a8a; white-space: pre-wrap; }
-  p.enc {
-    margin: -10px 0 18px; padding: 8px 11px; background: #171d27;
-    border: 1px solid #2c3546; border-radius: 8px; color: #9aa4b8;
+  button.ghost { background: transparent; border: 1px solid #2c3546; color: #cbd3e0; }
+  button.ghost:hover { background: #1d2531; }
+  button.danger { background: transparent; border: 1px solid #5a2b2b; color: #ff8a8a; }
+  button.danger:hover { background: #2a1717; }
+  button.link { background: none; border: 0; color: #9aa4b8; text-decoration: underline; padding: 0; }
+  ul.pairs { list-style: none; margin: 12px 0 0; padding: 0; }
+  ul.pairs li {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 8px 0; border-top: 1px solid #232b3a;
   }
+  .path { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
+  .remote { color: #9aa4b8; }
+  .empty { color: #9aa4b8; font-style: italic; }
+  #msg { min-height: 20px; margin-top: 14px; white-space: pre-wrap; }
+  #msg.err { color: #ff8a8a; }
+  #msg.ok { color: #59d98a; }
+  .muted { color: #9aa4b8; font-size: 13px; }
+  details summary { cursor: pointer; font-weight: 600; }
+  .hidden { display: none; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Kolimi</h1>
-  <p class="lede">
-    Connect to your Kolimi server. A local folder is kept in sync in the
-    background; browsing and sharing happen in the window.
-  </p>
-  <p class="enc" id="enc"></p>
-  <form id="setup">
-    <label>Server URL
-      <input name="server" placeholder="https://cloud.example.com" required autofocus>
-    </label>
-    <label>Username
-      <input name="username" required autocomplete="username">
-    </label>
-    <label>Password
-      <small>Kept in your system keychain; falls back to the config file.</small>
-      <input name="password" type="password" required autocomplete="current-password">
-    </label>
-    <label>Local folder
-      <input name="local_dir" placeholder="~/Kolimi" required>
-    </label>
-    <label>Encrypted roots
-      <small>Comma-separated folders to encrypt end-to-end (optional).</small>
-      <input name="encrypted_roots" placeholder="Private">
-    </label>
-    <label>E2EE passphrase
-      <small>Only needed when encrypted roots are set (optional; system keychain).</small>
-      <input name="e2ee_passphrase" type="password" autocomplete="off">
-    </label>
-    <label class="check">
-      <input type="checkbox" name="autostart">
-      Start Kolimi on login (background sync)
-    </label>
-    <button type="submit">Save &amp; open</button>
-  </form>
+  <header>
+    <h1>Accounts &amp; Sync</h1>
+    <button class="ghost" id="sync-now">Sync now</button>
+  </header>
+  <p class="lede">Sign in to servers and choose which local folders stay in sync.</p>
+
+  <div id="accounts"></div>
+
+  <div class="card">
+    <details id="add-account">
+      <summary>Add account</summary>
+      <label>Server URL<input id="new-server" placeholder="https://cloud.example.com"></label>
+      <label>Username<input id="new-username" autocomplete="username"></label>
+      <label>Password<input id="new-password" type="password" autocomplete="current-password"></label>
+      <div class="row" style="margin-top:12px">
+        <button id="signin">Sign in</button>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="spread">
+      <span>Start Kolimi on login</span>
+      <input type="checkbox" id="autostart" style="width:auto">
+    </div>
+    <p class="muted" style="margin:8px 0 0">Keeps a local folder synced in the background.</p>
+  </div>
+
   <p id="msg"></p>
 </main>
-<script>
-  const form = document.getElementById("setup");
-  const msg = document.getElementById("msg");
 
-  function expandHome(value) {
-    if (!value.startsWith("~")) return value;
-    return value.replace(/^~/, "");
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const msg = document.getElementById("msg");
+  const accountsEl = document.getElementById("accounts");
+
+  function setMsg(text, kind) {
+    msg.textContent = text || "";
+    msg.className = kind || "";
   }
 
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    msg.textContent = "";
-    const data = Object.fromEntries(new FormData(form).entries());
-    data.local_dir = expandHome(data.local_dir.trim());
-    data.server = data.server.trim().replace(/\/+$/, "");
-    data.encrypted_roots = data.encrypted_roots
-      ? data.encrypted_roots.split(",").map((s) => s.trim()).filter(Boolean)
-      : [];
-    data.e2ee_passphrase = data.e2ee_passphrase || null;
-    data.autostart = form.elements.autostart.checked;
-    try {
-      await window.__TAURI__.core.invoke("save_config", { config: data });
-    } catch (error) {
-      msg.textContent = String(error);
+  function el(tag, props, ...children) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(props || {})) {
+      if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+      else if (k === "class") node.className = v;
+      else node.setAttribute(k, v);
     }
+    for (const c of children) node.append(c);
+    return node;
+  }
+
+  async function refresh() {
+    const settings = await invoke("get_settings");
+    document.getElementById("autostart").checked = settings.autostart;
+    accountsEl.replaceChildren(
+      ...settings.accounts.map(renderAccount),
+      settings.accounts.length ? null : el("div", { class: "card empty" }, "No accounts yet. Add one below.")
+    );
+  }
+
+  function renderAccount(account) {
+    const card = el("div", { class: "card" });
+
+    card.append(
+      el("div", { class: "spread" },
+        el("div", {},
+          el("div", { class: "who" }, account.username),
+          el("div", { class: "host" }, account.server)
+        ),
+        el("span", { class: "badge " + (account.signed_in ? "on" : "off") },
+          account.signed_in ? "signed in" : "signed out")
+      )
+    );
+
+    if (!account.signed_in) {
+      const pw = el("input", { type: "password", placeholder: "Password", autocomplete: "current-password" });
+      card.append(
+        el("div", { class: "row", style: "margin-top:10px" },
+          pw,
+          el("button", { onclick: async () => {
+            try {
+              await invoke("sign_in", { server: account.server, username: account.username, password: pw.value });
+              setMsg("Signed in to " + account.username, "ok");
+              refresh();
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "Sign in")
+        )
+      );
+    }
+
+    const pairs = el("ul", { class: "pairs" });
+    if (!account.pairs.length) {
+      pairs.append(el("li", {}, el("span", { class: "empty" }, "No synced directories")));
+    }
+    for (const pair of account.pairs) {
+      pairs.append(
+        el("li", {},
+          el("span", { class: "path" },
+            pair.local_dir, " ", el("span", { class: "remote" }, "→ " + pair.remote)),
+          el("button", { class: "danger", onclick: async () => {
+            try {
+              await invoke("remove_pair", { server: account.server, username: account.username, dir: pair.local_dir });
+              setMsg("Removed " + pair.local_dir, "ok");
+              refresh();
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "Remove")
+        )
+      );
+    }
+    card.append(pairs);
+
+    const dirInput = el("input", { placeholder: "~/Kolimi", style: "margin-top:6px" });
+    const remoteInput = el("input", { placeholder: "/", style: "margin-top:6px" });
+    card.append(
+      el("div", { style: "margin-top:12px" },
+        el("label", {}, "Add a local folder to sync"),
+        dirInput,
+        el("label", {}, "Remote folder (optional; default /)"),
+        remoteInput,
+        el("div", { class: "row", style: "margin-top:8px" },
+          el("button", { onclick: async () => {
+            try {
+              await invoke("add_pair", {
+                server: account.server, username: account.username,
+                dir: dirInput.value, remote: remoteInput.value || "/"
+              });
+              setMsg("Added " + dirInput.value, "ok");
+              refresh();
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "Add"),
+          el("button", { class: "ghost", onclick: () => invoke("open_account", { server: account.server }).catch(() => {}) }, "Open in Kolimi")
+        )
+      )
+    );
+
+    card.append(
+      el("div", { class: "row", style: "margin-top:14px" },
+        el("button", { class: "ghost", onclick: async () => {
+          await invoke("sign_out", { server: account.server, username: account.username });
+          setMsg("Signed out of " + account.username, "ok");
+          refresh();
+        } }, "Sign out"),
+        el("button", { class: "danger", onclick: async () => {
+          if (!confirm("Remove " + account.username + " and its synced directories?")) return;
+          try {
+            await invoke("remove_account", { server: account.server, username: account.username });
+            setMsg("Removed " + account.username, "ok");
+            refresh();
+          } catch (e) { setMsg(String(e), "err"); }
+        } }, "Remove account")
+      )
+    );
+
+    return card;
+  }
+
+  document.getElementById("signin").addEventListener("click", async () => {
+    const server = document.getElementById("new-server").value;
+    const username = document.getElementById("new-username").value;
+    const password = document.getElementById("new-password").value;
+    setMsg("Signing in…");
+    try {
+      await invoke("sign_in", { server, username, password });
+      document.getElementById("new-password").value = "";
+      setMsg("Signed in to " + username, "ok");
+      refresh();
+    } catch (e) { setMsg(String(e), "err"); }
   });
 
-  window.__TAURI__.core.invoke("load_config").then((config) => {
-    if (!config) return;
-    for (const [key, value] of Object.entries(config)) {
-      const field = form.elements[key];
-      if (!field) continue;
-      if (field.type === "checkbox") field.checked = Boolean(value);
-      else field.value = Array.isArray(value) ? value.join(",") : (value ?? "");
-    }
-    const roots = config.encrypted_roots || [];
-    const unlocked = Boolean(config.e2ee_passphrase);
-    document.getElementById("enc").textContent = roots.length
-      ? `Encryption: ${roots.length} root(s) — ${unlocked ? "unlocked" : "locked (set the passphrase)"}`
-      : "Encryption: off (no encrypted roots)";
+  document.getElementById("autostart").addEventListener("change", async (e) => {
+    try { await invoke("set_autostart_enabled", { enabled: e.target.checked }); }
+    catch (err) { setMsg(String(err), "err"); }
   });
+
+  document.getElementById("sync-now").addEventListener("click", async () => {
+    await invoke("sync_now");
+    setMsg("Sync started — see the tray for status", "ok");
+  });
+
+  refresh().catch((e) => setMsg(String(e), "err"));
 </script>
 </body>
 </html>

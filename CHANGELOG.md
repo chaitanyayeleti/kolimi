@@ -7,6 +7,16 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Desktop Accounts & Sync**: the desktop client now supports **multiple
+  accounts** and **multiple synced directories per account**, managed from an
+  in-app **Accounts & Sync** window (tray → *Accounts & Sync…*): sign in/out,
+  add/remove accounts, and add/remove synced folders (local → remote
+  subfolder). Config moves to a `version: 2` shape (`accounts[].pairs[]`),
+  migrating the old single-account file automatically (and moving the keychain
+  entry to `username@server`).
+- **Sync to a remote subfolder**: `kolimi-sync` gains `--remote /Docs` (and
+  `sync_once_rooted`), so a local folder mirrors a chosen server folder instead
+  of always the account root — the mechanism behind multi-directory sync.
 - **Desktop client (phase 1)**: promoted the tray into `apps/kolimi-desktop`
   (Tauri v2, own workspace). A native window loads the server's `/app/` UI
   (Option A), with a **first-run setup window** that writes

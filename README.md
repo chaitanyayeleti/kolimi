@@ -212,11 +212,12 @@ implementations; `crates/kolimi-crypto` holds the primitives.
 ## Desktop client + mobile core
 
 - **Desktop app** (`apps/kolimi-desktop`, Tauri, its own workspace): a native
-  window loads the server's `/app/` UI, with a first-run setup window
-  (`~/.config/kolimi/desktop.json`), a tray (idle/syncing/error/paused states,
-  notifications, pause/resume, autostart), OS-keychain credentials, and
-  background sync on startup, every 5 minutes, and on demand. Ships as
-  `.deb`, AppImage, and AUR `kolimi-desktop` (see [docs/install.md](docs/install.md)).
+  window loads the server's `/app/` UI, with an in-app **Accounts & Sync**
+  window (multiple accounts; several synced folders each, local → remote
+  subfolder), a tray (idle/syncing/error/paused states, notifications,
+  pause/resume, autostart), OS-keychain credentials, and background sync on
+  startup, every 5 minutes, and on demand. Ships as `.deb`, AppImage, and AUR
+  `kolimi-desktop` (see [docs/install.md](docs/install.md)).
 - **Mobile core** (`crates/kolimi-ffi`, UniFFI): Kotlin/Swift/Python
   bindings for the sync core + E2EE setup (PRF secrets come from the
   platform ceremony). Background scheduling (WorkManager /

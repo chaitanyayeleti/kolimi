@@ -312,33 +312,44 @@ a 16 MiB memory cap; traps are contained and audited (`plugin.error`).
 ## Desktop and mobile clients
 
 - **Desktop** (`apps/kolimi-desktop`): a native Tauri window loads the
-  server's `/app/` UI, with a tray and background sync. On first run a setup
-  window writes `~/.config/kolimi/desktop.json`:
+  server's `/app/` UI, with a tray and background sync. Sign in to one or
+  more accounts and add several synced folders per account from the in-app
+  **Accounts & Sync** window (tray → *Accounts & Sync…*), which writes
+  `~/.config/kolimi/desktop.json`:
 
   ```json
   {
-    "server": "https://cloud.example.com",
-    "username": "alice",
-    "password": "…",
-    "local_dir": "/home/alice/Kolimi",
-    "encrypted_roots": ["Private"],
-    "e2ee_passphrase": "…"
+    "version": 2,
+    "autostart": false,
+    "accounts": [
+      {
+        "server": "https://cloud.example.com",
+        "username": "alice",
+        "pairs": [
+          { "local_dir": "/home/alice/Kolimi", "remote": "/", "encrypted_roots": [] }
+        ]
+      }
+    ]
   }
   ```
 
-  It syncs at startup, every five minutes, and on demand, showing status in
-  the tray menu. The account **password and E2EE passphrase are kept in the
-  system keychain** (Secret Service via zbus on Linux; Credential Manager /
-  Keychain on Windows/macOS), keyed by server URL. If no keychain is running
+  Each **pair** mirrors one local folder to a remote subfolder (`remote`,
+  default the account root `/`), so several folders can sync to distinct
+  server paths. It syncs at startup, every five minutes, and on demand,
+  showing status in the tray menu.
+
+  The account **password** (and any E2EE passphrase) is kept in the **system
+  keychain** (Secret Service via zbus on Linux; Credential Manager / Keychain
+  on Windows/macOS), keyed by `username@server`. If no keychain is running
   they fall back to the Linux **kernel session keyring** (`keyctl`),
   session-only and never written to disk. Only when neither is available
   (headless with no keyutils) do they fall back to the `0600` config file, and
   the app warns; treat that file like `.netrc` — same-user-readable, not
   encrypted at rest — and keep it out of backups/syncs.
-  `KOLIMI_DESKTOP_CONFIG` overrides the path. The tray shows the E2EE state
-  ("Encryption: N root(s), unlocked/locked").
+  `KOLIMI_DESKTOP_CONFIG` overrides the path.
 - **CLI** (`kolimi-sync`): one-shot sync; run it from a timer or
-  watcher. `--e2ee-setup`, `--share/--unshare`, `--group`.
+  watcher. `--remote /Docs` mirrors a local folder to a server subfolder;
+  also `--e2ee-setup`, `--share/--unshare`, `--group`.
 - **WebDAV / CalDAV / CardDAV**: any client. WebDAV is class 1 **and 2**:
   byte ranges (`Range`), streamed reads, and lock-based editing
   (`LOCK`/`UNLOCK`) let it serve as a mounted network drive (Windows

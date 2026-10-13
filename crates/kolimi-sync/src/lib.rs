@@ -167,19 +167,49 @@ impl State {
 
 /// Runs one full sync pass: pull, then push.
 pub async fn sync_once(config: &SyncConfig) -> Result<SyncReport, SyncError> {
+    sync_once_rooted(config, "/").await
+}
+
+/// Like [`sync_once`], but scoped to a remote subfolder: `remote` is an
+/// absolute server path (e.g. `/Documents`) that this local directory mirrors.
+/// `"/"` mirrors the whole account (identical to [`sync_once`]).
+pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncReport, SyncError> {
+    let root = remote_prefix(remote);
     let http = Http::new(config)?;
     std::fs::create_dir_all(config.local_dir.join(".kolimi"))?;
     let mut state = State::load(&config.local_dir)?;
     let e2ee = unlock_e2ee(&http, config).await?;
     let mut report = SyncReport::default();
-    pull(&http, config, e2ee.as_ref(), &mut state, &mut report).await?;
-    push(&http, config, e2ee.as_ref(), &mut state, &mut report).await?;
+    pull(&http, config, &root, e2ee.as_ref(), &mut state, &mut report).await?;
+    push(&http, config, &root, e2ee.as_ref(), &mut state, &mut report).await?;
     if report.conflicts > 0 {
         // Fetch the winning server versions for the conflicted paths.
-        pull(&http, config, e2ee.as_ref(), &mut state, &mut report).await?;
+        pull(&http, config, &root, e2ee.as_ref(), &mut state, &mut report).await?;
     }
     state.save(&config.local_dir)?;
     Ok(report)
+}
+
+/// Normalize a remote root: `"/"` or empty -> `""` (account root); otherwise
+/// `"/prefix"` without a trailing slash.
+fn remote_prefix(remote: &str) -> String {
+    let trimmed = remote.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
+/// The path of `server_path` relative to `root`, or `None` when it is not
+/// under `root` (or is the root itself).
+fn relative_to_root(server_path: &str, root: &str) -> Option<String> {
+    if root.is_empty() {
+        return Some(server_path.trim_start_matches('/').to_string());
+    }
+    let rest = server_path.strip_prefix(root)?;
+    let rel = rest.strip_prefix('/')?;
+    Some(rel.to_string())
 }
 
 /// Unlocked E2EE session state.
@@ -862,7 +892,7 @@ struct RemoteFile {
     shared: bool,
 }
 
-async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncError> {
+async fn remote_files(http: &Http, root: &str) -> Result<BTreeMap<String, RemoteFile>, SyncError> {
     let mut remote = BTreeMap::new();
     let mut after = 0i64;
     loop {
@@ -896,7 +926,9 @@ async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncE
             let Some(content_id) = entry["content_id"].as_str() else {
                 continue;
             };
-            let rel = server_path.trim_start_matches('/').to_string();
+            let Some(rel) = relative_to_root(server_path, root) else {
+                continue;
+            };
             remote.insert(
                 rel,
                 RemoteFile {
@@ -932,7 +964,9 @@ async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncE
         let Some(content_id) = entry["content_id"].as_str() else {
             continue;
         };
-        let rel = server_path.trim_start_matches('/').to_string();
+        let Some(rel) = relative_to_root(server_path, root) else {
+            continue;
+        };
         remote.insert(
             rel,
             RemoteFile {
@@ -949,11 +983,12 @@ async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncE
 async fn pull(
     http: &Http,
     config: &SyncConfig,
+    root: &str,
     e2ee: Option<&E2ee>,
     state: &mut State,
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
-    let remote = remote_files(http).await?;
+    let remote = remote_files(http, root).await?;
 
     for (rel, file) in &remote {
         let local = config.local_dir.join(rel);
@@ -1180,6 +1215,7 @@ async fn chunk_bytes(
 async fn push(
     http: &Http,
     config: &SyncConfig,
+    root: &str,
     e2ee: Option<&E2ee>,
     state: &mut State,
     report: &mut SyncReport,
@@ -1190,6 +1226,9 @@ async fn push(
 
     // Create remote directories for every parent path first.
     let mut dirs: BTreeSet<String> = BTreeSet::new();
+    if !root.is_empty() {
+        dirs.insert(root.to_string());
+    }
     for rel in &locals {
         let mut parts: Vec<&str> = rel.split('/').collect();
         parts.pop();
@@ -1197,7 +1236,7 @@ async fn push(
         for part in parts {
             current.push('/');
             current.push_str(part);
-            dirs.insert(current.clone());
+            dirs.insert(format!("{root}{current}"));
         }
     }
     for dir in &dirs {
@@ -1255,7 +1294,7 @@ async fn push(
             manifest
         };
         let content_id = manifest.content_id().to_hex();
-        let remote_path = format!("/{rel}");
+        let remote_path = format!("{root}/{rel}");
         let mut path = format!("/api/files?path={}", encode(&remote_path));
         if let Some(known) = state.files.get(&rel) {
             path.push_str(&format!("&if_content_id={}", known.content_id));
@@ -1311,7 +1350,7 @@ async fn push(
         .map(|(rel, _)| rel.clone())
         .collect();
     for rel in deleted {
-        let path = format!("/dav{}", encode_path(&format!("/{rel}")));
+        let path = format!("/dav{}", encode_path(&format!("{root}/{rel}")));
         let status = http.delete(&path).await?;
         if status != 204 && status != 404 {
             return Err(SyncError::Server { status, path });
@@ -1399,4 +1438,42 @@ fn mtime_ns(path: &Path) -> Result<i64, SyncError> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos() as i64)
         .unwrap_or(0))
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::{relative_to_root, remote_prefix};
+
+    #[test]
+    fn prefix_normalization() {
+        assert_eq!(remote_prefix("/"), "");
+        assert_eq!(remote_prefix(""), "");
+        assert_eq!(remote_prefix("Documents"), "/Documents");
+        assert_eq!(remote_prefix("/Documents/"), "/Documents");
+        assert_eq!(remote_prefix("/a/b/"), "/a/b");
+    }
+
+    #[test]
+    fn relative_paths() {
+        // Account root: strip the leading slash only.
+        assert_eq!(
+            relative_to_root("/docs/a.txt", "").as_deref(),
+            Some("docs/a.txt")
+        );
+        // Scoped root: strip the prefix and its separator.
+        assert_eq!(
+            relative_to_root("/Docs/a.txt", "/Docs").as_deref(),
+            Some("a.txt")
+        );
+        assert_eq!(
+            relative_to_root("/Docs/sub/a.txt", "/Docs").as_deref(),
+            Some("sub/a.txt")
+        );
+        // The root itself is not a file.
+        assert_eq!(relative_to_root("/Docs", "/Docs"), None);
+        // Sibling with a shared prefix must not match.
+        assert_eq!(relative_to_root("/Docsx/a.txt", "/Docs"), None);
+        // Unrelated path is excluded.
+        assert_eq!(relative_to_root("/Other/a.txt", "/Docs"), None);
+    }
 }

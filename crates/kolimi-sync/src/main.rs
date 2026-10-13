@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use kolimi_crypto::recovery_code_display;
 use kolimi_sync::{
-    E2eeOptions, ShareTarget, SyncConfig, create_keyring, publish_identity, share_path, sync_once,
-    unshare_path, upload_keyring,
+    E2eeOptions, ShareTarget, SyncConfig, create_keyring, publish_identity, share_path,
+    sync_once_rooted, unshare_path, upload_keyring,
 };
 
 #[derive(Parser)]
@@ -33,6 +33,11 @@ struct Cli {
     /// Local directory to mirror.
     #[arg(long)]
     local: PathBuf,
+
+    /// Remote subfolder to mirror (absolute server path; default the account
+    /// root). Lets several local directories sync to distinct server folders.
+    #[arg(long, default_value = "/")]
+    remote: String,
 
     /// Generate and upload an E2EE keyring, then exit. The passphrase is
     /// read from KOLIMI_E2EE_PASSPHRASE or prompted.
@@ -196,7 +201,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let report = sync_once(&config).await?;
+    let report = sync_once_rooted(&config, &cli.remote).await?;
     println!(
         "sync complete: pulled {}, pushed {}, removed locally {}, removed remotely {}, conflicts {}",
         report.pulled, report.pushed, report.removed_local, report.removed_remote, report.conflicts
