@@ -82,7 +82,13 @@ jobs:
           chmod 600 ~/.ssh/aur
           ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null || true
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-          git clone ssh://aur@aur.archlinux.org/kolimi-desktop.git /tmp/aur
+          remote="ssh://aur@aur.archlinux.org/kolimi-desktop.git"
+          # First release: the AUR package does not exist yet, so create it.
+          if ! git clone "$remote" /tmp/aur 2>/dev/null; then
+            mkdir -p /tmp/aur
+            git -C /tmp/aur init -q -b master
+            git -C /tmp/aur remote add origin "$remote"
+          fi
           cp packaging/aur/kolimi-desktop/PKGBUILD /tmp/aur/PKGBUILD
           cp packaging/aur/kolimi-desktop/.SRCINFO /tmp/aur/.SRCINFO
           cd /tmp/aur
@@ -90,4 +96,4 @@ jobs:
           git config user.email "ci@kolimi.local"
           git add PKGBUILD .SRCINFO
           git commit -m "kolimi-desktop $version" || echo "no changes to push"
-          git push
+          git push --set-upstream origin master
