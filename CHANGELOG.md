@@ -36,6 +36,11 @@ follow [Semantic Versioning](https://semver.org/).
   when secrets fall back to the config file so the weaker storage is never
   silent. Encrypted-root sync is verified end-to-end (server integration
   tests).
+- **Desktop packaging + release**: `kolimi-desktop` bundles to **`.deb`** and
+  **AppImage** (Tauri bundler) with icons and a `.desktop` entry, plus an AUR
+  package (`kolimi-desktop`). A new **Desktop Release** workflow builds both
+  bundles and updates the AUR on `desktop-v*` tags. CI now also runs the
+  desktop unit tests and a `.deb` packaging check.
 
 ## [0.1.11]
 

@@ -17,7 +17,17 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icon.png"]
+    "active": true,
+    "targets": ["deb", "appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "Kolimi desktop client",
+    "longDescription": "Native Kolimi desktop client: browse and share files in a window and keep a local folder in sync in the background."
   }
 }

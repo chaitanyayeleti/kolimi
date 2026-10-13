@@ -37,17 +37,18 @@ emits Kotlin/Swift/Python bindings.
 Windows/macOS follow once Linux is solid (mainly packaging, signing, and
 platform glue for the secret store and tray).
 
-**Status (as of 2026-10-13):** weeks 1–5 landed. Week 1 = shell (window,
-first-run setup, tray). Week 2 = parity via the loaded web UI plus the two
-native gaps it can't cover: OS file-drop uploads (Tauri's file-drop handler
-disabled so the web UI's own drop logic runs) and downloads routed to
-`~/Downloads` with tray status. Week 3 = native sync polish: tray icon
-states (idle/syncing/error/paused), notifications on failure/conflicts, XDG
-autostart toggle, and pause/resume. Week 4 = OS keychain for the password and
-E2EE passphrase (Secret Service / Credential Manager / Keychain) with a
-`0600` file fallback. Week 5 = E2EE surfacing (tray/setup state, fallback
-warning) and end-to-end verification of encrypted-root sync (the E2EE setup
-and share dialogs come from the loaded web UI under Option A).
+**Status (as of 2026-10-13): phase 1 complete (weeks 1–6).** Week 1 =
+shell (window, first-run setup, tray). Week 2 = parity via the loaded web UI
+plus the two native gaps it can't cover: OS file-drop uploads (Tauri's
+file-drop handler disabled so the web UI's own drop logic runs) and downloads
+routed to `~/Downloads` with tray status. Week 3 = native sync polish: tray
+icon states (idle/syncing/error/paused), notifications on failure/conflicts,
+XDG autostart toggle, and pause/resume. Week 4 = OS keychain for the password
+and E2EE passphrase (Secret Service / Credential Manager / Keychain) with a
+session-keyring and warned file fallback. Week 5 = E2EE surfacing and
+end-to-end verification. Week 6 = packaging: `.deb` + AppImage + AUR
+`kolimi-desktop`, released via the Desktop Release workflow on `desktop-v*`
+tags. Phase 2 (mobile) is next.
 
 ## Phase 2 — Mobile (Android first → F-Droid), weeks 7+
 

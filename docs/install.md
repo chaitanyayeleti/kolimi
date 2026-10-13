@@ -95,6 +95,35 @@ sudo dpkg -i target/debian/kolimi-server_*.deb
 The postinst creates the `kolimi` system user and `/var/lib/kolimi`.
 Enable the unit as usual (`/etc/kolimi/kolimi.env`).
 
+## Desktop client (Linux)
+
+The native desktop client lives in `apps/kolimi-desktop` (Tauri). Install via
+AUR:
+
+```sh
+yay -S kolimi-desktop     # or paru -S kolimi-desktop
+```
+
+Or use the `.deb` / AppImage from a **Desktop Release** (`desktop-v*` tag):
+
+```sh
+sudo dpkg -i kolimi-desktop_*.deb     # Debian / Ubuntu
+chmod +x kolimi-desktop_*.AppImage && ./kolimi-desktop_*.AppImage
+```
+
+Or build from source:
+
+```sh
+cargo install tauri-cli --version "^2" --locked
+cd apps/kolimi-desktop && cargo tauri build --bundles deb   # -> target/release/bundle/
+```
+
+On first run a setup window writes `~/.config/kolimi/desktop.json`; the
+password and E2EE passphrase go to the **system keychain** (with a
+session-keyring and warned file fallback). The window loads the server's
+`/app/` UI and a tray keeps a local folder in sync. See
+[operations.md](operations.md#desktop-and-mobile-clients).
+
 ## Docker / Podman
 
 **Pull the published image** (no build needed):

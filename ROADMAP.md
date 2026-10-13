@@ -128,19 +128,20 @@ is silently skipped.
 | **HTTP/3 (quinn), zero-copy uploads** | Stack mentions both; performance targets are met without them | Only if benchmarks show a gap; not on the critical path |
 | **Compression + broader rate limiting** | Per-client limits cover auth, passkey, public-unlock and preview endpoints (with `KOLIMI_TRUST_PROXY` for proxies); lockout is scoped per (account, source). Compression and a wider global limiter are still missing | Add `tower-http` compression; consider a broader global request limiter |
 | **Release & distribution (remainder)** | The pipeline is live (v0.1.0–v0.1.11): gnu/musl/aarch64 tarballs, `.deb`, Helm, CycloneDX SBOM + cosign, **multi-arch** GHCR image (`{vX.Y.Z, X.Y, latest}`, amd64 + arm64), and automated AUR updates | Optional: a `kolimi-bin` AUR package (prebuilt from the release tarball) |
-| **cargo-vet burn-down** | 659 exemptions (0 real audits in `audits.toml`) is a placeholder, not vetting | Prioritize crypto/server crates; replace exemptions with real audits over time |
-| **First-party client apps (desktop first)** | The sync core exists (`kolimi-sync`/`kolimi-ffi`); the shell is started (weeks 1–5 of 6 done) but not shipped | **In progress:** `apps/kolimi-desktop` shell + native file integration + sync polish + OS keychain + E2EE surfacing landed (window, first-run setup, tray, sync; OS file-drop uploads and `~/Downloads` download routing; file ops via the loaded web UI; tray states, notifications, XDG autostart, pause/resume; password/E2EE passphrase in the system keychain with a warned file fallback; encryption state in tray/setup; encrypted-root sync verified e2e). Remaining: packaging/release (wk 6). Plan: [decision 0002](docs/decisions/0002-client-stack.md) (Option A, Linux first) + [docs/plans/clients.md](docs/plans/clients.md); then mobile — Android first, F-Droid |
-| **AUR/deb/tray packaging of the desktop client** | Only the server is packaged today | PKGBUILD + .deb/AppImage for `kolimi-desktop` and `kolimi-sync` in week 5-6, once the shell UI stabilizes |
+| **cargo-vet burn-down** | 672 exemptions (0 real audits in `audits.toml`) is a placeholder, not vetting | Prioritize crypto/server crates; replace exemptions with real audits over time |
+| **Desktop client (phase 1)** | ✅ **Landed**: native Tauri client (`apps/kolimi-desktop`, own workspace) — window loading the server `/app/` UI (Option A), first-run setup, tray (idle/syncing/error/paused + notifications), XDG autostart, pause/resume, OS keychain (session-keyring + warned file fallback), E2EE surfacing, and `.deb`/AppImage/AUR packaging | builds + `.deb` bundle + unit tests in CI; encrypted sync covered by server integration tests; [decision 0002](docs/decisions/0002-client-stack.md) |
+| **First-party mobile apps (Android first → F-Droid)** | The desktop client is done; there is no mobile app yet | Plan: [docs/plans/clients.md](docs/plans/clients.md), issue #11; Phase 2 (weeks 7+), Android first, F-Droid |
+| **AUR/deb/AppImage packaging of the desktop client** | ✅ **Landed**: `kolimi-desktop` `.deb` + AppImage + AUR `kolimi-desktop`; Desktop Release workflow on `desktop-v*` tags | — |
 | **Mobile background scheduling** | FFI exposes `sync_once`; scheduling is platform code | Kotlin/Swift wrappers (WorkManager / BGTaskScheduler) in the mobile shells; FFI docs already describe the boundary |
 | **Self-heal from replicas** | Scrubber detects corruption but single-node has no replica to heal from | Replication is out of v1 scope; document the single-node reality (done) and revisit with object storage |
 | **Restore drills in CI** | backup/verify exist; drills are manual | Add a CI job: seed → backup → destroy → restore → verify → byte-compare |
 | **Plugin SDK polish + signing** | Plugins are unsigned; SDK is one example | WIT docs, a plugin template, optional signature verification (cosign) before load |
 | **OTel traces** | ✅ **Landed**: OTLP/gRPC trace export behind the `otel` feature flag (`KOLIMI_OTEL_ENDPOINT`); request spans come from the existing `tracing`/`tower-http` instrumentation | — |
 
-### Next week (planned)
+### Next (planned)
 
-1. **Approve [decision 0002](docs/decisions/0002-client-stack.md)** — desktop stack (A/B/C), repo layout, Linux-only scope, distribution (`.deb` + AppImage + AUR).
-2. **Desktop client phase 1 (issue #12)** — weeks 1–6 per decision 0002: shell → native sync → OS-keychain credentials → E2EE → packaging → first release.
+1. **Desktop client phase 1 (issue #12)** — ✅ done: shell → native sync → OS-keychain credentials → E2EE → packaging → first release (`desktop-v*`).
+2. **Mobile client phase 2 (issue #11)** — Android first (F-Droid) per [docs/plans/clients.md](docs/plans/clients.md).
 3. **Approve [decision 0001](docs/decisions/0001-e2ee-dav-scope.md)** — E2EE/DAV scope (A done; B/C optional).
 
 ## 9. Non-goals

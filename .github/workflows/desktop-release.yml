@@ -1,0 +1,93 @@
+name: Desktop Release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. desktop-v0.1.11)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build bundles (deb, AppImage)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/kolimi-desktop
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "Kolimi Desktop ${{ inputs.tag || github.ref_name }}"
+          releaseBody: "Native Kolimi desktop client — Linux `.deb` and AppImage."
+          releaseDraft: false
+          prerelease: false
+          args: "--bundles deb,appimage"
+
+  aur:
+    name: AUR update (kolimi-desktop)
+    needs: build
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+    steps:
+      - name: Check for AUR key
+        id: gate
+        run: |
+          if [ -n "$AUR_SSH_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "AUR_SSH_KEY secret not set; skipping AUR publish."
+          fi
+      - if: steps.gate.outputs.present == 'true'
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - if: steps.gate.outputs.present == 'true'
+        name: Install tools
+        run: pacman -Sy --noconfirm git openssh curl
+      - if: steps.gate.outputs.present == 'true'
+        name: Bump PKGBUILD and .SRCINFO
+        working-directory: packaging/aur/kolimi-desktop
+        run: |
+          version="${GITHUB_REF_NAME#desktop-v}"
+          sed -i "s/^pkgver=.*/pkgver=$version/" PKGBUILD
+          url="https://github.com/chaitanyayeleti/kolimi/archive/refs/tags/desktop-v$version.tar.gz"
+          sum=$(curl -sL "$url" | sha256sum | cut -d' ' -f1)
+          sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" PKGBUILD
+          useradd -m builder || true
+          chown -R builder .
+          runuser -u builder -- makepkg --printsrcinfo > .SRCINFO
+      - if: steps.gate.outputs.present == 'true'
+        name: Push to AUR
+        run: |
+          version="${GITHUB_REF_NAME#desktop-v}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null || true
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone ssh://aur@aur.archlinux.org/kolimi-desktop.git /tmp/aur
+          cp packaging/aur/kolimi-desktop/PKGBUILD /tmp/aur/PKGBUILD
+          cp packaging/aur/kolimi-desktop/.SRCINFO /tmp/aur/.SRCINFO
+          cd /tmp/aur
+          git config user.name "Kolimi CI"
+          git config user.email "ci@kolimi.local"
+          git add PKGBUILD .SRCINFO
+          git commit -m "kolimi-desktop $version" || echo "no changes to push"
+          git push
