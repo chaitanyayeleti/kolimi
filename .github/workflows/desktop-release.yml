@@ -44,6 +44,7 @@ jobs:
     container: archlinux:base-devel
     env:
       AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Check for AUR key
         id: gate
@@ -65,7 +66,7 @@ jobs:
         name: Bump PKGBUILD and .SRCINFO
         working-directory: packaging/aur/kolimi-desktop
         run: |
-          version="${GITHUB_REF_NAME#desktop-v}"
+          version="${RELEASE_TAG#desktop-v}"
           sed -i "s/^pkgver=.*/pkgver=$version/" PKGBUILD
           url="https://github.com/chaitanyayeleti/kolimi/archive/refs/tags/desktop-v$version.tar.gz"
           sum=$(curl -sL "$url" | sha256sum | cut -d' ' -f1)
@@ -76,7 +77,7 @@ jobs:
       - if: steps.gate.outputs.present == 'true'
         name: Push to AUR
         run: |
-          version="${GITHUB_REF_NAME#desktop-v}"
+          version="${RELEASE_TAG#desktop-v}"
           mkdir -p ~/.ssh
           printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
