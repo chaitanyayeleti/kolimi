@@ -77,6 +77,7 @@ impl DesktopConfig {
 struct DesktopState {
     config: Mutex<Option<DesktopConfig>>,
     status_item: MenuItem<tauri::Wry>,
+    encryption_item: MenuItem<tauri::Wry>,
     syncing: AtomicBool,
     paused: AtomicBool,
 }
@@ -114,15 +115,20 @@ fn load_config_file() -> Result<DesktopConfig, String> {
     Ok(config)
 }
 
-fn save_config_file(config: &DesktopConfig) -> Result<(), String> {
+fn save_config_file(config: &DesktopConfig) -> Result<SecretStorage, String> {
     // Prefer the OS keychain; fall back to writing secrets into the (0600)
     // file only when no keychain is available.
     let secrets = Secrets {
         password: config.password.clone(),
         e2ee_passphrase: config.e2ee_passphrase.clone(),
     };
+    let storage = if store_secrets(&config.server, &secrets) {
+        SecretStorage::Keychain
+    } else {
+        SecretStorage::File
+    };
     let mut on_disk = config.clone();
-    if store_secrets(&config.server, &secrets) {
+    if storage == SecretStorage::Keychain {
         on_disk.password = String::new();
         on_disk.e2ee_passphrase = None;
     }
@@ -139,7 +145,34 @@ fn save_config_file(config: &DesktopConfig) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    Ok(())
+    Ok(storage)
+}
+
+/// Where the account secrets ended up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretStorage {
+    /// Stored in the OS keychain (encrypted at rest, out of the config file).
+    Keychain,
+    /// Fallback: written into the `0600` config file (no keychain available).
+    File,
+}
+
+/// One-line E2EE status for the tray/setup UI.
+fn e2ee_summary(config: Option<&DesktopConfig>) -> String {
+    match config {
+        Some(config) if !config.encrypted_roots.is_empty() => {
+            let unlocked = config
+                .e2ee_passphrase
+                .as_deref()
+                .is_some_and(|passphrase| !passphrase.is_empty());
+            format!(
+                "Encryption: {} root(s), {}",
+                config.encrypted_roots.len(),
+                if unlocked { "unlocked" } else { "locked" }
+            )
+        }
+        _ => "Encryption: off".to_string(),
+    }
 }
 
 /// Secrets kept in the OS keychain (keyed by server URL).
@@ -370,11 +403,21 @@ fn load_config() -> Option<DesktopConfig> {
 /// Persist settings, apply autostart, open the main window, and sync.
 #[tauri::command]
 fn save_config(app: tauri::AppHandle, config: DesktopConfig) -> Result<(), String> {
-    save_config_file(&config)?;
+    let storage = save_config_file(&config)?;
+    if storage == SecretStorage::File {
+        notify_user(
+            "Kolimi",
+            "No system keychain found — the password is stored in the 0600 config file.",
+        );
+    }
     if let Err(error) = set_autostart(config.autostart) {
         notify_user("Kolimi", &format!("autostart: {error}"));
     }
-    *app.state::<DesktopState>().config.lock().unwrap() = Some(config.clone());
+    {
+        let state = app.state::<DesktopState>();
+        *state.config.lock().unwrap() = Some(config.clone());
+        let _ = state.encryption_item.set_text(e2ee_summary(Some(&config)));
+    }
     open_main(&app, &config)?;
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.close();
@@ -391,6 +434,13 @@ fn main() {
             let autostart_on = config.as_ref().is_some_and(|config| config.autostart);
 
             let status = MenuItem::with_id(app, "status", "Last sync: never", false, None::<&str>)?;
+            let encryption = MenuItem::with_id(
+                app,
+                "encryption",
+                e2ee_summary(config.as_ref()),
+                false,
+                None::<&str>,
+            )?;
             let open = MenuItem::with_id(app, "open", "Open Kolimi", true, None::<&str>)?;
             let folder = MenuItem::with_id(app, "folder", "Open folder", true, None::<&str>)?;
             let sync_now = MenuItem::with_id(app, "sync", "Sync now", true, None::<&str>)?;
@@ -408,7 +458,15 @@ fn main() {
             let menu = Menu::with_items(
                 app,
                 &[
-                    &status, &open, &folder, &sync_now, &pause, &autostart, &setup, &quit,
+                    &status,
+                    &encryption,
+                    &open,
+                    &folder,
+                    &sync_now,
+                    &pause,
+                    &autostart,
+                    &setup,
+                    &quit,
                 ],
             )?;
 
@@ -490,6 +548,7 @@ fn main() {
             app.manage(DesktopState {
                 config: Mutex::new(config.clone()),
                 status_item: status,
+                encryption_item: encryption,
                 syncing: AtomicBool::new(false),
                 paused: AtomicBool::new(false),
             });

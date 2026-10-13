@@ -32,6 +32,10 @@
   }
   button:hover { background: #4a7be0; }
   #msg { margin-top: 14px; min-height: 20px; color: #ff8a8a; white-space: pre-wrap; }
+  p.enc {
+    margin: -10px 0 18px; padding: 8px 11px; background: #171d27;
+    border: 1px solid #2c3546; border-radius: 8px; color: #9aa4b8;
+  }
 </style>
 </head>
 <body>
@@ -41,6 +45,7 @@
     Connect to your Kolimi server. A local folder is kept in sync in the
     background; browsing and sharing happen in the window.
   </p>
+  <p class="enc" id="enc"></p>
   <form id="setup">
     <label>Server URL
       <input name="server" placeholder="https://cloud.example.com" required autofocus>
@@ -106,6 +111,11 @@
       if (field.type === "checkbox") field.checked = Boolean(value);
       else field.value = Array.isArray(value) ? value.join(",") : (value ?? "");
     }
+    const roots = config.encrypted_roots || [];
+    const unlocked = Boolean(config.e2ee_passphrase);
+    document.getElementById("enc").textContent = roots.length
+      ? `Encryption: ${roots.length} root(s) — ${unlocked ? "unlocked" : "locked (set the passphrase)"}`
+      : "Encryption: off (no encrypted roots)";
   });
 </script>
 </body>

@@ -327,8 +327,14 @@ a 16 MiB memory cap; traps are contained and audited (`plugin.error`).
   ```
 
   It syncs at startup, every five minutes, and on demand, showing status in
-  the tray menu. `chmod 600` the file; platform keychain storage is planned
-  (week 3). `KOLIMI_DESKTOP_CONFIG` overrides the path.
+  the tray menu. The account **password and E2EE passphrase are kept in the
+  system keychain** (Secret Service via zbus on Linux; Credential Manager /
+  Keychain on Windows/macOS), keyed by server URL. When no keychain is
+  available (headless, no secret service) they fall back to the `0600` config
+  file and the app warns; treat that file like `.netrc` — same-user-readable,
+  not encrypted at rest — and keep it out of backups/syncs.
+  `KOLIMI_DESKTOP_CONFIG` overrides the path. The tray shows the E2EE state
+  ("Encryption: N root(s), unlocked/locked").
 - **CLI** (`kolimi-sync`): one-shot sync; run it from a timer or
   watcher. `--e2ee-setup`, `--share/--unshare`, `--group`.
 - **WebDAV / CalDAV / CardDAV**: any client. WebDAV is class 1 **and 2**:

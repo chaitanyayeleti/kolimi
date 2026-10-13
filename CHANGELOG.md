@@ -30,6 +30,11 @@ follow [Semantic Versioning](https://semver.org/).
   is available (headless, no secret service) they fall back to the `0600`
   config file. The plaintext `desktop.json` no longer holds the password when a
   keychain is present.
+- **Desktop E2EE surfacing**: the tray and setup window show the encryption
+  state ("Encryption: N root(s), unlocked/locked"), and the app **notifies**
+  when secrets fall back to the config file so the weaker storage is never
+  silent. Encrypted-root sync is verified end-to-end (server integration
+  tests).
 
 ## [0.1.11]
 
