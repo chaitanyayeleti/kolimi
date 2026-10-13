@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.8]
+
 ### Fixed
 - AUR build: set `AWS_LC_SYS_NO_JITTER_ENTROPY=1` in the PKGBUILD so
   `aws-lc-sys` (via rustls) compiles under Arch's hardened `CFLAGS` — its
