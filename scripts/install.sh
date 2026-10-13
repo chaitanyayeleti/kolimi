@@ -14,7 +14,7 @@
 #   --sync PATH       use a local kolimi-sync binary (optional)
 #   --version TAG     release tag to install (default: latest)
 #   --admin NAME      admin username to create (default: admin)
-#   --password PW     admin password (default: generated and printed)
+#   --password PW     admin password (or set KOLIMI_ADMIN_PASSWORD; default: generated)
 #   --no-systemd      do not install/enable the systemd unit
 #   --no-verify       skip sha256/cosign verification (not recommended)
 set -eu
@@ -48,6 +48,10 @@ done
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
+
+# Prefer the environment over the command line: a password in argv is visible
+# to `ps`. KOLIMI_ADMIN_PASSWORD avoids that entirely.
+PASSWORD="${PASSWORD:-${KOLIMI_ADMIN_PASSWORD:-}}"
 
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 
@@ -153,7 +157,7 @@ if [ -z "$PASSWORD" ]; then
 else
     GENERATED=0
 fi
-if KOLIMI_DATA="$DATA_DIR" "$PREFIX/bin/kolimi-server" user add "$ADMIN" --password "$PASSWORD" >/dev/null 2>&1; then
+if printf '%s\n' "$PASSWORD" | KOLIMI_DATA="$DATA_DIR" "$PREFIX/bin/kolimi-server" user add "$ADMIN" --password-stdin >/dev/null 2>&1; then
     if [ "$GENERATED" = 1 ]; then
         say ""
         say "admin account: $ADMIN"

@@ -127,6 +127,11 @@ impl KolimiSync {
     /// Creates and uploads an E2EE keyring; returns the recovery code
     /// (show it to the user once, then store it in the OS keychain).
     pub async fn e2ee_setup(&self, passphrase: String) -> Result<String, FfiError> {
+        if passphrase.is_empty() {
+            return Err(FfiError::E2ee {
+                message: "passphrase must not be empty".to_string(),
+            });
+        }
         let (keyring, recovery) =
             kolimi_sync::create_keyring(&passphrase).map_err(|error| FfiError::E2ee {
                 message: error.to_string(),

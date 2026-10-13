@@ -235,9 +235,11 @@ pub(crate) async fn start_session(state: &AppState, user: &kolimi_db::User) -> R
         return internal_error();
     };
     let expires_at = kolimi_db::now_millis() + SESSION_TTL_MILLIS;
+    let token_hash = token::hash_token(&session_token);
+    let csrf_hash = token::hash_token(&csrf_token);
     if state
         .db
-        .create_session(user.id, &token::hash_token(&session_token), expires_at)
+        .create_session(user.id, &token_hash, &csrf_hash, expires_at)
         .await
         .is_err()
     {
@@ -472,6 +474,11 @@ pub async fn list_users(
         Some("quota_bytes" | "quota") => UserSort::QuotaBytes,
         Some(other) => return bad_request(&format!("unknown sort: {other}")),
     };
+    // The keyset cursor only makes sense for the id order; reject it rather
+    // than silently returning page 1 forever.
+    if query.cursor.is_some() && sort != UserSort::Id {
+        return bad_request("cursor pagination is only supported for sort=id");
+    }
     let order = match query.order.as_deref() {
         None | Some("asc") => SortOrder::Asc,
         Some("desc") => SortOrder::Desc,
@@ -500,7 +507,8 @@ pub async fn list_users(
             } else {
                 None
             };
-            Json(json!({ "users": users, "next_cursor": next_cursor })).into_response()
+            Json(json!({ "users": users, "next_cursor": next_cursor, "has_more": has_more }))
+                .into_response()
         }
         Err(_) => internal_error(),
     }

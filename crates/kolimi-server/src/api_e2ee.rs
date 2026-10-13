@@ -182,6 +182,10 @@ pub async fn put_identity(
     if public_key.len() != 32 {
         return api::bad_request("public key must be 32 bytes");
     }
+    let public_key: [u8; 32] = public_key.as_slice().try_into().unwrap_or_default();
+    if !kolimi_crypto::is_valid_public_key(&public_key) {
+        return api::bad_request("public key is not a valid curve point");
+    }
     match state
         .db
         .set_identity(user.user_id, &public_key, &wrapped_private)

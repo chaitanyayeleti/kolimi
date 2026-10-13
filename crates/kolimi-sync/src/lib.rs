@@ -179,6 +179,9 @@ struct State {
     /// Directories already created on the server (absolute paths).
     #[serde(default)]
     created_dirs: BTreeSet<String>,
+    /// Local-only conflict copies we created (relative paths); never pushed.
+    #[serde(default)]
+    conflicts: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,7 +542,7 @@ pub async fn share_path(
         ));
     }
 
-    let (status, _) = http
+    let (status, share_body) = http
         .post_json(
             "/api/shares",
             &serde_json::json!({
@@ -550,12 +553,14 @@ pub async fn share_path(
             }),
         )
         .await?;
-    if status != 201 && status != 409 {
+    let created = status == 201;
+    if !created && status != 409 {
         return Err(SyncError::Server {
             status,
             path: "/api/shares".to_string(),
         });
     }
+    let share_id = share_body["id"].as_i64();
 
     let local_root = config.local_dir.join(rel_path);
     let mut files = Vec::new();
@@ -570,42 +575,57 @@ pub async fn share_path(
         )));
     }
 
-    let mut wrapped_count = 0u64;
-    for rel in files {
-        let key_path = format!("/api/files/key?path={}", encode(&format!("/{rel}")));
-        let (status, body) = http.get_json(&key_path).await?;
-        if status == 404 {
-            continue; // plaintext file
-        }
-        if status != 200 {
-            return Err(SyncError::Server {
-                status,
-                path: key_path,
-            });
-        }
-        let wrapped = STANDARD
-            .decode(
-                body["wrapped_key"]
-                    .as_str()
-                    .ok_or_else(|| SyncError::E2ee("malformed file key response".to_string()))?,
-            )
-            .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
-        let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
-        for (member, public_key) in &recipients {
-            let share_key = e2ee.identity.wrap_file_key_for(public_key, &file_key)?;
-            let path = format!(
-                "/api/e2ee/share-key?path={}&recipient={}",
-                encode(&format!("/{rel}")),
-                encode(member)
-            );
-            let status = http.put_bytes(&path, &share_key).await?;
-            if status != 204 {
-                return Err(SyncError::Server { status, path });
+    // Wrap keys inside an async block so any failure rolls the share back.
+    let result: Result<u64, SyncError> = async {
+        let mut wrapped_count = 0u64;
+        for rel in files {
+            let key_path = format!("/api/files/key?path={}", encode(&format!("/{rel}")));
+            let (status, body) = http.get_json(&key_path).await?;
+            if status == 404 {
+                continue; // plaintext file
             }
-            wrapped_count += 1;
+            if status != 200 {
+                return Err(SyncError::Server {
+                    status,
+                    path: key_path,
+                });
+            }
+            let wrapped =
+                STANDARD
+                    .decode(body["wrapped_key"].as_str().ok_or_else(|| {
+                        SyncError::E2ee("malformed file key response".to_string())
+                    })?)
+                    .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
+            let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
+            for (member, public_key) in &recipients {
+                let share_key = e2ee.identity.wrap_file_key_for(public_key, &file_key)?;
+                let path = format!(
+                    "/api/e2ee/share-key?path={}&recipient={}",
+                    encode(&format!("/{rel}")),
+                    encode(member)
+                );
+                let status = http.put_bytes(&path, &share_key).await?;
+                if status != 204 {
+                    return Err(SyncError::Server { status, path });
+                }
+                wrapped_count += 1;
+            }
         }
+        Ok(wrapped_count)
     }
-    Ok(wrapped_count)
+    .await;
+    if result.is_err() && created {
+        // Don't leave a recipient with a read ACL but no wrapped keys.
+        rollback_share(&http, share_id).await;
+    }
+    result
+}
+
+/// Best-effort revoke of a share we just created (mid-share failure).
+async fn rollback_share(http: &Http, share_id: Option<i64>) {
+    if let Some(id) = share_id {
+        let _ = http.delete(&format!("/api/shares/{id}")).await;
+    }
 }
 
 /// Revokes a user share of `rel_path` (the server also drops the
@@ -1241,6 +1261,7 @@ async fn pull(
             if locally_modified {
                 let conflict = conflict_path(&local);
                 std::fs::rename(&local, &conflict)?;
+                record_conflict(state, &config.local_dir, &conflict);
             } else {
                 std::fs::remove_file(&local)?;
             }
@@ -1402,6 +1423,10 @@ async fn push(
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
     let mut locals: Vec<String> = Vec::new();
+    // Drop conflict-copy records whose file no longer exists, then collect.
+    state
+        .conflicts
+        .retain(|rel| config.local_dir.join(rel).exists());
     collect_files(&config.local_dir, &config.local_dir, &mut locals, state)?;
     locals.sort();
 
@@ -1496,6 +1521,10 @@ async fn push(
                     let key_path = format!("/api/files/key?path={}", encode(&remote_path));
                     let status = http.put_bytes(&key_path, &wrapped).await?;
                     if status != 204 {
+                        // Roll back the just-committed node: without its key
+                        // the server would serve the ciphertext as plaintext.
+                        let rollback = format!("/dav{}", encode_path(&format!("{root}/{rel}")));
+                        let _ = http.delete(&rollback).await;
                         return Err(SyncError::Server {
                             status,
                             path: key_path,
@@ -1519,6 +1548,7 @@ async fn push(
                 // Keep the server version; preserve local edits alongside.
                 let conflict = conflict_path(&local_path);
                 std::fs::rename(&local_path, &conflict)?;
+                record_conflict(state, &config.local_dir, &conflict);
                 state.files.remove(&rel);
                 state.keys.remove(&rel);
                 report.conflicts += 1;
@@ -1568,17 +1598,11 @@ async fn mkcol(http: &Http, dir: &str) -> Result<(), SyncError> {
     Ok(())
 }
 
-/// Whether `name` looks like a preserved conflict copy (`*.conflict-<unix>`)
-/// AND the corresponding original file exists in state (indicating this file
-/// was created by our conflict resolution, not by the user).
-fn is_conflict_name(name: &str, state: &State) -> bool {
-    match name.rsplit_once(".conflict-") {
-        Some((original, stamp)) => {
-            !stamp.is_empty()
-                && stamp.chars().all(|c| c.is_ascii_digit())
-                && state.files.contains_key(original)
-        }
-        None => false,
+/// Records a local-only conflict copy (relative path) so `collect_files`
+/// never pushes it back to the server.
+fn record_conflict(state: &mut State, local_dir: &Path, conflict: &Path) {
+    if let Ok(rel) = conflict.strip_prefix(local_dir) {
+        state.conflicts.insert(rel.to_string_lossy().to_string());
     }
 }
 
@@ -1613,10 +1637,6 @@ fn collect_files(
         if name == ".kolimi" {
             continue;
         }
-        // Preserved conflict copies are local-only; never push them back.
-        if is_conflict_name(&name, state) {
-            continue;
-        }
         // Shared files are read-only mirrors of someone else's tree.
         if name == SHARED_MOUNT && dir == root {
             continue;
@@ -1629,6 +1649,11 @@ fn collect_files(
                 .map_err(|_| std::io::Error::other("path outside root"))?
                 .to_string_lossy()
                 .to_string();
+            // Local-only conflict copies (tracked by relative path) are never
+            // pushed back.
+            if state.conflicts.contains(&rel) {
+                continue;
+            }
             out.push(rel);
         }
     }

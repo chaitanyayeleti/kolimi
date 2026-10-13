@@ -9,6 +9,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use sqlx::SqliteConnection;
 
 use crate::{Db, DbError, now_millis};
 
@@ -82,32 +83,61 @@ impl Db {
         subject: &str,
         details: &Value,
     ) -> Result<(), DbError> {
-        let details = details.to_string();
         let _guard = self.audit_lock.lock().await;
-        let ts = now_millis();
-        let prev: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1")
-                .fetch_optional(&self.pool)
-                .await?;
-        let prev_hash = prev.unwrap_or_default();
-        let hash = chain_hash(&prev_hash, ts, actor_id, actor, action, subject, &details);
-        sqlx::query(
-            "INSERT INTO audit_log (ts, actor_id, actor, action, subject, details, prev_hash, hash)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(ts)
-        .bind(actor_id)
-        .bind(actor)
-        .bind(action)
-        .bind(subject)
-        .bind(&details)
-        .bind(&prev_hash)
-        .bind(&hash)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        append_chained(&mut conn, actor_id, actor, action, subject, details).await
     }
 
+    /// Appends an audit entry on an existing connection (used to make a
+    /// multi-statement operation atomic — see [`Db::record_change`]).
+    pub(crate) async fn audit_append_on(
+        &self,
+        conn: &mut SqliteConnection,
+        actor_id: Option<i64>,
+        actor: Option<&str>,
+        action: &str,
+        subject: &str,
+        details: &Value,
+    ) -> Result<(), DbError> {
+        append_chained(conn, actor_id, actor, action, subject, details).await
+    }
+}
+
+/// Chains and inserts an audit row on `conn` (the caller owns the transaction).
+async fn append_chained(
+    conn: &mut SqliteConnection,
+    actor_id: Option<i64>,
+    actor: Option<&str>,
+    action: &str,
+    subject: &str,
+    details: &Value,
+) -> Result<(), DbError> {
+    let details = details.to_string();
+    let ts = now_millis();
+    let prev: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1")
+            .fetch_optional(&mut *conn)
+            .await?;
+    let prev_hash = prev.unwrap_or_default();
+    let hash = chain_hash(&prev_hash, ts, actor_id, actor, action, subject, &details);
+    sqlx::query(
+        "INSERT INTO audit_log (ts, actor_id, actor, action, subject, details, prev_hash, hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(ts)
+    .bind(actor_id)
+    .bind(actor)
+    .bind(action)
+    .bind(subject)
+    .bind(&details)
+    .bind(&prev_hash)
+    .bind(&hash)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+impl Db {
     /// Lists audit entries newest first, optionally before `before` (id).
     pub async fn audit_list(
         &self,

@@ -521,11 +521,41 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         }
     });
 
+    // Detect session expiry while the app stays open: poll and fall back to
+    // the login view instead of leaving a dead Browser view.
+    {
+        let check = Closure::<dyn FnMut()>::new(move || {
+            spawn_local(async move {
+                if let Ok(r) = api::get("/api/me").await
+                    && r.status == 401
+                {
+                    view.set(View::Login);
+                }
+            });
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+                check.as_ref().unchecked_ref(),
+                60_000,
+            );
+        }
+        check.forget();
+    }
+
+    let load_seq = RwSignal::new(0u32);
     let load = move |target: String| {
         loading.set(true);
+        let seq = load_seq.get_untracked().wrapping_add(1);
+        load_seq.set(seq);
         spawn_local(async move {
             let url = format!("/api/browse?path={}", encode(&target));
-            match api::get(&url).await {
+            let result = api::get(&url).await;
+            // A newer navigation supersedes this response: don't apply it or
+            // clear the loading state.
+            if load_seq.get_untracked() != seq {
+                return;
+            }
+            match result {
                 Ok(r) if r.status == 200 => {
                     entries.set(parse_entries(&r.body));
                     parent.set(
@@ -543,6 +573,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     );
                     error.set(String::new());
                 }
+                Ok(r) if r.status == 401 => view.set(View::Login),
                 Ok(r) => error.set(r.error().unwrap_or("Could not list folder").to_string()),
                 Err(e) => error.set(e),
             }

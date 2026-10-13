@@ -83,6 +83,7 @@ impl Identity {
             .try_into()
             .map_err(|_| CryptoError::Malformed("nonce".to_string()))?;
         let shared = self.0.diffie_hellman(&PublicKey::from(ephemeral_public));
+        ensure_contributory(shared.as_bytes())?;
         let wrap_key = share_wrap_key(shared.as_bytes(), &ephemeral_public, &self.public_key())?;
         let bytes = aead_decrypt(&wrap_key, &nonce, SHARE_AAD, ciphertext)?;
         let bytes: [u8; KEY_LEN] = bytes
@@ -98,6 +99,30 @@ impl std::fmt::Debug for Identity {
     }
 }
 
+/// Rejects a DH result that is not contributory: an all-zero shared secret,
+/// which every low-order X25519 public key produces (X25519 clamps the scalar
+/// to a multiple of the cofactor). RFC 7748 §6.1.
+fn ensure_contributory(shared: &[u8; KEY_LEN]) -> Result<(), CryptoError> {
+    if shared.iter().all(|byte| *byte == 0) {
+        Err(CryptoError::Params(
+            "X25519 shared secret is not contributory".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether a 32-byte X25519 public key is safe to use as a recipient: a DH
+/// with a fixed non-zero scalar must be contributory. Low-order points (which
+/// yield an all-zero shared secret) are rejected. Defaults that are used when
+/// a client cannot perform the check (e.g. the server validating a published
+/// key) should reject when this returns `false`.
+pub fn is_valid_public_key(key: &[u8; KEY_LEN]) -> bool {
+    let probe = StaticSecret::from([0x42u8; KEY_LEN]);
+    let shared = probe.diffie_hellman(&PublicKey::from(*key));
+    ensure_contributory(shared.as_bytes()).is_ok()
+}
+
 /// Deterministic wrap used by the committed test vectors.
 pub fn wrap_with_ephemeral(
     ephemeral_secret: &[u8; KEY_LEN],
@@ -109,6 +134,7 @@ pub fn wrap_with_ephemeral(
 }
 
 /// Fully deterministic wrap (fixed nonce) for test vectors.
+#[doc(hidden)]
 pub fn wrap_with_ephemeral_nonce(
     ephemeral_secret: &[u8; KEY_LEN],
     recipient_public: &[u8; KEY_LEN],
@@ -118,6 +144,7 @@ pub fn wrap_with_ephemeral_nonce(
     let ephemeral = StaticSecret::from(*ephemeral_secret);
     let ephemeral_public = PublicKey::from(&ephemeral).to_bytes();
     let shared = ephemeral.diffie_hellman(&PublicKey::from(*recipient_public));
+    ensure_contributory(shared.as_bytes())?;
     let wrap_key = share_wrap_key(shared.as_bytes(), &ephemeral_public, recipient_public)?;
     let mut out = Vec::with_capacity(SHARE_KEY_LEN);
     out.extend_from_slice(&ephemeral_public);
@@ -149,6 +176,7 @@ pub fn wrap_secret_for(
 
 /// Fully deterministic device wrap (fixed ephemeral key + nonce) for test
 /// vectors.
+#[doc(hidden)]
 pub fn wrap_secret_with_ephemeral_nonce(
     ephemeral_secret: &[u8; KEY_LEN],
     recipient_public: &[u8; KEY_LEN],
@@ -158,6 +186,7 @@ pub fn wrap_secret_with_ephemeral_nonce(
     let ephemeral = StaticSecret::from(*ephemeral_secret);
     let ephemeral_public = PublicKey::from(&ephemeral).to_bytes();
     let shared = ephemeral.diffie_hellman(&PublicKey::from(*recipient_public));
+    ensure_contributory(shared.as_bytes())?;
     let wrap_key = ecies_wrap_key(
         shared.as_bytes(),
         &ephemeral_public,
@@ -194,6 +223,7 @@ pub fn unwrap_secret(
     let device = StaticSecret::from(*device_secret);
     let device_public = PublicKey::from(&device).to_bytes();
     let shared = device.diffie_hellman(&PublicKey::from(ephemeral_public));
+    ensure_contributory(shared.as_bytes())?;
     let wrap_key = ecies_wrap_key(
         shared.as_bytes(),
         &ephemeral_public,
@@ -253,6 +283,15 @@ mod tests {
             .unwrap();
         assert!(mallory.unwrap_file_key(&wrapped).is_err());
         assert!(bob.unwrap_file_key(&wrapped[..10]).is_err());
+    }
+
+    #[test]
+    fn rejects_low_order_recipient_key() {
+        let alice = Identity::generate().unwrap();
+        let file_key = FileKey::generate().unwrap();
+        // The all-zero point is low order: DH yields an all-zero secret.
+        assert!(alice.wrap_file_key_for(&[0u8; KEY_LEN], &file_key).is_err());
+        assert!(wrap_secret_for(&[0u8; KEY_LEN], &random::<KEY_LEN>().unwrap()).is_err());
     }
 
     #[test]

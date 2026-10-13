@@ -147,7 +147,15 @@ impl Passkeys {
         let now = Instant::now();
         map.retain(|_, entry| entry.expires > now);
         if map.len() >= MAX_CHALLENGES {
-            map.clear();
+            // Evict only the oldest outstanding challenge, rather than wiping
+            // every user's in-flight ceremony (an unauthenticated DoS).
+            if let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires)
+                .map(|(id, _)| id.clone())
+            {
+                map.remove(&oldest);
+            }
         }
         map.insert(
             challenge_id.clone(),

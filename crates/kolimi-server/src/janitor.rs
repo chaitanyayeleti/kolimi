@@ -110,7 +110,8 @@ async fn scrub_user(
     for blob in &batch.corrupt {
         report.corrupt += 1;
         tracing::error!(user_id, blob, "scrub: blob corrupt");
-        state
+        // An audit failure must not abort scrubbing for every user.
+        if let Err(error) = state
             .db
             .audit_append(
                 None,
@@ -119,7 +120,10 @@ async fn scrub_user(
                 blob,
                 &serde_json::json!({ "user_id": user_id }),
             )
-            .await?;
+            .await
+        {
+            tracing::warn!(%error, user_id, blob, "scrub: failed to audit corrupt blob");
+        }
     }
     state
         .db

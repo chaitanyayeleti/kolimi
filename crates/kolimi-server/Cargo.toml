@@ -38,6 +38,7 @@ mime_guess.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
+kolimi-crypto.workspace = true
 percent-encoding.workspace = true
 prometheus.workspace = true
 qrcode.workspace = true

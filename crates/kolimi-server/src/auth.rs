@@ -44,7 +44,7 @@ pub async fn require_auth(
             method,
             Method::POST | Method::PUT | Method::PATCH | Method::DELETE
         )
-        && !csrf_ok(&headers)
+        && !csrf_ok(&state, &headers, user.session_hash.as_ref()).await
     {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
@@ -215,14 +215,28 @@ pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-fn csrf_ok(headers: &HeaderMap) -> bool {
-    let Some(header_token) = headers.get("x-csrf-token").and_then(|v| v.to_str().ok()) else {
+/// Double-submit check: the `X-CSRF-Token` header must be present, non-empty,
+/// and equal to the `kolimi_csrf` cookie. Returns the token when it passes.
+fn csrf_double_submit(headers: &HeaderMap) -> Option<String> {
+    let header_token = headers.get("x-csrf-token").and_then(|v| v.to_str().ok())?;
+    let cookie_token = cookie_value(headers, CSRF_COOKIE)?;
+    (header_token == cookie_token && !header_token.is_empty()).then(|| header_token.to_string())
+}
+
+/// Full CSRF check for a cookie-authenticated request: the double-submit token
+/// must also match the hash bound to the session, so a forged or planted
+/// cookie value alone cannot pass.
+async fn csrf_ok(state: &AppState, headers: &HeaderMap, session_hash: Option<&[u8; 32]>) -> bool {
+    let Some(token) = csrf_double_submit(headers) else {
         return false;
     };
-    let Some(cookie_token) = cookie_value(headers, CSRF_COOKIE) else {
+    let Some(session_hash) = session_hash else {
         return false;
     };
-    header_token == cookie_token && !header_token.is_empty()
+    match state.db.session_csrf_hash(session_hash).await {
+        Ok(Some(expected)) => token::hash_token(&token).as_slice() == expected.as_slice(),
+        _ => false,
+    }
 }
 
 fn unauthorized() -> Response {
@@ -273,17 +287,17 @@ mod tests {
             HeaderValue::from_static("kolimi_csrf=token123"),
         );
         headers.insert("x-csrf-token", HeaderValue::from_static("token123"));
-        assert!(csrf_ok(&headers));
+        assert_eq!(csrf_double_submit(&headers).as_deref(), Some("token123"));
 
         headers.insert("x-csrf-token", HeaderValue::from_static("different"));
-        assert!(!csrf_ok(&headers));
+        assert!(csrf_double_submit(&headers).is_none());
 
         headers.insert("x-csrf-token", HeaderValue::from_static(""));
-        assert!(!csrf_ok(&headers));
+        assert!(csrf_double_submit(&headers).is_none());
 
         let mut empty = HeaderMap::new();
         empty.insert(header::COOKIE, HeaderValue::from_static("kolimi_csrf="));
         empty.insert("x-csrf-token", HeaderValue::from_static(""));
-        assert!(!csrf_ok(&empty));
+        assert!(csrf_double_submit(&empty).is_none());
     }
 }

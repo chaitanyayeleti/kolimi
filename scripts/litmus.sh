@@ -8,6 +8,10 @@ set -euo pipefail
 
 NEON_VERSION="0.29.6"
 LITMUS_VERSION="0.13"
+# Pinned checksums: the tarballs are fetched over plain HTTP (webdav.org has no
+# HTTPS), so verifying against a hash committed here is the trust anchor.
+NEON_SHA256="9c640b728d6dc80ef1e48f83181166ab6bc95309cece5537e01ffdd01b96eb43"
+LITMUS_SHA256="09d615958121706444db67e09c40df5f753ccf1fa14846fdeb439298aa9ac3ff"
 WORK="${LITMUS_WORK:-/tmp/kolimi-litmus-build}"
 PORT="${LITMUS_PORT:-18099}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,12 +30,13 @@ trap cleanup EXIT
 mkdir -p "$WORK"
 cd "$WORK"
 
-# --- neon (HTTP only; litmus tests run over plain HTTP) ---
+# --- neon (plain HTTP; the sha256 pin is the trust anchor) ---
 if [ ! -f "$WORK/neon/.installed" ]; then
     rm -rf "$WORK/neon-src" "$WORK/neon"
     mkdir -p "$WORK/neon-src"
-    curl -fsSL "http://www.webdav.org/neon/neon-$NEON_VERSION.tar.gz" \
-        | tar xz -C "$WORK/neon-src"
+    curl -fsSL "http://www.webdav.org/neon/neon-$NEON_VERSION.tar.gz" -o "$WORK/neon.tgz"
+    echo "$NEON_SHA256  $WORK/neon.tgz" | sha256sum -c -
+    tar xzf "$WORK/neon.tgz" -C "$WORK/neon-src"
     (
         cd "$WORK/neon-src/neon-$NEON_VERSION"
         CFLAGS="-O2 -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion" \
@@ -44,8 +49,9 @@ fi
 
 # --- litmus ---
 if [ ! -x "$WORK/litmus-$LITMUS_VERSION/basic" ]; then
-    curl -fsSL "http://www.webdav.org/neon/litmus/litmus-$LITMUS_VERSION.tar.gz" \
-        | tar xz -C "$WORK"
+    curl -fsSL "http://www.webdav.org/neon/litmus/litmus-$LITMUS_VERSION.tar.gz" -o "$WORK/litmus.tgz"
+    echo "$LITMUS_SHA256  $WORK/litmus.tgz" | sha256sum -c -
+    tar xzf "$WORK/litmus.tgz" -C "$WORK"
     (
         cd "$WORK/litmus-$LITMUS_VERSION"
         ./configure --with-neon="$WORK/neon"

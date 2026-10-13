@@ -7,7 +7,7 @@ use chacha20poly1305::{
 };
 use hkdf::Hkdf;
 use sha2::Sha256;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{CryptoError, FileKey};
 
@@ -39,10 +39,10 @@ pub(crate) fn hkdf32(
     info: &[u8],
 ) -> Result<[u8; KEY_LEN], CryptoError> {
     let hkdf = Hkdf::<Sha256>::new(salt, ikm);
-    let mut okm = [0u8; KEY_LEN];
-    hkdf.expand(info, &mut okm)
+    let mut okm = Zeroizing::new([0u8; KEY_LEN]);
+    hkdf.expand(info, &mut *okm)
         .map_err(|error| CryptoError::Params(error.to_string()))?;
-    Ok(okm)
+    Ok(*okm)
 }
 
 pub(crate) fn aead_encrypt(
@@ -94,6 +94,7 @@ pub(crate) fn wrap(
 }
 
 /// Deterministic wrap used by the committed test vectors.
+#[doc(hidden)]
 pub fn wrap_with_nonce(
     kek: &[u8; KEY_LEN],
     key: &[u8; KEY_LEN],
@@ -134,11 +135,11 @@ pub fn kek_from_passphrase(
 ) -> Result<[u8; KEY_LEN], CryptoError> {
     let params = params.argon2_params()?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut okm = [0u8; KEY_LEN];
+    let mut okm = Zeroizing::new([0u8; KEY_LEN]);
     argon
-        .hash_password_into(passphrase.as_bytes(), salt, &mut okm)
+        .hash_password_into(passphrase.as_bytes(), salt, &mut *okm)
         .map_err(|error| CryptoError::Params(error.to_string()))?;
-    Ok(okm)
+    Ok(*okm)
 }
 
 /// Derives a key-encryption key from a recovery code with HKDF-SHA256.
@@ -237,16 +238,48 @@ impl Default for Argon2Params {
 
 impl Argon2Params {
     pub(crate) fn argon2_params(self) -> Result<Params, CryptoError> {
-        if self.m_cost < 8 || self.m_cost > 1 << 21 {
+        // Cap memory *and* total work so a tampered (unauthenticated) stored
+        // keyring cannot force a huge allocation or CPU burn at unlock time.
+        // The default is 64 MiB / t=3, well under these ceilings.
+        if self.m_cost < 8 || self.m_cost > 1 << 18 {
             return Err(CryptoError::Params("m_cost out of range".to_string()));
         }
-        if self.t_cost == 0 || self.t_cost > 64 {
+        if self.t_cost == 0 || self.t_cost > 16 {
             return Err(CryptoError::Params("t_cost out of range".to_string()));
         }
         if self.p_cost == 0 || self.p_cost > 16 {
             return Err(CryptoError::Params("p_cost out of range".to_string()));
         }
+        if u64::from(self.m_cost) * u64::from(self.t_cost) > 1 << 22 {
+            return Err(CryptoError::Params("kdf work out of range".to_string()));
+        }
         Params::new(self.m_cost, self.t_cost, self.p_cost, Some(KEY_LEN))
             .map_err(|error| CryptoError::Params(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::Argon2Params;
+
+    #[test]
+    fn rejects_oversized_kdf_params() {
+        // Default is well within range.
+        assert!(Argon2Params::default().argon2_params().is_ok());
+        // A tampered keyring cannot force a huge allocation or CPU burn.
+        let huge = Argon2Params {
+            m_cost: 1 << 21,
+            t_cost: 3,
+            p_cost: 1,
+        };
+        assert!(huge.argon2_params().is_err());
+        let cpu = Argon2Params {
+            m_cost: 1 << 18,
+            t_cost: 64,
+            p_cost: 1,
+        };
+        assert!(cpu.argon2_params().is_err());
     }
 }

@@ -66,6 +66,7 @@ async fn recover_restores_password_login_and_clears_totp() {
         .create_session(
             alice.id,
             b"session-hash",
+            b"csrf-hash",
             kolimi_db::now_millis() + 3_600_000,
         )
         .await

@@ -400,7 +400,15 @@ pub async fn update(
         json!({}),
     )
     .await;
-    (StatusCode::OK, Json(share_json(&state, &share, None).await)).into_response()
+    let body = share_json(&state, &share, None).await;
+    if body.get("missing").and_then(Value::as_bool) == Some(true) {
+        return (
+            StatusCode::GONE,
+            Json(json!({ "error": "the shared item no longer exists" })),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 /// `DELETE /api/shares/{id}` — revoke a share.
@@ -796,14 +804,16 @@ fn entries_json(nodes: &[kolimi_vfs::Node]) -> Vec<Value> {
 
 async fn share_json(state: &AppState, share: &ShareRow, generated_password: Option<&str>) -> Value {
     // Node details are best-effort; a deleted node leaves a stale share row
-    // that is simply skipped at mount time.
+    // that is simply skipped at mount time. Surface it as `missing` so callers
+    // can answer 410 Gone instead of returning a blank path/name.
     let path = state
         .db
         .node_path(share.owner_id, share.node_id)
         .await
         .ok()
-        .flatten()
-        .unwrap_or_default();
+        .flatten();
+    let missing = path.is_none();
+    let path = path.unwrap_or_default();
     let name = path.rsplit('/').next().unwrap_or_default().to_string();
     let recipient = if let Some(user_id) = share.recipient_user_id {
         state
@@ -836,6 +846,7 @@ async fn share_json(state: &AppState, share: &ShareRow, generated_password: Opti
         "password": generated_password,
         "expires_at": share.expires_at,
         "created_at": share.created_at,
+        "missing": missing,
     })
 }
 

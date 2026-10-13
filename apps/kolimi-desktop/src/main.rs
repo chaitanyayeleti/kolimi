@@ -534,13 +534,17 @@ fn save_settings_file(settings: &Settings) -> Result<(), String> {
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
     }
     let json = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
-    std::fs::write(&path, json)
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    // Atomic replace: write a sibling temp file, lock it down, then rename.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)
+        .map_err(|error| format!("cannot write {}: {error}", tmp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
+    std::fs::rename(&tmp, &path)
+        .map_err(|error| format!("cannot replace {}: {error}", path.display()))?;
     Ok(())
 }
 
@@ -572,8 +576,11 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
              Terminal=false\n",
             exe.display()
         );
-        std::fs::write(&path, contents)
-            .map_err(|error| format!("cannot write {}: {error}", path.display()))
+        let tmp = path.with_extension("desktop.tmp");
+        std::fs::write(&tmp, contents)
+            .map_err(|error| format!("cannot write {}: {error}", tmp.display()))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|error| format!("cannot replace {}: {error}", path.display()))
     } else if path.exists() {
         std::fs::remove_file(&path)
             .map_err(|error| format!("cannot remove {}: {error}", path.display()))
@@ -763,7 +770,11 @@ fn run_sync(app: AppHandle) {
             return;
         }
         (
-            state.settings.lock().unwrap().clone(),
+            state
+                .settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
             state.status_item.clone(),
         )
     };
@@ -889,7 +900,12 @@ struct SettingsView {
 /// The current settings, with a `signed_in` flag per account (no secrets).
 #[tauri::command]
 fn get_settings(app: AppHandle) -> SettingsView {
-    let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+    let settings = app
+        .state::<DesktopState>()
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let accounts = settings
         .accounts
         .iter()
@@ -953,7 +969,10 @@ async fn sign_in(
     );
     let settings = {
         let state = app.state::<DesktopState>();
-        let mut settings = state.settings.lock().unwrap();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !settings
             .accounts
             .iter()
@@ -985,7 +1004,10 @@ fn remove_account(app: AppHandle, server: String, username: String) -> Result<()
     delete_secrets(&account_key(&server, &username));
     let settings = {
         let state = app.state::<DesktopState>();
-        let mut settings = state.settings.lock().unwrap();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         settings
             .accounts
             .retain(|account| !(account.server == server && account.username == username));
@@ -1012,7 +1034,10 @@ fn add_pair(
     std::fs::create_dir_all(&local).map_err(|error| format!("cannot create {local}: {error}"))?;
     let settings = {
         let state = app.state::<DesktopState>();
-        let mut settings = state.settings.lock().unwrap();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let account = settings
             .accounts
             .iter_mut()
@@ -1043,7 +1068,10 @@ fn remove_pair(
 ) -> Result<(), String> {
     let settings = {
         let state = app.state::<DesktopState>();
-        let mut settings = state.settings.lock().unwrap();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let account = settings
             .accounts
             .iter_mut()
@@ -1075,7 +1103,10 @@ fn update_pair(
     std::fs::create_dir_all(&local).map_err(|error| format!("cannot create {local}: {error}"))?;
     let settings = {
         let state = app.state::<DesktopState>();
-        let mut settings = state.settings.lock().unwrap();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let account = settings
             .accounts
             .iter_mut()
@@ -1130,7 +1161,10 @@ fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     set_autostart(enabled)?;
     let settings = {
         let state = app.state::<DesktopState>();
-        let mut settings = state.settings.lock().unwrap();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         settings.autostart = enabled;
         settings.clone()
     };
@@ -1242,7 +1276,12 @@ fn main() {
                 .menu(&menu)
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "open" => {
-                        let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+                        let settings = app
+                            .state::<DesktopState>()
+                            .settings
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
                         match settings.accounts.first() {
                             Some(account) => {
                                 let _ = open_main(app, &account.server);
@@ -1251,7 +1290,12 @@ fn main() {
                         }
                     }
                     "folder" => {
-                        let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+                        let settings = app
+                            .state::<DesktopState>()
+                            .settings
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
                         if let Some(dir) = settings
                             .accounts
                             .iter()
@@ -1295,7 +1339,10 @@ fn main() {
                         } else {
                             let saved = {
                                 let state = app.state::<DesktopState>();
-                                let mut settings = state.settings.lock().unwrap();
+                                let mut settings = state
+                                    .settings
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 settings.autostart = enabled;
                                 settings.clone()
                             };

@@ -755,21 +755,34 @@ impl Db {
         &self,
         user_id: i64,
         token_hash: &[u8],
+        csrf_hash: &[u8],
         expires_at: i64,
     ) -> Result<(), DbError> {
         let now = now_millis();
         sqlx::query(
-            "INSERT INTO sessions (user_id, token_hash, created_at, expires_at, last_seen_at)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO sessions (user_id, token_hash, csrf_hash, created_at, expires_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(user_id)
         .bind(token_hash)
+        .bind(csrf_hash)
         .bind(now)
         .bind(expires_at)
         .bind(now)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The CSRF token hash bound to a session (for cookie CSRF binding).
+    pub async fn session_csrf_hash(&self, token_hash: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
+        Ok(
+            sqlx::query_scalar("SELECT csrf_hash FROM sessions WHERE token_hash = ?")
+                .bind(token_hash)
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten(),
+        )
     }
 
     /// Looks up a session by token hash.
@@ -1197,6 +1210,11 @@ impl Db {
         modified_at: i64,
         from_path: Option<&str>,
     ) -> Result<(), DbError> {
+        // Hold the audit lock so the chain stays linear, and write the change
+        // row together with its audit entry in one transaction, so a crash
+        // can never leave the change feed and the audit log inconsistent.
+        let _guard = self.audit_lock.lock().await;
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO changes (user_id, path, from_path, op, content_id, size, modified_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1208,7 +1226,7 @@ impl Db {
         .bind(content_id)
         .bind(size)
         .bind(modified_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         let mut details = serde_json::Map::new();
         details.insert("size".to_string(), serde_json::json!(size));
@@ -1221,7 +1239,8 @@ impl Db {
                 serde_json::json!(hex::encode(content)),
             );
         }
-        self.audit_append(
+        self.audit_append_on(
+            &mut tx,
             Some(user_id),
             None,
             &format!("file.{op}"),
@@ -1229,6 +1248,7 @@ impl Db {
             &serde_json::Value::Object(details),
         )
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1530,7 +1550,7 @@ mod tests {
         let (_dir, db) = db().await;
         let user = db.create_user("alice", "hash").await.unwrap();
         let token = [7u8; 32];
-        db.create_session(user.id, &token, now_millis() + 60_000)
+        db.create_session(user.id, &token, &[0u8; 32], now_millis() + 60_000)
             .await
             .unwrap();
 
@@ -1546,7 +1566,7 @@ mod tests {
     async fn expired_sessions_are_purged() {
         let (_dir, db) = db().await;
         let user = db.create_user("alice", "hash").await.unwrap();
-        db.create_session(user.id, &[1u8; 32], now_millis() - 1)
+        db.create_session(user.id, &[1u8; 32], &[0u8; 32], now_millis() - 1)
             .await
             .unwrap();
         assert_eq!(db.delete_expired_sessions(now_millis()).await.unwrap(), 1);

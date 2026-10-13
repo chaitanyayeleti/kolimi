@@ -104,6 +104,9 @@ enum UserCommand {
         /// Password (prompted if omitted).
         #[arg(long)]
         password: Option<String>,
+        /// Read the password from stdin (keeps it out of the process list).
+        #[arg(long)]
+        password_stdin: bool,
     },
     /// Change a user's password.
     Passwd {
@@ -313,10 +316,15 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             username,
             admin,
             password,
+            password_stdin,
         } => {
-            let password = match password {
-                Some(password) => password,
-                None => read_password(&format!("Password for {username}: "))?,
+            let password = if password_stdin {
+                read_password_from_stdin()?
+            } else {
+                match password {
+                    Some(password) => password,
+                    None => read_password(&format!("Password for {username}: "))?,
+                }
             };
             let hash = kolimi_auth::password::hash_password(&password)?;
             let user = db.create_user(&username, &hash).await?;
@@ -745,6 +753,14 @@ fn read_password(prompt: &str) -> Result<String, Box<dyn Error>> {
             Ok(line.trim_end().to_string())
         }
     }
+}
+
+/// Reads a password from stdin unconditionally (no TTY prompt), so a script
+/// can supply it without exposing it in the process list.
+fn read_password_from_stdin() -> Result<String, Box<dyn Error>> {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 
 async fn shutdown_signal() {

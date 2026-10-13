@@ -306,15 +306,22 @@ pub async fn login_finish(
     };
 
     passkey.update_credential(&result);
-    if let Ok(serialized) = serde_json::to_string(&passkey)
-        && let Err(error) = state
-            .db
-            .update_passkey(user.id, passkey_id, &serialized, kolimi_db::now_millis())
-            .await
+    // Fail closed: if we cannot persist the incremented sign counter, do not
+    // issue a session (a stale counter weakens replay protection).
+    let serialized = match serde_json::to_string(&passkey) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize passkey");
+            return internal_error();
+        }
+    };
+    if let Err(error) = state
+        .db
+        .update_passkey(user.id, passkey_id, &serialized, kolimi_db::now_millis())
+        .await
     {
-        // A stale sign counter weakens replay protection; surface it rather
-        // than silently reporting success.
         tracing::error!(%error, "failed to persist passkey sign counter");
+        return internal_error();
     }
 
     state.lockout.record_success(&lockout_key);

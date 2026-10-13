@@ -147,7 +147,7 @@ pub async fn handler(
     if access.node.is_dir() {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    if state.db.is_encrypted(access.node.id).await.unwrap_or(false) {
+    if state.db.is_encrypted(access.node.id).await.unwrap_or(true) {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
     let Some(kind) = classify(&access.node.name) else {
@@ -217,6 +217,16 @@ pub enum WorkerError {
     Failed(String),
 }
 
+/// Removes a preview scratch file even if the worker panics or the request is
+/// cancelled (a `Drop` runs on unwind and when the future is dropped).
+struct ScratchFile(std::path::PathBuf);
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Writes `data` to a scratch file and runs the sandboxed worker on it.
 async fn run_worker(
     state: &AppState,
@@ -232,17 +242,17 @@ async fn run_worker(
 
     let name = kolimi_auth::token::new_session_token()
         .map_err(|error| WorkerError::Failed(error.to_string()))?;
-    let scratch = state
-        .data_dir
-        .join("tmp")
-        .join(format!("preview-{name}.bin"));
-    tokio::fs::write(&scratch, data)
+    let scratch = ScratchFile(
+        state
+            .data_dir
+            .join("tmp")
+            .join(format!("preview-{name}.bin")),
+    );
+    tokio::fs::write(&scratch.0, data)
         .await
         .map_err(|error| WorkerError::Failed(error.to_string()))?;
 
-    let result = run_worker_inner(state, kind, &scratch, max_dim).await;
-    let _ = tokio::fs::remove_file(&scratch).await;
-    result
+    run_worker_inner(state, kind, &scratch.0, max_dim).await
 }
 
 async fn run_worker_inner(
