@@ -128,13 +128,19 @@ is silently skipped.
 | **Compression + broader rate limiting** | Per-client limits cover auth, passkey, public-unlock and preview endpoints (with `KOLIMI_TRUST_PROXY` for proxies); lockout is scoped per (account, source). Compression and a wider global limiter are still missing | Add `tower-http` compression; consider a broader global request limiter |
 | **Release & distribution (remainder)** | The pipeline is live (v0.1.0–v0.1.7): gnu/musl/aarch64 tarballs, `.deb`, Helm, CycloneDX SBOM + cosign, **multi-arch** GHCR image (`{vX.Y.Z, X.Y, latest}`, amd64 + arm64), and automated AUR updates | Optional: a `kolimi-bin` AUR package (prebuilt from the release tarball) |
 | **cargo-vet burn-down** | 659 exemptions (0 real audits in `audits.toml`) is a placeholder, not vetting | Prioritize crypto/server crates; replace exemptions with real audits over time |
-| **First-party client apps (desktop first)** | The sync core exists (`kolimi-sync`/`kolimi-ffi`) but there is no full desktop or mobile app | See [docs/plan-clients.md](docs/plan-clients.md): a Tauri desktop app reusing the Leptos UI first (Linux → Windows/macOS, ~6 weeks), then mobile — Android first, released on F-Droid, then iOS |
+| **First-party client apps (desktop first)** | The sync core exists (`kolimi-sync`/`kolimi-ffi`) but there is no full desktop or mobile app | Plan: [decision 0002](docs/decisions/0002-client-stack.md) (Tauri desktop reusing the Leptos UI, Linux first, ~6 weeks) + [docs/plans/clients.md](docs/plans/clients.md); then mobile — Android first, F-Droid |
 | **AUR/deb/tray packaging of the desktop client** | Only the server is packaged today | PKGBUILD + .deb for `kolimi-sync` and the Tauri tray once the tray UI stabilizes |
 | **Mobile background scheduling** | FFI exposes `sync_once`; scheduling is platform code | Kotlin/Swift wrappers (WorkManager / BGTaskScheduler) in the mobile shells; FFI docs already describe the boundary |
 | **Self-heal from replicas** | Scrubber detects corruption but single-node has no replica to heal from | Replication is out of v1 scope; document the single-node reality (done) and revisit with object storage |
 | **Restore drills in CI** | backup/verify exist; drills are manual | Add a CI job: seed → backup → destroy → restore → verify → byte-compare |
 | **Plugin SDK polish + signing** | Plugins are unsigned; SDK is one example | WIT docs, a plugin template, optional signature verification (cosign) before load |
 | **OTel traces** | ✅ **Landed**: OTLP/gRPC trace export behind the `otel` feature flag (`KOLIMI_OTEL_ENDPOINT`); request spans come from the existing `tracing`/`tower-http` instrumentation | — |
+
+### Next week (planned)
+
+1. **Approve [decision 0002](docs/decisions/0002-client-stack.md)** — desktop stack (A/B/C), repo layout, Linux-only scope, distribution (`.deb` + AppImage + AUR).
+2. **Desktop client phase 1 (issue #12)** — weeks 1–6 per decision 0002: shell → native sync → OS-keychain credentials → E2EE → packaging → first release.
+3. **Approve [decision 0001](docs/decisions/0001-e2ee-dav-scope.md)** — E2EE/DAV scope (A done; B/C optional).
 
 ## 9. Non-goals
 

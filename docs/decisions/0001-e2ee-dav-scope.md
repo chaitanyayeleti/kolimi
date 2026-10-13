@@ -87,9 +87,9 @@ are made; the two RFCs and this record remain local drafts.
 
 ## References
 
-- [RFC 0007 — E2EE](rfc/0007-e2ee.md)
-- [RFC 0008 — device enrollment](rfc/0008-device-enrollment.md)
-- [RFC 0009 — E2EE onboarding](rfc/0009-e2ee-onboarding.md)
-- [RFC 0010 — WebDAV/E2EE boundary](rfc/0010-webdav-e2ee-boundary.md)
+- [RFC 0007 — E2EE](../rfc/0007-e2ee.md)
+- [RFC 0008 — device enrollment](../rfc/0008-device-enrollment.md)
+- [RFC 0009 — E2EE onboarding](../rfc/0009-e2ee-onboarding.md)
+- [RFC 0010 — WebDAV/E2EE boundary](../rfc/0010-webdav-e2ee-boundary.md)
 - Bug: `crates/kolimi-webdav/src/lib.rs` `put()` ignores encryption;
   `is_encrypted` used only by `preview.rs` and `search_indexer.rs`.
