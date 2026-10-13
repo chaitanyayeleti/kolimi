@@ -31,6 +31,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
+    webview::DownloadEvent,
 };
 use url::Url;
 
@@ -121,6 +122,13 @@ fn open_folder(path: &str) {
     let _ = std::process::Command::new(opener).arg(path).spawn();
 }
 
+/// The user's download directory (`$HOME/Downloads`).
+fn downloads_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join("Downloads"))
+}
+
 fn open_main(app: &tauri::AppHandle, config: &DesktopConfig) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_focus();
@@ -132,6 +140,40 @@ fn open_main(app: &tauri::AppHandle, config: &DesktopConfig) -> Result<(), Strin
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("Kolimi")
         .inner_size(1100.0, 720.0)
+        // Let the web UI's own drag & drop handle OS file drops (upload) and
+        // internal moves; Tauri's native file-drop handler would swallow them.
+        .disable_drag_drop_handler()
+        // Route the web UI's downloads to the user's Downloads folder and
+        // reflect the result in the tray instead of failing silently.
+        .on_download(|webview, event| {
+            match event {
+                DownloadEvent::Requested { destination, .. } => {
+                    if let Some(dir) = downloads_dir() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        if let Some(name) = destination.file_name() {
+                            *destination = dir.join(name);
+                        }
+                    }
+                }
+                DownloadEvent::Finished { success, path, .. } => {
+                    let text = if success {
+                        path.and_then(|path| {
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                        })
+                        .map(|name| format!("Downloaded {name}"))
+                        .unwrap_or_else(|| "Download complete".to_string())
+                    } else {
+                        "Download failed".to_string()
+                    };
+                    if let Some(state) = webview.app_handle().try_state::<DesktopState>() {
+                        let _ = state.status_item.set_text(text);
+                    }
+                }
+                _ => {}
+            }
+            true
+        })
         .build()
         .map_err(|error| error.to_string())?;
     Ok(())

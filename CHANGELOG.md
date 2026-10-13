@@ -13,6 +13,12 @@ follow [Semantic Versioning](https://semver.org/).
   `~/.config/kolimi/desktop.json`, a tray menu (Open / Open folder / Sync now
   / Setup / Quit), and background sync on startup, every 5 minutes, and on
   demand. Decision 0002 approved (Option A, Linux-first, in-repo).
+- **Desktop native file integration**: OS **drag-and-drop uploads** work in
+  the window (Tauri's file-drop handler is disabled so the web UI's own drop
+  logic runs), and **downloads** from the web UI are saved to `~/Downloads`
+  with the result shown in the tray (instead of failing silently). Rename,
+  move, delete, versions/trash, search, and previews come from the loaded web
+  UI, giving feature parity in the desktop shell.
 
 ## [0.1.11]
 

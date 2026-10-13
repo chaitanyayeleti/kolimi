@@ -37,6 +37,12 @@ emits Kotlin/Swift/Python bindings.
 Windows/macOS follow once Linux is solid (mainly packaging, signing, and
 platform glue for the secret store and tray).
 
+**Status (as of 2026-10-13):** weeks 1–2 landed. Week 1 = shell (window,
+first-run setup, tray). Week 2 = parity via the loaded web UI plus the two
+native gaps it can't cover: OS file-drop uploads (Tauri's file-drop handler
+disabled so the web UI's own drop logic runs) and downloads routed to
+`~/Downloads` with tray status.
+
 ## Phase 2 — Mobile (Android first → F-Droid), weeks 7+
 
 Same as the Android plan, now explicitly after desktop. Kotlin/Compose
