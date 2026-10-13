@@ -12,6 +12,7 @@ rust-version = "1.89"
 [workspace]
 
 [dependencies]
+keyring = { version = "4", features = ["apple-native-keyring-store"] }
 kolimi-sync = { version = "0.1.11", path = "../../crates/kolimi-sync" }
 notify-rust = "4"
 serde = { version = "1", features = ["derive"] }

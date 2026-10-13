@@ -37,13 +37,15 @@ emits Kotlin/Swift/Python bindings.
 Windows/macOS follow once Linux is solid (mainly packaging, signing, and
 platform glue for the secret store and tray).
 
-**Status (as of 2026-10-13):** weeks 1–3 landed. Week 1 = shell (window,
+**Status (as of 2026-10-13):** weeks 1–4 landed. Week 1 = shell (window,
 first-run setup, tray). Week 2 = parity via the loaded web UI plus the two
 native gaps it can't cover: OS file-drop uploads (Tauri's file-drop handler
 disabled so the web UI's own drop logic runs) and downloads routed to
 `~/Downloads` with tray status. Week 3 = native sync polish: tray icon
 states (idle/syncing/error/paused), notifications on failure/conflicts, XDG
-autostart toggle, and pause/resume.
+autostart toggle, and pause/resume. Week 4 = OS keychain for the password and
+E2EE passphrase (Secret Service / Credential Manager / Keychain) with a
+`0600` file fallback.
 
 ## Phase 2 — Mobile (Android first → F-Droid), weeks 7+
 

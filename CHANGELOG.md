@@ -24,6 +24,12 @@ follow [Semantic Versioning](https://semver.org/).
   **XDG autostart** is a "Start on login" toggle (setup checkbox + tray menu),
   and sync can be **paused/resumed** from the tray. Wayland-native via
   GTK/webkit2gtk (`GDK_BACKEND` auto-selects Wayland or X11).
+- **Desktop OS keychain**: the account password and E2EE passphrase are stored
+  in the **system keychain** (Secret Service via zbus on Linux; Credential
+  Manager / Keychain on Windows/macOS), keyed by server URL. When no keychain
+  is available (headless, no secret service) they fall back to the `0600`
+  config file. The plaintext `desktop.json` no longer holds the password when a
+  keychain is present.
 
 ## [0.1.11]
 

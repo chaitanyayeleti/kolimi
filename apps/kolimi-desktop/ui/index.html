@@ -49,6 +49,7 @@
       <input name="username" required autocomplete="username">
     </label>
     <label>Password
+      <small>Kept in your system keychain; falls back to the config file.</small>
       <input name="password" type="password" required autocomplete="current-password">
     </label>
     <label>Local folder
@@ -59,7 +60,7 @@
       <input name="encrypted_roots" placeholder="Private">
     </label>
     <label>E2EE passphrase
-      <small>Only needed when encrypted roots are set (optional).</small>
+      <small>Only needed when encrypted roots are set (optional; system keychain).</small>
       <input name="e2ee_passphrase" type="password" autocomplete="off">
     </label>
     <label class="check">

@@ -19,9 +19,9 @@
 //! When no config exists, a first-run setup window writes it. It syncs on
 //! startup, every five minutes, and on demand from the tray menu, with a tray
 //! icon that reflects idle/syncing/error and a desktop notification on
-//! failures and conflicts. Platform keychains (week 4) will move the
-//! `password`/`e2ee_passphrase` fields out of this file; until then it is
-//! written `chmod 600`.
+//! failures and conflicts. The `password` and `e2ee_passphrase` live in the
+//! **OS keychain** (Secret Service via zbus on Linux); only when no keychain
+//! is available do they fall back to the file, which is written `chmod 600`.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -101,16 +101,37 @@ fn load_config_file() -> Result<DesktopConfig, String> {
     let path = config_path();
     let bytes =
         std::fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))
+    let mut config: DesktopConfig =
+        serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    if let Some(secrets) = keyring_get(&config.server) {
+        if !secrets.password.is_empty() {
+            config.password = secrets.password;
+        }
+        if secrets.e2ee_passphrase.is_some() {
+            config.e2ee_passphrase = secrets.e2ee_passphrase;
+        }
+    }
+    Ok(config)
 }
 
 fn save_config_file(config: &DesktopConfig) -> Result<(), String> {
+    // Prefer the OS keychain; fall back to writing secrets into the (0600)
+    // file only when no keychain is available.
+    let secrets = Secrets {
+        password: config.password.clone(),
+        e2ee_passphrase: config.e2ee_passphrase.clone(),
+    };
+    let mut on_disk = config.clone();
+    if store_secrets(&config.server, &secrets) {
+        on_disk.password = String::new();
+        on_disk.e2ee_passphrase = None;
+    }
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
     }
-    let json = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
+    let json = serde_json::to_vec_pretty(&on_disk).map_err(|error| error.to_string())?;
     std::fs::write(&path, json)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     #[cfg(unix)]
@@ -119,6 +140,34 @@ fn save_config_file(config: &DesktopConfig) -> Result<(), String> {
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+/// Secrets kept in the OS keychain (keyed by server URL).
+#[derive(Serialize, Deserialize)]
+struct Secrets {
+    password: String,
+    #[serde(default)]
+    e2ee_passphrase: Option<String>,
+}
+
+/// Keychain service name for secret entries.
+const KEYRING_SERVICE: &str = "kolimi-desktop";
+
+/// Read stored secrets for `server`, if a keychain entry exists.
+fn keyring_get(server: &str) -> Option<Secrets> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, server).ok()?;
+    serde_json::from_str(&entry.get_password().ok()?).ok()
+}
+
+/// Store secrets in the OS keychain; returns whether it succeeded.
+fn store_secrets(server: &str, secrets: &Secrets) -> bool {
+    let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, server) else {
+        return false;
+    };
+    let Ok(raw) = serde_json::to_string(secrets) else {
+        return false;
+    };
+    entry.set_password(&raw).is_ok()
 }
 
 /// Path of the XDG autostart entry.
