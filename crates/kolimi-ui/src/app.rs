@@ -204,6 +204,9 @@ fn icon_svg(name: &str) -> String {
             r#"<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#
         }
         "refresh" => r#"<path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/>"#,
+        "link" => {
+            r#"<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>"#
+        }
         _ => r#"<circle cx="12" cy="12" r="8"/>"#,
     };
     format!(
@@ -441,6 +444,12 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let e2ee_master = RwSignal::new(Option::<MasterKey>::None);
     let e2ee_open = RwSignal::new(false);
     let quota_warn = RwSignal::new(Option::<u8>::None);
+    let usage = RwSignal::new(Value::Null);
+    let loading = RwSignal::new(false);
+    let context_menu = RwSignal::new(Option::<(Entry, i32, i32)>::None);
+    let lightbox = RwSignal::new(Option::<Entry>::None);
+    let move_drag = RwSignal::new(Option::<Entry>::None);
+    let undo = RwSignal::new(Option::<(String, i64)>::None);
     // Administrators get the user-management panel.
     spawn_local(async move {
         if let Ok(r) = api::get("/api/me").await
@@ -449,9 +458,15 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             is_admin.set(r.body["is_admin"].as_bool().unwrap_or(false));
             username.set(r.body["username"].as_str().unwrap_or_default().to_string());
         }
+        if let Ok(r) = api::get("/api/me/usage").await
+            && r.status == 200
+        {
+            usage.set(r.body);
+        }
     });
 
     let load = move |target: String| {
+        loading.set(true);
         spawn_local(async move {
             let url = format!("/api/browse?path={}", encode(&target));
             match api::get(&url).await {
@@ -475,6 +490,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 Ok(r) => error.set(r.error().unwrap_or("Could not list folder").to_string()),
                 Err(e) => error.set(e),
             }
+            loading.set(false);
         });
     };
 
@@ -636,10 +652,27 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             return;
         }
         let current = path.get_untracked();
+        let entry_path = entry.path.clone();
+        let entry_name = entry.name.clone();
         spawn_local(async move {
-            let url = format!("/dav{}", encode_path(&entry.path));
+            let url = format!("/dav{}", encode_path(&entry_path));
             match api::dav("DELETE", &url, None, &[]).await {
-                Ok(r) if r.status == 204 => load(current),
+                Ok(r) if r.status == 204 => {
+                    // Find the trashed node so the move can be undone.
+                    if let Ok(tr) = api::get("/api/trash").await
+                        && tr.status == 200
+                        && let Some(items) = tr.body.as_array()
+                        && let Some(id) = items
+                            .iter()
+                            .find(|item| {
+                                item["original_path"].as_str() == Some(entry_path.as_str())
+                            })
+                            .and_then(|item| item["id"].as_i64())
+                    {
+                        undo.set(Some((entry_name.clone(), id)));
+                    }
+                    load(current);
+                }
                 Ok(r) => error.set(format!("Delete failed (HTTP {})", r.status)),
                 Err(e) => error.set(e),
             }
@@ -663,6 +696,27 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             match api::dav("MOVE", &url, None, &[("destination", &destination)]).await {
                 Ok(r) if matches!(r.status, 201 | 204) => load(current),
                 Ok(r) => error.set(format!("Rename failed (HTTP {})", r.status)),
+                Err(e) => error.set(e),
+            }
+        });
+    };
+
+    // Moves `entry` into `dest_dir` (drag-to-move onto a folder or crumb).
+    let move_into = move |entry: Entry, dest_dir: String| {
+        let source = entry.path.clone();
+        let destination = format!("/{}/{}", dest_dir.trim_matches('/'), entry.name);
+        if destination == source {
+            return;
+        }
+        spawn_local(async move {
+            let dav_source = format!("/dav{}", encode_path(&source));
+            let dav_dest = format!("/dav{}", encode_path(&destination));
+            match api::dav("MOVE", &dav_source, None, &[("destination", &dav_dest)]).await {
+                Ok(r) if matches!(r.status, 201 | 204) => {
+                    notice.set(format!("Moved {}", entry.name));
+                    load(path.get_untracked());
+                }
+                Ok(r) => error.set(format!("Move failed (HTTP {})", r.status)),
                 Err(e) => error.set(e),
             }
         });
@@ -828,6 +882,42 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     }}
                 </nav>
                 <div class="side-foot">
+                    <div class="storage">
+                        {move || {
+                            let data = usage.get();
+                            let used = data["used_bytes"].as_u64().unwrap_or(0);
+                            let quota = data["effective_quota_bytes"].as_u64().unwrap_or(0);
+                            let pct = if quota == 0 {
+                                0.0
+                            } else {
+                                (used as f64 / quota as f64).clamp(0.0, 1.0)
+                            };
+                            let dash = format!("{:.2} {:.2}", pct * 100.0, 100.0 - pct * 100.0);
+                            let label = if quota == 0 {
+                                format!("{} used", human_size(used))
+                            } else {
+                                format!("{} of {}", human_size(used), human_size(quota))
+                            };
+                            view! {
+                                <div class="storage-ring">
+                                    <svg viewBox="0 0 36 36" role="img" aria-label="Storage used">
+                                        <circle class="ring-bg" cx="18" cy="18" r="15.9155"></circle>
+                                        <circle
+                                            class="ring-fg"
+                                            cx="18"
+                                            cy="18"
+                                            r="15.9155"
+                                            stroke-dasharray=dash
+                                        ></circle>
+                                    </svg>
+                                    <div class="storage-info">
+                                        <b>{format!("{:.0}%", pct * 100.0)}</b>
+                                        <small class="muted">{label}</small>
+                                    </div>
+                                </div>
+                            }
+                        }}
+                    </div>
                     <div class="account">
                         <span class="avatar">
                             {move || {
@@ -896,6 +986,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                     <button
                                         class="crumb"
                                         on:click=move |_| load("/".to_string())
+                                        on:dragover=move |ev: ev::DragEvent| ev.prevent_default()
+                                        on:drop=move |ev: ev::DragEvent| {
+                                            ev.prevent_default();
+                                            if let Some(src) = move_drag.get_untracked() {
+                                                move_into(src, "/".to_string());
+                                                move_drag.set(None);
+                                            }
+                                        }
                                     >
                                         <Icon name="cloud"/>
                                     </button>
@@ -907,6 +1005,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                 accumulated.push('/');
                                 accumulated.push_str(segment);
                                 let target = accumulated.clone();
+                                let drop_target = accumulated.clone();
                                 let label = segment.to_string();
                                 crumbs.push(
                                     view! {
@@ -914,6 +1013,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                         <button
                                             class="crumb"
                                             on:click=move |_| load(target.clone())
+                                            on:dragover=move |ev: ev::DragEvent| ev.prevent_default()
+                                            on:drop=move |ev: ev::DragEvent| {
+                                                ev.prevent_default();
+                                                if let Some(src) = move_drag.get_untracked() {
+                                                    move_into(src, drop_target.clone());
+                                                    move_drag.set(None);
+                                                }
+                                            }
                                         >
                                             {label}
                                         </button>
@@ -1046,6 +1153,26 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                 })
                         }}
                         {move || {
+                            if loading.get() {
+                                return view! {
+                                    <ul class="files skeleton-list">
+                                        {(0..6)
+                                            .map(|_| {
+                                                view! {
+                                                    <li class="file skeleton">
+                                                        <span class="sk sk-icon"></span>
+                                                        <span class="file-body">
+                                                            <span class="sk sk-line"></span>
+                                                            <span class="sk sk-line short"></span>
+                                                        </span>
+                                                    </li>
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </ul>
+                                }
+                                    .into_any();
+                            }
                             if entries.get().is_empty() {
                                 return view! {
                                     <div class="empty">
@@ -1088,8 +1215,43 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let download = entry.path.clone();
                                                 let encrypted = entry.encrypted;
                                                 let decrypt_copy = entry.clone();
+                                                let ctx_copy = entry.clone();
+                                                let lightbox_copy = entry.clone();
+                                                let drag_copy = entry.clone();
+                                                let drop_copy = entry.clone();
                                                 view! {
-                                                    <div class="tile">
+                                                    <div
+                                                        class="tile"
+                                                        draggable="true"
+                                                        on:dragstart=move |_| {
+                                                            move_drag.set(Some(drag_copy.clone()));
+                                                        }
+                                                        on:contextmenu=move |ev: ev::MouseEvent| {
+                                                            ev.prevent_default();
+                                                            context_menu
+                                                                .set(
+                                                                    Some((
+                                                                        ctx_copy.clone(),
+                                                                        ev.client_x(),
+                                                                        ev.client_y(),
+                                                                    )),
+                                                                );
+                                                        }
+                                                        on:dragover=move |ev: ev::DragEvent| {
+                                                            if is_dir {
+                                                                ev.prevent_default();
+                                                            }
+                                                        }
+                                                        on:drop=move |ev: ev::DragEvent| {
+                                                            if is_dir {
+                                                                ev.prevent_default();
+                                                                if let Some(src) = move_drag.get_untracked() {
+                                                                    move_into(src, drop_copy.path.clone());
+                                                                    move_drag.set(None);
+                                                                }
+                                                            }
+                                                        }
+                                                    >
                                                         <button
                                                             class="tile-open"
                                                             on:click=move |_| open(open_entry.clone())
@@ -1108,6 +1270,10 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                                                     "/api/preview?path={}&size=256",
                                                                                     encode(&preview),
                                                                                 )
+                                                                                on:click=move |ev: ev::MouseEvent| {
+                                                                                    ev.stop_propagation();
+                                                                                    lightbox.set(Some(lightbox_copy.clone()));
+                                                                                }
                                                                             />
                                                                         }
                                                                     })}
@@ -1214,8 +1380,42 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let download = entry.path.clone();
                                                 let encrypted = entry.encrypted;
                                                 let decrypt_copy = entry.clone();
+                                                let ctx_copy = entry.clone();
+                                                let drag_copy = entry.clone();
+                                                let drop_copy = entry.clone();
                                                 view! {
-                                                    <li class="file">
+                                                    <li
+                                                        class="file"
+                                                        draggable="true"
+                                                        on:dragstart=move |_| {
+                                                            move_drag.set(Some(drag_copy.clone()));
+                                                        }
+                                                        on:contextmenu=move |ev: ev::MouseEvent| {
+                                                            ev.prevent_default();
+                                                            context_menu
+                                                                .set(
+                                                                    Some((
+                                                                        ctx_copy.clone(),
+                                                                        ev.client_x(),
+                                                                        ev.client_y(),
+                                                                    )),
+                                                                );
+                                                        }
+                                                        on:dragover=move |ev: ev::DragEvent| {
+                                                            if is_dir {
+                                                                ev.prevent_default();
+                                                            }
+                                                        }
+                                                        on:drop=move |ev: ev::DragEvent| {
+                                                            if is_dir {
+                                                                ev.prevent_default();
+                                                                if let Some(src) = move_drag.get_untracked() {
+                                                                    move_into(src, drop_copy.path.clone());
+                                                                    move_drag.set(None);
+                                                                }
+                                                            }
+                                                        }
+                                                    >
                                                         <button
                                                             class="file-open"
                                                             on:click=move |_| open(open_entry.clone())
@@ -1444,7 +1644,177 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         </button>
                     </div>
                 </Show>
+                <Show when=move || undo.get().is_some()>
+                    <div class="toast ok">
+                        <span class="toast-msg">
+                            {move || {
+                                undo
+                                    .get()
+                                    .map(|(name, _)| format!("Moved “{name}” to trash"))
+                                    .unwrap_or_default()
+                            }}
+                        </span>
+                        <button
+                            on:click=move |_| {
+                                if let Some((_, id)) = undo.get_untracked() {
+                                    spawn_local(async move {
+                                        let _ = api::send_json(
+                                            "POST",
+                                            &format!("/api/trash/{id}/restore"),
+                                            &json!({}),
+                                        )
+                                        .await;
+                                        undo.set(None);
+                                        load(path.get_untracked());
+                                    });
+                                }
+                            }
+                        >
+                            "Undo"
+                        </button>
+                        <button
+                            class="icon-btn"
+                            aria-label="Dismiss"
+                            on:click=move |_| undo.set(None)
+                        >
+                            <Icon name="x"/>
+                        </button>
+                    </div>
+                </Show>
             </div>
+
+            {move || {
+                context_menu
+                    .get()
+                    .map(|(entry, x, y)| {
+                        let is_dir = entry.kind == "dir";
+                        let shared = entry.shared;
+                        let open_e = entry.clone();
+                        let download = entry.path.clone();
+                        let copy_path = entry.path.clone();
+                        let share_e = entry.clone();
+                        let rename_e = entry.clone();
+                        let delete_e = entry.clone();
+                        view! {
+                            <div class="ctx-scrim" on:click=move |_| context_menu.set(None)></div>
+                            <div class="ctx-menu" style=format!("left:{x}px; top:{y}px;")>
+                                {is_dir
+                                    .then(|| {
+                                        view! {
+                                            <button
+                                                class="ctx-item"
+                                                on:click=move |_| {
+                                                    context_menu.set(None);
+                                                    open(open_e.clone());
+                                                }
+                                            >
+                                                <Icon name="folder"/>
+                                                "Open"
+                                            </button>
+                                        }
+                                    })}
+                                {(!is_dir)
+                                    .then(|| {
+                                        view! {
+                                            <a
+                                                class="ctx-item"
+                                                href=format!("/dav{}", encode_path(&download))
+                                                download
+                                                on:click=move |_| context_menu.set(None)
+                                            >
+                                                <Icon name="download"/>
+                                                "Download"
+                                            </a>
+                                        }
+                                    })}
+                                <button
+                                    class="ctx-item"
+                                    on:click=move |_| {
+                                        context_menu.set(None);
+                                        let path = copy_path.clone();
+                                        spawn_local(async move {
+                                            crate::api::copy_to_clipboard(&path).await;
+                                        });
+                                    }
+                                >
+                                    <Icon name="link"/>
+                                    "Copy path"
+                                </button>
+                                {(!shared)
+                                    .then(|| {
+                                        view! {
+                                            <button
+                                                class="ctx-item"
+                                                on:click=move |_| {
+                                                    context_menu.set(None);
+                                                    share_entry(share_e.clone());
+                                                }
+                                            >
+                                                <Icon name="share"/>
+                                                "Share"
+                                            </button>
+                                            <button
+                                                class="ctx-item"
+                                                on:click=move |_| {
+                                                    context_menu.set(None);
+                                                    rename_entry(rename_e.clone());
+                                                }
+                                            >
+                                                <Icon name="edit"/>
+                                                "Rename"
+                                            </button>
+                                            <button
+                                                class="ctx-item danger"
+                                                on:click=move |_| {
+                                                    context_menu.set(None);
+                                                    delete_entry(delete_e.clone());
+                                                }
+                                            >
+                                                <Icon name="trash"/>
+                                                "Move to trash"
+                                            </button>
+                                        }
+                                    })}
+                            </div>
+                        }
+                    })
+            }}
+
+            {move || {
+                lightbox
+                    .get()
+                    .map(|entry| {
+                        let name = entry.name.clone();
+                        let src = format!("/api/preview?path={}&size=1024", encode(&entry.path));
+                        let download = entry.path.clone();
+                        view! {
+                            <div class="lightbox" on:click=move |_| lightbox.set(None)>
+                                <img src=src alt=name.clone()/>
+                                <div
+                                    class="lightbox-bar"
+                                    on:click=move |ev: ev::MouseEvent| ev.stop_propagation()
+                                >
+                                    <span class="lightbox-name">{name.clone()}</span>
+                                    <a
+                                        class="icon-btn"
+                                        title="Download"
+                                        href=format!("/dav{}", encode_path(&download))
+                                        download
+                                    >
+                                        <Icon name="download"/>
+                                    </a>
+                                    <button
+                                        class="icon-btn"
+                                        aria-label="Close"
+                                        on:click=move |_| lightbox.set(None)
+                                    >
+                                        <Icon name="x"/>
+                                    </button>
+                                </div>
+                            </div>
+                        }
+                    })
+            }}
 
             {move || {
                 share_target
@@ -2488,10 +2858,13 @@ fn ShareDialog(
                     created
                         .get()
                         .map(|(url, password)| {
+                            let full = full_url(&url);
+                            let qr = crate::e2ee::qr_svg(&full);
                             view! {
                                 <div class="created">
                                     <p>"Link created:"</p>
-                                    <code>{full_url(&url)}</code>
+                                    <code>{full.clone()}</code>
+                                    <div class="qr" inner_html=qr></div>
                                     {password
                                         .map(|password| {
                                             view! { <p>{format!("Password: {password}")}</p> }

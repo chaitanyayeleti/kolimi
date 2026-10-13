@@ -1416,3 +1416,187 @@ textarea:focus {
   margin: 16px 0 6px;
   font-size: 14px;
 }
+
+/* ---- Storage ring (sidebar) ---- */
+.storage {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.storage-ring {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.storage-ring svg {
+  width: 46px;
+  height: 46px;
+  transform: rotate(-90deg);
+  flex: none;
+}
+
+.ring-bg {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 3.6;
+}
+
+.ring-fg {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3.6;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.3s ease;
+}
+
+.storage-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.storage-info b {
+  font-size: 14px;
+}
+
+.storage-info small {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Context menu ---- */
+.ctx-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 61;
+  min-width: 190px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.ctx-item:hover {
+  background: var(--surface-2);
+}
+
+.ctx-item.danger {
+  color: var(--danger);
+}
+
+.ctx-item .icon {
+  width: 18px;
+  height: 18px;
+}
+
+/* ---- Lightbox ---- */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgb(0 0 0 / 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lightbox img {
+  max-width: 92vw;
+  max-height: 86vh;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+}
+
+.lightbox-bar {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 8px 16px;
+  box-shadow: var(--shadow-lg);
+}
+
+.lightbox-name {
+  max-width: 50vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+/* ---- Skeletons ---- */
+.skeleton-list {
+  pointer-events: none;
+}
+
+.sk {
+  display: block;
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 37%, var(--surface-2) 63%);
+  background-size: 400% 100%;
+  animation: sk 1.4s ease infinite;
+  border-radius: 6px;
+}
+
+.sk-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  flex: none;
+}
+
+.sk-line {
+  height: 10px;
+  width: 180px;
+  max-width: 100%;
+}
+
+.sk-line.short {
+  width: 90px;
+  margin-top: 8px;
+}
+
+@keyframes sk {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sk {
+    animation: none;
+  }
+}

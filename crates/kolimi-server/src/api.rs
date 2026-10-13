@@ -318,6 +318,28 @@ pub async fn me(Extension(user): Extension<CurrentUser>) -> Json<Value> {
     }))
 }
 
+/// `GET /api/me/usage` — the caller's own storage usage (for the sidebar).
+pub async fn self_usage(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    let Some(account) = state.db.find_user(&user.username).await.ok().flatten() else {
+        return not_found();
+    };
+    let used = match state.vfs.reconcile_usage(account.id).await {
+        Ok(bytes) => bytes,
+        Err(_) => account.used_bytes.max(0) as u64,
+    };
+    let quota = effective_quota(&state, account.quota_bytes);
+    Json(json!({
+        "used_bytes": used,
+        "quota_bytes": account.quota_bytes,
+        "effective_quota_bytes": quota,
+        "used_percent": quota_percent(used, quota),
+    }))
+    .into_response()
+}
+
 /// Query parameters for `/api/search`.
 #[derive(Deserialize)]
 pub struct SearchQuery {
