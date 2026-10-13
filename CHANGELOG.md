@@ -7,6 +7,9 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Desktop closes to tray**: closing the window hides it (the tray and the
+  background sync loop keep running; use the tray's *Quit* to exit). Autostart
+  launches the client with `--hidden`, so login starts it silently in the tray.
 - **Desktop Accounts & Sync**: the desktop client now supports **multiple
   accounts** and **multiple synced directories per account**, managed from an
   in-app **Accounts & Sync** window (tray → *Accounts & Sync…*): sign in/out,

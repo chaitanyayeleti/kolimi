@@ -336,7 +336,9 @@ a 16 MiB memory cap; traps are contained and audited (`plugin.error`).
   Each **pair** mirrors one local folder to a remote subfolder (`remote`,
   default the account root `/`), so several folders can sync to distinct
   server paths. It syncs at startup, every five minutes, and on demand,
-  showing status in the tray menu.
+  showing status in the tray menu. Closing the window **hides it to the tray**
+  (sync keeps running in the background); the tray's *Quit* exits. Autostart
+  launches it hidden (`--hidden`).
 
   The account **password** (and any E2EE passphrase) is kept in the **system
   keychain** (Secret Service via zbus on Linux; Credential Manager / Keychain
