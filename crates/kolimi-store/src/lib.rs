@@ -524,16 +524,6 @@ impl BlobStore {
         Ok(stats)
     }
 
-    /// Deletes a manifest blob.
-    pub async fn delete_manifest(&self, user_id: i64, content_id: &Hash) -> Result<(), StoreError> {
-        let path = self.manifest_path(user_id, content_id);
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(StoreError::NotFound(*content_id)),
-            Err(e) => Err(StoreError::Io(e)),
-        }
-    }
-
     /// Deletes every chunk and manifest not in the keep sets and older than
     /// `grace` (protecting in-flight uploads).
     pub async fn sweep(

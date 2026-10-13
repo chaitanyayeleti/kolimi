@@ -1,7 +1,6 @@
 //! Preview generation: classification, the sandboxed worker bridge, and
 //! the `/api/preview` endpoint.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::{
@@ -278,9 +277,4 @@ async fn run_worker_inner(
         )));
     }
     Ok(output.stdout)
-}
-
-/// A path to a scratch file (kept for tests).
-pub fn scratch_dir(state: &AppState) -> PathBuf {
-    state.data_dir.join("tmp")
 }

@@ -479,18 +479,6 @@ impl Db {
         )
     }
 
-    /// A page of users ordered by id (keyset pagination): those with
-    /// `id > after_id`, at most `limit`.
-    pub async fn users_page(&self, after_id: i64, limit: i64) -> Result<Vec<User>, DbError> {
-        Ok(
-            sqlx::query_as::<_, User>("SELECT * FROM users WHERE id > ? ORDER BY id LIMIT ?")
-                .bind(after_id)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await?,
-        )
-    }
-
     /// A page of users with an admin-chosen sort, order, and filter.
     ///
     /// Keyset pagination (`after_id`) only applies to the default `Id`
@@ -518,7 +506,10 @@ impl Db {
         };
         let mut clauses: Vec<String> = Vec::new();
         if sort == UserSort::Id {
-            clauses.push("id > ?".to_string());
+            clauses.push(match order {
+                SortOrder::Asc => "id > ?".to_string(),
+                SortOrder::Desc => "id < ?".to_string(),
+            });
         }
         match filter {
             UserFilter::OverQuota => {
@@ -1291,24 +1282,6 @@ impl Db {
             .collect();
         path.push_str(&parts.join("/"));
         Ok(Some(path))
-    }
-
-    /// Lists live nodes by ascending id after `after_id` (sync snapshot).
-    pub async fn tree_nodes(
-        &self,
-        user_id: i64,
-        after_id: i64,
-        limit: i64,
-    ) -> Result<Vec<Node>, DbError> {
-        Ok(sqlx::query_as::<_, Node>(
-            "SELECT * FROM nodes WHERE user_id = ? AND trashed_at IS NULL AND id > ?
-             ORDER BY id LIMIT ?",
-        )
-        .bind(user_id)
-        .bind(after_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?)
     }
 
     /// Lists every live node of a user (used to build sync tree paths).

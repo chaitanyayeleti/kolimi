@@ -124,9 +124,10 @@ fn method_not_allowed() -> Response {
 
 /// Whether `node_id` is an end-to-end encrypted file. The server holds no
 /// keys, so DAV must never serve ciphertext as a file, nor let plaintext
-/// overwrite one (RFC 0010, option A: plaintext-only DAV surface).
+/// overwrite one (RFC 0010, option A: plaintext-only DAV surface). A DB
+/// error fails **closed** (treat as encrypted) to avoid leaking ciphertext.
 async fn is_encrypted(vfs: &Vfs, node_id: i64) -> bool {
-    vfs.db().is_encrypted(node_id).await.unwrap_or(false)
+    vfs.db().is_encrypted(node_id).await.unwrap_or(true)
 }
 
 /// `403 Forbidden` for any DAV access to an encrypted node.

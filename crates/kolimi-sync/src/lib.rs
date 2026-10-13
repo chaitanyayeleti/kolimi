@@ -485,15 +485,6 @@ pub async fn unshare_file(
     unshare_path(config, rel_path, ShareTarget::User(recipient.to_string())).await
 }
 
-/// Revokes a group share of `rel_path` (all members lose access).
-pub async fn unshare_file_from_group(
-    config: &SyncConfig,
-    rel_path: &str,
-    group: &str,
-) -> Result<(), SyncError> {
-    unshare_path(config, rel_path, ShareTarget::Group(group.to_string())).await
-}
-
 /// Revokes a share of `rel_path` from a user or group.
 pub async fn unshare_path(
     config: &SyncConfig,

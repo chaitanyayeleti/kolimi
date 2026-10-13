@@ -19,7 +19,6 @@ subtle.workspace = true
 blake3.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 url.workspace = true

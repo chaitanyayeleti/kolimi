@@ -2624,7 +2624,6 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "openssl",
- "serde",
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
@@ -2729,8 +2728,6 @@ dependencies = [
  "tantivy",
  "tempfile",
  "thiserror 2.0.21",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2783,7 +2780,6 @@ dependencies = [
 name = "kolimi-store"
 version = "0.1.7"
 dependencies = [
- "blake3",
  "fastcdc",
  "futures-util",
  "getrandom 0.4.3",
@@ -2807,7 +2803,6 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.21",
  "tokio",
 ]

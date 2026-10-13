@@ -101,9 +101,11 @@ pub fn verify(
 
 fn code_at(secret: &[u8], unix_secs: u64, digits: u32) -> String {
     let counter = unix_secs / PERIOD_SECS;
-    // HMAC accepts keys of any length; the error arm is unreachable.
+    // HMAC accepts keys of any length; the error arm is unreachable. Return
+    // an empty string (which never matches a code) rather than a value that
+    // could be accepted, so this can never fail open.
     let Ok(mut mac) = Hmac::<Sha1>::new_from_slice(secret) else {
-        return "0".repeat(digits as usize);
+        return String::new();
     };
     mac.update(&counter.to_be_bytes());
     let digest = mac.finalize().into_bytes();

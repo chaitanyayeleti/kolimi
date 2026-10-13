@@ -4,7 +4,6 @@
 //! route template, plus a handful of application counters. No file
 //! names, paths, or user identifiers are ever labeled.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
@@ -376,9 +375,6 @@ pub async fn handler(
             .into_response()
     }
 }
-
-/// Shared metrics handle for subsystems that count without an AppState.
-pub type SharedMetrics = Arc<Metrics>;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

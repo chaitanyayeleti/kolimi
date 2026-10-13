@@ -64,7 +64,7 @@ pub fn parse(header: &str, size: u64) -> RangeOutcome {
         if last < start {
             return RangeOutcome::Full;
         }
-        (last + 1).min(size)
+        last.saturating_add(1).min(size)
     };
     RangeOutcome::Satisfiable { start, end }
 }

@@ -15,7 +15,6 @@
 //! ephemeral public key and a ciphertext it cannot use.
 
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::Zeroize;
 
 use crate::{
     CryptoError, FileKey,
@@ -96,13 +95,6 @@ impl Identity {
 impl std::fmt::Debug for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Identity([redacted])")
-    }
-}
-
-impl Drop for Identity {
-    fn drop(&mut self) {
-        let mut bytes = self.0.to_bytes();
-        bytes.zeroize();
     }
 }
 
