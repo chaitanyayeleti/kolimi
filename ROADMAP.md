@@ -136,6 +136,7 @@ is silently skipped.
 | **Self-heal from replicas** | Scrubber detects corruption but single-node has no replica to heal from | Replication is out of v1 scope; document the single-node reality (done) and revisit with object storage |
 | **Restore drills in CI** | backup/verify exist; drills are manual | Add a CI job: seed → backup → destroy → restore → verify → byte-compare |
 | **Plugin SDK polish + signing** | Plugins are unsigned; SDK is one example | WIT docs, a plugin template, optional signature verification (cosign) before load |
+| **Brand mark refresh** | Current mark = a gradient cloud tile. A bolder "forge" style was suggested (a Flaticon *furnace* icon, ref kept local only). Flaticon free icons require attribution and may **not** be used as a logo/trademark, so third-party art will not be shipped | Design an **original** forge/ember (or keep the cloud) as SVG → re-render the web favicon + sidebar/login logo, the desktop app icon, and the tray icons; no attribution/license obligations |
 | **OTel traces** | ✅ **Landed**: OTLP/gRPC trace export behind the `otel` feature flag (`KOLIMI_OTEL_ENDPOINT`); request spans come from the existing `tracing`/`tower-http` instrumentation | — |
 
 ### Next (planned)
