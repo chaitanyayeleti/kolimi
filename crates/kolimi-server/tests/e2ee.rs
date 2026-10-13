@@ -354,6 +354,7 @@ async fn passkey_prf_unlocks_the_keyring() {
     ))
     .await
     .unwrap_err();
+    assert!(error.is_locked(), "{error}");
     assert!(error.to_string().contains("PRF"), "{error}");
 
     server.handle.abort();

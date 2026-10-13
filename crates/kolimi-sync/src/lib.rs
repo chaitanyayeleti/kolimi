@@ -271,9 +271,9 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
             .as_slice()
             .try_into()
             .map_err(|_| SyncError::E2ee("PRF secret must be exactly 32 bytes".to_string()))?;
-        keyring
-            .unlock_with_prf(&prf)
-            .map_err(|_| SyncError::Locked("passkey does not unlock the keyring".to_string()))?
+        keyring.unlock_with_prf(&prf).map_err(|_| {
+            SyncError::Locked("passkey (PRF) does not unlock the keyring".to_string())
+        })?
     } else if let Some(device) = load_device_file(&config.local_dir)? {
         // Enrolled device: unlock the master key from the local device file.
         let secret = hex_decode(&device.device_secret)?;
