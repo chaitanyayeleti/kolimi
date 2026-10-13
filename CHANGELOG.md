@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Web-UI multi-device management**: the Encryption dialog now has a
+  **Devices** panel — approve pending enrollments, revoke devices, and
+  enroll *this browser* as a new device (generating a device key and showing
+  an enrollment QR) that unlocks once approved elsewhere (RFC 0008).
+
 ## [0.1.8]
 
 ### Fixed

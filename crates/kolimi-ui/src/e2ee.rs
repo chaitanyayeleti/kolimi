@@ -162,3 +162,135 @@ async fn load_file(master: &MasterKey, path: &str) -> Result<(FileKey, Value), S
     }
     Ok((file_key, manifest.body))
 }
+
+/// The account's pending device enrollments (RFC 0008).
+pub async fn pending_enrollments() -> Result<Vec<Value>, String> {
+    let response = api::get("/api/e2ee/enrollments").await?;
+    if response.status != 200 {
+        return Err(response
+            .error()
+            .unwrap_or("could not load enrollments")
+            .to_string());
+    }
+    Ok(response.body["enrollments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// The account's registered devices.
+pub async fn devices() -> Result<Vec<Value>, String> {
+    let response = api::get("/api/e2ee/devices").await?;
+    if response.status != 200 {
+        return Err(response
+            .error()
+            .unwrap_or("could not load devices")
+            .to_string());
+    }
+    Ok(response.body["devices"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// Revokes a device record.
+pub async fn revoke_device(id: i64) -> Result<(), String> {
+    let response = api::delete(&format!("/api/e2ee/devices/{id}")).await?;
+    if response.status == 204 {
+        Ok(())
+    } else {
+        Err(response
+            .error()
+            .unwrap_or("could not revoke the device")
+            .to_string())
+    }
+}
+
+/// Approves a pending enrollment by wrapping the master key for its device.
+pub async fn approve_enrollment(
+    id: i64,
+    device_public_key_b64: &str,
+    master: &MasterKey,
+) -> Result<(), String> {
+    let public = STANDARD
+        .decode(device_public_key_b64)
+        .map_err(|_| "malformed device key".to_string())?;
+    let public: [u8; 32] = public
+        .try_into()
+        .map_err(|_| "device key must be 32 bytes".to_string())?;
+    let wrapped = kolimi_crypto::wrap_secret_for(&public, master.as_bytes())
+        .map_err(|_| "could not wrap the master key".to_string())?;
+    let response = api::send_json(
+        "POST",
+        &format!("/api/e2ee/enrollments/{id}/approve"),
+        &serde_json::json!({ "wrapped_master_key": STANDARD.encode(&wrapped) }),
+    )
+    .await?;
+    if response.status == 204 {
+        Ok(())
+    } else {
+        Err(response
+            .error()
+            .unwrap_or("could not approve the enrollment")
+            .to_string())
+    }
+}
+
+/// Starts enrolling this browser as a new device: generates a device key,
+/// creates the enrollment, and returns its id plus the device secret to
+/// poll with (kept in memory only).
+pub async fn start_enrollment(name: &str) -> Result<(i64, [u8; 32]), String> {
+    let device = kolimi_crypto::Identity::generate()
+        .map_err(|_| "could not generate a device key".to_string())?;
+    let response = api::send_json(
+        "POST",
+        "/api/e2ee/enrollments",
+        &serde_json::json!({
+            "device_name": name,
+            "device_public_key": STANDARD.encode(device.public_key()),
+        }),
+    )
+    .await?;
+    if response.status != 200 {
+        return Err(response
+            .error()
+            .unwrap_or("could not start the enrollment")
+            .to_string());
+    }
+    let id = response.body["id"]
+        .as_i64()
+        .ok_or("malformed enrollment response")?;
+    Ok((id, device.private_bytes()))
+}
+
+/// Polls an enrollment once; returns the unlocked master key once approved.
+pub async fn poll_enrollment(id: i64, secret: &[u8; 32]) -> Result<Option<MasterKey>, String> {
+    let response = api::get(&format!("/api/e2ee/enrollments/{id}")).await?;
+    if response.status != 200 {
+        return Err(response
+            .error()
+            .unwrap_or("could not poll the enrollment")
+            .to_string());
+    }
+    if response.body["approved"].as_bool() != Some(true) {
+        return Ok(None);
+    }
+    let wrapped = STANDARD
+        .decode(
+            response.body["wrapped_master_key"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+        .map_err(|_| "malformed wrapped key".to_string())?;
+    let umk = kolimi_crypto::unwrap_secret(secret, &wrapped)
+        .map_err(|_| "could not unwrap the master key".to_string())?;
+    Ok(Some(MasterKey::from_bytes(umk)))
+}
+
+/// Renders `data` as an inline SVG QR code (empty string on failure).
+pub fn qr_svg(data: &str) -> String {
+    match qrcode::QrCode::new(data.as_bytes()) {
+        Ok(code) => code.render::<qrcode::render::svg::Color>().build(),
+        Err(_) => String::new(),
+    }
+}

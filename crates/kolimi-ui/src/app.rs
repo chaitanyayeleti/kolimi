@@ -1751,8 +1751,30 @@ fn AdminDialog(on_close: Callback<()>) -> impl IntoView {
 fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> impl IntoView {
     let passphrase = RwSignal::new(String::new());
     let error = RwSignal::new(String::new());
+    let notice = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
+    let enrollments = RwSignal::new(Vec::<Value>::new());
+    let devices = RwSignal::new(Vec::<Value>::new());
+    let device_name = RwSignal::new(String::new());
+    let enrolling = RwSignal::new(Option::<(i64, [u8; 32])>::None);
     let close = move |_| on_close.run(());
+
+    let load_devices = Callback::new(move |_: ()| {
+        spawn_local(async move {
+            if let Ok(list) = crate::e2ee::pending_enrollments().await {
+                enrollments.set(list);
+            }
+            if let Ok(list) = crate::e2ee::devices().await {
+                devices.set(list);
+            }
+        });
+    });
+    Effect::new(move |_| {
+        if master.get().is_some() {
+            load_devices.run(());
+        }
+    });
+
     let unlock = move |_| {
         let secret = passphrase.get_untracked();
         if secret.is_empty() {
@@ -1765,7 +1787,6 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                 Ok(key) => {
                     master.set(Some(key));
                     busy.set(false);
-                    on_close.run(());
                 }
                 Err(e) => {
                     busy.set(false);
@@ -1774,6 +1795,75 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
             }
         });
     };
+
+    let approve = move |id: i64, key: String| {
+        let Some(unlocked) = master.get_untracked() else {
+            return;
+        };
+        spawn_local(async move {
+            match crate::e2ee::approve_enrollment(id, &key, &unlocked).await {
+                Ok(()) => {
+                    error.set(String::new());
+                    notice.set("Device approved".to_string());
+                    load_devices.run(());
+                }
+                Err(e) => error.set(e),
+            }
+        });
+    };
+
+    let revoke = move |id: i64| {
+        spawn_local(async move {
+            match crate::e2ee::revoke_device(id).await {
+                Ok(()) => {
+                    error.set(String::new());
+                    notice.set("Device revoked".to_string());
+                    load_devices.run(());
+                }
+                Err(e) => error.set(e),
+            }
+        });
+    };
+
+    let start_enroll = move |_| {
+        let name = device_name.get_untracked().trim().to_string();
+        if name.is_empty() {
+            error.set("Enter a name for this device".to_string());
+            return;
+        }
+        spawn_local(async move {
+            match crate::e2ee::start_enrollment(&name).await {
+                Ok((id, secret)) => {
+                    error.set(String::new());
+                    notice.set(
+                        "Scan or note the code, then approve it from another unlocked device."
+                            .to_string(),
+                    );
+                    enrolling.set(Some((id, secret)));
+                }
+                Err(e) => error.set(e),
+            }
+        });
+    };
+
+    let finish_enroll = move |_| {
+        let Some((id, secret)) = enrolling.get_untracked() else {
+            return;
+        };
+        spawn_local(async move {
+            match crate::e2ee::poll_enrollment(id, &secret).await {
+                Ok(Some(key)) => {
+                    master.set(Some(key));
+                    enrolling.set(None);
+                    notice.set("This browser is now enrolled".to_string());
+                }
+                Ok(None) => notice
+                    .set("Not approved yet — approve it on another device, then retry".to_string()),
+                Err(e) => error.set(e),
+            }
+        });
+    };
+
     view! {
         <div class="backdrop">
             <div class="card modal">
@@ -1784,35 +1874,145 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                     </button>
                 </div>
                 <p class="muted">
-                    "Unlock your keyring to decrypt encrypted files in this browser. "
-                    "The passphrase is used locally and is never sent to the server."
+                    "Your passphrase is used locally and is never sent to the server."
                 </p>
-                <label>
-                    "Passphrase"
-                    <input
-                        type="password"
-                        autocomplete="off"
-                        prop:value=move || passphrase.get()
-                        on:input=move |ev| passphrase.set(event_target_value(&ev))
-                    />
-                </label>
-                <div class="row-actions">
-                    <button class="primary" disabled=move || busy.get() on:click=unlock>
-                        <Icon name="lock"/>
-                        {move || if busy.get() { "Unlocking…" } else { "Unlock" }}
-                    </button>
-                    <Show when=move || master.get().is_some()>
+                <Show when=move || master.get().is_none()>
+                    <label>
+                        "Passphrase"
+                        <input
+                            type="password"
+                            autocomplete="off"
+                            prop:value=move || passphrase.get()
+                            on:input=move |ev| passphrase.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <div class="row-actions">
+                        <button class="primary" disabled=move || busy.get() on:click=unlock>
+                            <Icon name="lock"/>
+                            {move || if busy.get() { "Unlocking…" } else { "Unlock" }}
+                        </button>
+                    </div>
+                </Show>
+                <Show when=move || master.get().is_some()>
+                    <p class="notice">"Keyring unlocked for this browser."</p>
+                    <div class="row-actions">
                         <button
                             class="ghost"
                             on:click=move |_| {
                                 master.set(None);
-                                on_close.run(());
+                                notice.set(String::new());
                             }
                         >
                             "Lock again"
                         </button>
+                    </div>
+
+                    <h3>"Pending enrollments"</h3>
+                    <ul class="shares">
+                        <For
+                            each=move || enrollments.get()
+                            key=|e| e["id"].as_i64().unwrap_or(0)
+                            children=move |entry| {
+                                let id = entry["id"].as_i64().unwrap_or(0);
+                                let name = entry["device_name"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let key = entry["device_public_key"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let k = key.clone();
+                                view! {
+                                    <li class="file">
+                                        <span class="file-body">
+                                            <span class="file-name">{name}</span>
+                                            <span class="file-meta">
+                                                <span class="muted">"enrollment " {id}</span>
+                                            </span>
+                                        </span>
+                                        <span class="file-actions">
+                                            <button on:click=move |_| approve(id, k.clone())>
+                                                "Approve"
+                                            </button>
+                                        </span>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+
+                    <h3>"Devices"</h3>
+                    <ul class="shares">
+                        <For
+                            each=move || devices.get()
+                            key=|d| d["id"].as_i64().unwrap_or(0)
+                            children=move |device| {
+                                let id = device["id"].as_i64().unwrap_or(0);
+                                let name =
+                                    device["name"].as_str().unwrap_or_default().to_string();
+                                view! {
+                                    <li class="file">
+                                        <span class="file-body">
+                                            <span class="file-name">{name}</span>
+                                        </span>
+                                        <span class="file-actions">
+                                            <button
+                                                class="icon-btn"
+                                                title="Revoke device"
+                                                on:click=move |_| revoke(id)
+                                            >
+                                                <Icon name="trash"/>
+                                            </button>
+                                        </span>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+                </Show>
+
+                <h3>"Add this browser as a device"</h3>
+                <p class="muted">
+                    "Creates an enrollment; approve it on another unlocked device, "
+                    "then unlock here without retyping your passphrase."
+                </p>
+                <label>
+                    "Device name"
+                    <input
+                        type="text"
+                        autocomplete="off"
+                        prop:value=move || device_name.get()
+                        on:input=move |ev| device_name.set(event_target_value(&ev))
+                    />
+                </label>
+                <div class="row-actions">
+                    <button on:click=start_enroll>"Start enrollment"</button>
+                    <Show when=move || enrolling.get().is_some()>
+                        <button class="primary" on:click=finish_enroll>"Unlock now"</button>
                     </Show>
                 </div>
+                <Show when=move || enrolling.get().is_some()>
+                    {move || {
+                        enrolling
+                            .get()
+                            .map(|(id, _)| {
+                                view! {
+                                    <div class="enroll-qr">
+                                        <div
+                                            class="qr"
+                                            inner_html=crate::e2ee::qr_svg(
+                                                &format!("kolimi-enroll:{id}"),
+                                            )
+                                        ></div>
+                                        <p class="muted">"Enrollment " {id}</p>
+                                    </div>
+                                }
+                            })
+                    }}
+                </Show>
+
+                <p class="notice">{move || notice.get()}</p>
                 <p class="error">{move || error.get()}</p>
             </div>
         </div>

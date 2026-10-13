@@ -2819,6 +2819,7 @@ dependencies = [
  "kolimi-crypto",
  "leptos",
  "percent-encoding",
+ "qrcode",
  "serde",
  "serde_json",
  "wasm-bindgen",

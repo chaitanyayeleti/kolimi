@@ -1394,3 +1394,25 @@ textarea:focus {
 }
 
 
+.enroll-qr {
+  text-align: center;
+  margin: 10px 0;
+}
+
+.qr {
+  display: inline-block;
+  padding: 10px;
+  background: #ffffff;
+  border-radius: 10px;
+}
+
+.qr svg {
+  display: block;
+  width: 180px;
+  height: 180px;
+}
+
+.modal h3 {
+  margin: 16px 0 6px;
+  font-size: 14px;
+}
