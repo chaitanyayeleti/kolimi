@@ -12,6 +12,7 @@ WORK="${LITMUS_WORK:-/tmp/kolimi-litmus-build}"
 PORT="${LITMUS_PORT:-18099}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA="$(mktemp -d)"
+trap 'rm -rf "$DATA"' EXIT
 SERVER_PID=""
 
 cleanup() {
@@ -55,7 +56,8 @@ fi
 # --- server ---
 cd "$ROOT"
 cargo build -p kolimi-server
-KOLIMI_DATA="$DATA" "$ROOT/target/debug/kolimi-server" user add alice --password "litmus pass" >/dev/null
+LITMUS_PASSWORD="litmus pass"
+echo "$LITMUS_PASSWORD" | KOLIMI_DATA="$DATA" "$ROOT/target/debug/kolimi-server" user add alice >/dev/null
 "$ROOT/target/debug/kolimi-server" serve --bind "127.0.0.1:$PORT" --data "$DATA" \
     >"$DATA/server.log" 2>&1 &
 SERVER_PID=$!
@@ -72,7 +74,7 @@ URL="http://127.0.0.1:$PORT/dav/"
 STATUS=0
 cd "$WORK/litmus-$LITMUS_VERSION"
 for suite in basic copymove props http locks; do
-    OUTPUT="$("./$suite" "$URL" alice "litmus pass" 2>&1 || true)"
+    OUTPUT="$("./$suite" "$URL" alice "$LITMUS_PASSWORD" 2>&1 || true)"
     SUMMARY="$(echo "$OUTPUT" | grep -E "summary" | tail -1)"
     echo "$suite: $SUMMARY"
     if ! echo "$SUMMARY" | grep -q "0 failed"; then

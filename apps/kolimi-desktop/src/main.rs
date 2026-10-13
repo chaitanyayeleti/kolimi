@@ -206,6 +206,8 @@ struct V1Config {
 /// Secrets kept in the OS keychain.
 #[derive(Serialize, Deserialize)]
 struct Secrets {
+    /// Empty when the account is signed out but the E2EE passphrase is kept.
+    #[serde(default)]
     password: String,
     #[serde(default)]
     e2ee_passphrase: Option<String>,
@@ -241,9 +243,26 @@ fn store_secrets(key: &str, secrets: &Secrets) -> SecretStorage {
 
 fn delete_secrets(key: &str) {
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, key) {
-        let _ = entry.delete_credential();
+        if let Err(error) = entry.delete_credential() {
+            eprintln!("kolimi-desktop: failed to delete keychain entry for {key}: {error}");
+        }
     }
     keyctl::session_delete(&session_description(key));
+}
+
+/// Forgets an account's password while **preserving its E2EE passphrase**, so
+/// signing out never destroys the key needed to decrypt encrypted folders.
+/// If there is no passphrase to keep, the entry is removed entirely.
+fn forget_password(key: &str) {
+    let Some(mut secrets) = keyring_get(key) else {
+        return;
+    };
+    if secrets.e2ee_passphrase.is_none() {
+        delete_secrets(key);
+        return;
+    }
+    secrets.password.clear();
+    store_secrets(key, &secrets);
 }
 
 fn secret_service_get(key: &str) -> Option<String> {
@@ -438,13 +457,6 @@ fn normalize_remote(remote: &str) -> String {
     }
 }
 
-fn host(server: &str) -> String {
-    Url::parse(server)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .unwrap_or_else(|| server.to_string())
-}
-
 fn short_dir(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
@@ -488,6 +500,11 @@ fn migrate_v1(v1: V1Config) -> Settings {
         // under the new key, so no stale copy is left in the keychain.
         if new_key != v1.server && stored != SecretStorage::File {
             delete_secrets(&v1.server);
+        }
+        // If storage failed entirely, clean up any partial writes to avoid
+        // secrets existing in both old and new keys.
+        if stored == SecretStorage::File {
+            delete_secrets(&new_key);
         }
     }
     settings
@@ -577,21 +594,20 @@ fn open_folder(path: &str) {
     } else {
         "xdg-open"
     };
-    let _ = std::process::Command::new(opener).arg(path).spawn();
-}
-
-fn downloads_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|home| PathBuf::from(home).join("Downloads"))
+    if let Err(error) = std::process::Command::new(opener).arg(path).spawn() {
+        eprintln!("kolimi-desktop: failed to open folder {path}: {error}");
+    }
 }
 
 fn notify_user(summary: &str, body: &str) {
-    let _ = notify_rust::Notification::new()
+    if let Err(error) = notify_rust::Notification::new()
         .appname("Kolimi")
         .summary(summary)
         .body(body)
-        .show();
+        .show()
+    {
+        eprintln!("kolimi-desktop: failed to show notification: {error}");
+    }
 }
 
 fn set_tray_icon(app: &AppHandle, state: &str) {
@@ -608,8 +624,12 @@ fn set_tray_icon(app: &AppHandle, state: &str) {
     if let Ok(icon) = Image::from_bytes(bytes)
         && let Some(tray) = app.tray_by_id("main")
     {
-        let _ = tray.set_icon(Some(icon));
-        let _ = tray.set_tooltip(Some(tooltip));
+        if let Err(error) = tray.set_icon(Some(icon)) {
+            eprintln!("kolimi-desktop: failed to set tray icon: {error}");
+        }
+        if let Err(error) = tray.set_tooltip(Some(tooltip)) {
+            eprintln!("kolimi-desktop: failed to set tray tooltip: {error}");
+        }
     }
 }
 
@@ -666,7 +686,10 @@ fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
         .on_download(|webview, event| {
             match event {
                 DownloadEvent::Requested { destination, .. } => {
-                    if let Some(dir) = downloads_dir() {
+                    if let Some(dir) = std::env::var("HOME")
+                        .ok()
+                        .map(|home| PathBuf::from(home).join("Downloads"))
+                    {
                         let _ = std::fs::create_dir_all(&dir);
                         if let Some(name) = destination.file_name() {
                             *destination = dir.join(name);
@@ -719,10 +742,14 @@ fn open_settings(app: &AppHandle) {
         let _ = window.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
-        .title("Kolimi — Accounts & Sync")
-        .inner_size(680.0, 720.0)
-        .build();
+    if let Err(error) =
+        WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+            .title("Kolimi — Accounts & Sync")
+            .inner_size(680.0, 720.0)
+            .build()
+    {
+        eprintln!("kolimi-desktop: failed to open settings window: {error}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -752,11 +779,17 @@ fn run_sync(app: AppHandle) {
     let mut jobs: Vec<(String, String, kolimi_sync::SyncConfig)> = Vec::new();
     let mut startup_errors: Vec<String> = Vec::new();
     for account in &settings.accounts {
-        let Some(secrets) = keyring_get(&account_key(&account.server, &account.username)) else {
+        // An entry with an empty password means "signed out, passphrase kept".
+        let signed_in = keyring_get(&account_key(&account.server, &account.username))
+            .filter(|secrets| !secrets.password.is_empty());
+        let Some(secrets) = signed_in else {
             startup_errors.push(format!(
                 "{}@{}: not signed in",
                 account.username,
-                host(&account.server)
+                Url::parse(&account.server)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_string))
+                    .unwrap_or_else(|| account.server.clone())
             ));
             continue;
         };
@@ -863,7 +896,9 @@ fn get_settings(app: AppHandle) -> SettingsView {
         .map(|account| {
             let secrets = keyring_get(&account_key(&account.server, &account.username));
             AccountView {
-                signed_in: secrets.is_some(),
+                signed_in: secrets
+                    .as_ref()
+                    .is_some_and(|secrets| !secrets.password.is_empty()),
                 has_e2ee: account
                     .pairs
                     .iter()
@@ -916,7 +951,7 @@ async fn sign_in(
             e2ee_passphrase,
         },
     );
-    {
+    let settings = {
         let state = app.state::<DesktopState>();
         let mut settings = state.settings.lock().unwrap();
         if !settings
@@ -930,17 +965,17 @@ async fn sign_in(
                 pairs: Vec::new(),
             });
         }
-    }
-    let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+        settings.clone()
+    };
     save_settings_file(&settings)?;
     run_sync(app);
     Ok(())
 }
 
-/// Forget an account's password (keeps its configuration).
+/// Forget an account's password (keeps its configuration and E2EE passphrase).
 #[tauri::command]
 fn sign_out(app: AppHandle, server: String, username: String) {
-    delete_secrets(&account_key(&server, &username));
+    forget_password(&account_key(&server, &username));
     run_sync(app);
 }
 
@@ -948,14 +983,14 @@ fn sign_out(app: AppHandle, server: String, username: String) {
 #[tauri::command]
 fn remove_account(app: AppHandle, server: String, username: String) -> Result<(), String> {
     delete_secrets(&account_key(&server, &username));
-    {
+    let settings = {
         let state = app.state::<DesktopState>();
         let mut settings = state.settings.lock().unwrap();
         settings
             .accounts
             .retain(|account| !(account.server == server && account.username == username));
-    }
-    let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+        settings.clone()
+    };
     save_settings_file(&settings)?;
     run_sync(app);
     Ok(())
@@ -975,7 +1010,7 @@ fn add_pair(
         return Err("directory is required".to_string());
     }
     std::fs::create_dir_all(&local).map_err(|error| format!("cannot create {local}: {error}"))?;
-    {
+    let settings = {
         let state = app.state::<DesktopState>();
         let mut settings = state.settings.lock().unwrap();
         let account = settings
@@ -991,8 +1026,8 @@ fn add_pair(
             remote: normalize_remote(&remote),
             encrypted_roots: Vec::new(),
         });
-    }
-    let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+        settings.clone()
+    };
     save_settings_file(&settings)?;
     run_sync(app);
     Ok(())
@@ -1006,7 +1041,7 @@ fn remove_pair(
     username: String,
     dir: String,
 ) -> Result<(), String> {
-    {
+    let settings = {
         let state = app.state::<DesktopState>();
         let mut settings = state.settings.lock().unwrap();
         let account = settings
@@ -1015,8 +1050,8 @@ fn remove_pair(
             .find(|account| account.server == server && account.username == username)
             .ok_or_else(|| "account not found".to_string())?;
         account.pairs.retain(|pair| pair.local_dir != dir);
-    }
-    let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+        settings.clone()
+    };
     save_settings_file(&settings)?;
     run_sync(app);
     Ok(())
@@ -1038,7 +1073,7 @@ fn update_pair(
         return Err("directory is required".to_string());
     }
     std::fs::create_dir_all(&local).map_err(|error| format!("cannot create {local}: {error}"))?;
-    {
+    let settings = {
         let state = app.state::<DesktopState>();
         let mut settings = state.settings.lock().unwrap();
         let account = settings
@@ -1060,8 +1095,8 @@ fn update_pair(
             .ok_or_else(|| "directory not found".to_string())?;
         pair.local_dir = local;
         pair.remote = normalize_remote(&remote);
-    }
-    let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+        settings.clone()
+    };
     save_settings_file(&settings)?;
     run_sync(app);
     Ok(())
@@ -1093,11 +1128,12 @@ fn set_e2ee_passphrase(
 #[tauri::command]
 fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     set_autostart(enabled)?;
-    {
+    let settings = {
         let state = app.state::<DesktopState>();
-        state.settings.lock().unwrap().autostart = enabled;
-    }
-    let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+        let mut settings = state.settings.lock().unwrap();
+        settings.autostart = enabled;
+        settings.clone()
+    };
     save_settings_file(&settings)?;
     Ok(())
 }

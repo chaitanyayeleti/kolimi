@@ -218,13 +218,20 @@ impl PluginHost {
                     }
                 };
                 let kv_path = dir.join(format!("{stem}.kv.json"));
-                let kv = std::fs::read(&kv_path)
-                    .ok()
-                    .and_then(|bytes| {
-                        serde_json::from_slice::<BTreeMap<String, Vec<u8>>>(&bytes).ok()
-                    })
-                    .unwrap_or_default();
+                let kv = std::fs::read(&kv_path).ok().and_then(|bytes| {
+                    serde_json::from_slice::<BTreeMap<String, Vec<u8>>>(&bytes).ok()
+                });
+                let kv = match kv {
+                    Some(kv) => kv,
+                    None => {
+                        tracing::warn!(plugin = %meta.name, path = %kv_path.display(), "KV file missing or corrupted; starting with empty store");
+                        BTreeMap::new()
+                    }
+                };
                 tracing::info!(plugin = %meta.name, version = %meta.version, "plugin loaded");
+                if plugins.contains_key(&meta.name) {
+                    tracing::warn!(plugin = %meta.name, "duplicate plugin name; previous plugin overwritten");
+                }
                 plugins.insert(
                     meta.name.clone(),
                     Loaded {
@@ -317,8 +324,10 @@ impl PluginHost {
             .kolimi_plugin_api()
             .call_handle(&mut store, &request)
             .map_err(|error| {
-                let out_of_fuel =
-                    error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel);
+                let out_of_fuel = matches!(
+                    error.downcast_ref::<wasmtime::Trap>(),
+                    Some(wasmtime::Trap::OutOfFuel)
+                );
                 if out_of_fuel {
                     PluginError::Trap(format!("{name}: fuel exhausted"))
                 } else {

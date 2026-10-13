@@ -108,11 +108,20 @@ fn is_image_name(name: &str) -> bool {
     matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp")
 }
 
-fn encode(value: &str) -> String {
+/// Sanitizes SVG content to prevent XSS via `inner_html`.
+fn sanitize_svg(svg: &str) -> String {
+    svg.replace("<script", "<!-script")
+        .replace("</script>", "<-/script>")
+        .replace("onload=", "data-onload=")
+        .replace("onerror=", "data-onerror=")
+        .replace("onclick=", "data-onclick=")
+}
+
+pub fn encode(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
-fn encode_path(path: &str) -> String {
+pub fn encode_path(path: &str) -> String {
     path.split('/')
         .map(|segment| utf8_percent_encode(segment, NON_ALPHANUMERIC).to_string())
         .collect::<Vec<_>>()
@@ -157,7 +166,7 @@ fn parse_trash(body: &Value) -> Vec<TrashItem> {
         .unwrap_or_default()
 }
 
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut value = bytes as f64;
     let mut unit = 0;
@@ -804,7 +813,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     // Moves `entry` into `dest_dir` (drag-to-move onto a folder or crumb).
     let move_into = move |entry: Entry, dest_dir: String| {
         let source = entry.path.clone();
-        let destination = format!("/{}/{}", dest_dir.trim_matches('/'), entry.name);
+        let destination = format!("{}/{}", dest_dir.trim_end_matches('/'), entry.name);
         if destination == source {
             return;
         }
@@ -855,7 +864,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         spawn_local(async move {
             for target in &paths {
                 let name = target.rsplit('/').next().unwrap_or("file");
-                let destination = format!("/{}/{}", dest.trim_matches('/'), name);
+                let destination = format!("{}/{}", dest.trim_end_matches('/'), name);
                 let source = format!("/dav{}", encode_path(target));
                 let dav_dest = format!("/dav{}", encode_path(&destination));
                 let _ = api::dav("MOVE", &source, None, &[("destination", &dav_dest)]).await;
@@ -1085,7 +1094,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                     .get()
                                     .chars()
                                     .next()
-                                    .map(|c| c.to_ascii_uppercase().to_string())
+                                    .map(|c| c.to_uppercase().to_string())
                                     .unwrap_or_else(|| "?".to_string())
                             }}
                         </span>
@@ -1991,7 +2000,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         let delete_e = entry.clone();
                         view! {
                             <div class="ctx-scrim" on:click=move |_| context_menu.set(None)></div>
-                            <div class="ctx-menu" style=format!("left:{x}px; top:{y}px;")>
+                            <div class="ctx-menu" style=format!("left:{}px; top:{}px;", x.max(0), y.max(0))>
                                 {is_dir
                                     .then(|| {
                                         view! {
@@ -2921,7 +2930,7 @@ fn PasskeysDialog(on_close: Callback<()>) -> impl IntoView {
                             let secret = begin["secret"].as_str().unwrap_or_default().to_string();
                             view! {
                                 <div class="totp-enroll">
-                                    <div class="qr" inner_html=svg></div>
+                                    <div class="qr" inner_html=sanitize_svg(&svg)></div>
                                     <p class="muted">
                                         "Scan the QR code, or add this secret manually:"
                                     </p>
@@ -3182,7 +3191,7 @@ fn ShareDialog(
                                 <div class="created">
                                     <p>"Link created:"</p>
                                     <code>{full.clone()}</code>
-                                    <div class="qr" inner_html=qr></div>
+                                    <div class="qr" inner_html=sanitize_svg(&qr)></div>
                                     {password
                                         .map(|password| {
                                             view! { <p>{format!("Password: {password}")}</p> }

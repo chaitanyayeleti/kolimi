@@ -174,7 +174,6 @@ pub fn parse_propfind(body: &[u8]) -> Result<RequestedProps, ()> {
     let mut only: Vec<RequestedProp> = Vec::new();
     let mut saw_children = false;
     let mut names_mode = false;
-    let mut allprop_saw = false;
     let mut saw_root = false;
 
     loop {
@@ -196,8 +195,6 @@ pub fn parse_propfind(body: &[u8]) -> Result<RequestedProps, ()> {
                     });
                 } else if local == "propname" && ns.as_deref() == Some(DAV_NS) {
                     names_mode = true;
-                } else if local == "allprop" && ns.as_deref() == Some(DAV_NS) {
-                    allprop_saw = true;
                 }
                 if stack.is_empty() {
                     if local != "propfind" || ns.as_deref() != Some(DAV_NS) || saw_root {
@@ -225,8 +222,6 @@ pub fn parse_propfind(body: &[u8]) -> Result<RequestedProps, ()> {
                     });
                 } else if local == "propname" && ns.as_deref() == Some(DAV_NS) {
                     names_mode = true;
-                } else if local == "allprop" && ns.as_deref() == Some(DAV_NS) {
-                    allprop_saw = true;
                 }
                 if stack.is_empty() {
                     return Err(());
@@ -252,7 +247,6 @@ pub fn parse_propfind(body: &[u8]) -> Result<RequestedProps, ()> {
     } else if saw_children {
         Ok(RequestedProps::Only(only))
     } else {
-        let _ = allprop_saw;
         Ok(RequestedProps::All)
     }
 }

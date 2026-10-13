@@ -79,7 +79,7 @@ tempfile = "3"
 subtle = "2"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 zeroize = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "io-util", "time", "process", "sync"] }
 tower = { version = "0.5", features = ["util"] }

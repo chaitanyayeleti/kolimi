@@ -18,7 +18,7 @@ echo "building kolimi-ui for $TARGET (release)"
 cargo build -p kolimi-ui --target "$TARGET" --release
 
 # wasm-bindgen CLI must match the wasm-bindgen crate version exactly.
-WB_VERSION=$(sed -n '/name = "wasm-bindgen"/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock | head -1)
+WB_VERSION=$(awk '/name = "wasm-bindgen"/{found=1; next} found && /^version = /{gsub(/"/, "", $3); print $3; exit}' Cargo.lock)
 if [[ -z "$WB_VERSION" ]]; then
     echo "error: could not determine wasm-bindgen version from Cargo.lock" >&2
     exit 1
@@ -41,4 +41,6 @@ cp crates/kolimi-ui/index.html crates/kolimi-ui/style.css crates/kolimi-ui/boots
 cp crates/kolimi-ui/favicon.svg crates/kolimi-ui/favicon-32.png crates/kolimi-ui/apple-touch-icon.png "$OUT/"
 
 echo "UI staged in $OUT"
-ls -lh "$OUT"
+if [ "${VERBOSE:-0}" = 1 ]; then
+    ls -lh "$OUT"
+fi

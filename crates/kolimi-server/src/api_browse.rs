@@ -22,7 +22,7 @@ pub struct BrowseQuery {
     path: String,
 }
 
-fn root_path() -> String {
+pub(crate) fn root_path() -> String {
     "/".to_string()
 }
 

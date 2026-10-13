@@ -62,10 +62,7 @@ fn vfs_error_response(e: VfsError) -> Response {
         | VfsError::ParentNotCollection => StatusCode::BAD_REQUEST,
         VfsError::AlreadyExists | VfsError::Conflict(_) => StatusCode::CONFLICT,
         VfsError::MissingChunk(_) => StatusCode::CONFLICT,
-        VfsError::Store(kolimi_store::StoreError::TooLarge { .. })
-        | VfsError::Store(kolimi_store::StoreError::QuotaExceeded { .. }) => {
-            StatusCode::PAYLOAD_TOO_LARGE
-        }
+        VfsError::Store(kolimi_store::StoreError::TooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, Json(json!({ "error": e.to_string() }))).into_response()

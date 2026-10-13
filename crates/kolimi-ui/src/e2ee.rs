@@ -3,17 +3,13 @@
 //! The server only ever serves ciphertext chunks and wrapped keys; all
 //! decryption happens here with `kolimi-crypto` compiled to wasm.
 
+use crate::app::encode;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use kolimi_crypto::{FileKey, Keyring, MasterKey};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
 use wasm_bindgen::JsCast;
 
 use crate::api;
-
-fn encode(value: &str) -> String {
-    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
-}
 
 /// Triggers a browser download of `bytes` as `name`.
 pub fn save_bytes(name: &str, bytes: &[u8]) {

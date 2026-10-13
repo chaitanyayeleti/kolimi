@@ -198,7 +198,7 @@ fn decode_basic(encoded: &str) -> Option<(String, String)> {
     Some((username.to_string(), password.to_string()))
 }
 
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     for value in headers.get_all(header::COOKIE) {
         let Ok(value) = value.to_str() else {
             continue;

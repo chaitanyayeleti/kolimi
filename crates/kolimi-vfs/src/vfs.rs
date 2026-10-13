@@ -80,10 +80,19 @@ impl Node {
 }
 
 /// The virtual filesystem: a per-user tree over the database and blob store.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Vfs {
     pub(crate) db: Db,
     pub(crate) store: BlobStore,
+}
+
+impl Clone for Vfs {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            store: self.store.clone(),
+        }
+    }
 }
 
 impl Vfs {
@@ -229,7 +238,7 @@ impl Vfs {
     }
 
     /// Caps a requested upload size to the user's remaining quota, returning
-    /// `QuotaExceeded` when no room remains.
+    /// `TooLarge` when no room remains.
     pub(crate) async fn quota_cap(&self, user_id: i64, requested: u64) -> Result<u64, VfsError> {
         let (quota, used) = self.quota_state(user_id).await?;
         if quota == 0 {
@@ -420,6 +429,9 @@ impl Vfs {
         }
         let content_id = node.content_id.ok_or(VfsError::NotFound)?;
         let manifest = self.store.get_manifest(owner_id, &content_id).await?;
+        if max_bytes == 0 {
+            return Ok(Vec::new());
+        }
         let mut out = Vec::new();
         for chunk in &manifest.chunks {
             if out.len() >= max_bytes {
@@ -955,7 +967,7 @@ pub(crate) fn content_id_from_bytes(bytes: &[u8]) -> Result<Hash, VfsError> {
 
 /// Builds the storage-quota error.
 fn quota_error(limit: u64) -> VfsError {
-    VfsError::Store(kolimi_store::StoreError::QuotaExceeded { limit })
+    VfsError::Store(kolimi_store::StoreError::TooLarge { limit })
 }
 
 pub(crate) fn to_db(node: &Node) -> DbNode {
@@ -1023,7 +1035,7 @@ mod tests {
         assert!(
             matches!(
                 &result,
-                Err(VfsError::Store(kolimi_store::StoreError::QuotaExceeded {
+                Err(VfsError::Store(kolimi_store::StoreError::TooLarge {
                     limit: 1024
                 }))
             ),

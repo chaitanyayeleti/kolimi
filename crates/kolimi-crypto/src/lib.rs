@@ -35,7 +35,8 @@ pub use identity::{
     wrap_secret_with_ephemeral_nonce, wrap_with_ephemeral, wrap_with_ephemeral_nonce,
 };
 pub use keyring::{
-    Keyring, Wrap, generate_recovery_code, recovery_code_display, recovery_code_parse,
+    Keyring, Wrap, generate_recovery_code, hex_decode, hex_encode, recovery_code_display,
+    recovery_code_parse,
 };
 pub use keys::{
     Argon2Params, kek_from_passphrase, kek_from_prf, kek_from_recovery_code, wrap_with_nonce,

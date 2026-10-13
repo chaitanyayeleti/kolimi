@@ -159,7 +159,9 @@ impl Keyring {
             t_cost: *t_cost,
             p_cost: *p_cost,
         };
-        let kek = Zeroizing::new(kek_from_passphrase(passphrase, salt, &params)?);
+        let kek = Zeroizing::new(
+            kek_from_passphrase(passphrase, salt, &params).map_err(|_| CryptoError::Unlock)?,
+        );
         let bytes = unwrap(&kek, wrapped, PASSPHRASE_AAD).map_err(|_| CryptoError::Unlock)?;
         Ok(MasterKey::from_bytes(bytes))
     }
@@ -174,7 +176,8 @@ impl Keyring {
         else {
             return Err(CryptoError::Unlock);
         };
-        let kek = Zeroizing::new(kek_from_recovery_code(recovery_code)?);
+        let kek =
+            Zeroizing::new(kek_from_recovery_code(recovery_code).map_err(|_| CryptoError::Unlock)?);
         let bytes = unwrap(&kek, wrapped, RECOVERY_AAD).map_err(|_| CryptoError::Unlock)?;
         Ok(MasterKey::from_bytes(bytes))
     }
@@ -185,7 +188,7 @@ impl Keyring {
         else {
             return Err(CryptoError::Unlock);
         };
-        let kek = Zeroizing::new(kek_from_prf(prf_output)?);
+        let kek = Zeroizing::new(kek_from_prf(prf_output).map_err(|_| CryptoError::Unlock)?);
         let bytes = unwrap(&kek, wrapped, PRF_AAD).map_err(|_| CryptoError::Unlock)?;
         Ok(MasterKey::from_bytes(bytes))
     }
@@ -244,7 +247,7 @@ pub fn recovery_code_parse(text: &str) -> Result<[u8; RECOVERY_CODE_LEN], Crypto
         .map_err(|_| CryptoError::Malformed("recovery code length".to_string()))
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push_str(&format!("{byte:02x}"));
@@ -252,7 +255,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn hex_decode(text: &str) -> Result<Vec<u8>, CryptoError> {
+pub fn hex_decode(text: &str) -> Result<Vec<u8>, CryptoError> {
     if !text.len().is_multiple_of(2) {
         return Err(CryptoError::Malformed("hex length".to_string()));
     }

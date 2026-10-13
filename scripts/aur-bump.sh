@@ -21,4 +21,9 @@ sed -i "s/^pkgver=.*/pkgver=${ver}/" "$pkgbuild"
 sed -i "s/^pkgrel=.*/pkgrel=1/" "$pkgbuild"
 sed -i "s/^sha256sums=.*/sha256sums=('${sum}')/" "$pkgbuild"
 
+# Verify the sed commands actually modified the file
+grep -q "^pkgver=${ver}$" "$pkgbuild" || { echo "error: pkgver not updated" >&2; exit 1; }
+grep -q "^pkgrel=1$" "$pkgbuild" || { echo "error: pkgrel not updated" >&2; exit 1; }
+grep -q "^sha256sums=('${sum}')$" "$pkgbuild" || { echo "error: sha256sums not updated" >&2; exit 1; }
+
 echo "PKGBUILD updated: pkgver=${ver} sha256sums=('${sum}')"

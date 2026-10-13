@@ -34,12 +34,12 @@ pub enum Perm {
 }
 
 impl Perm {
-    /// Parses `"read"`/`"write"` (anything else is read).
-    pub fn parse(value: &str) -> Self {
-        if value == "write" {
-            Self::Write
-        } else {
-            Self::Read
+    /// Parses `"read"`/`"write"`, returning `None` for unknown values.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            _ => None,
         }
     }
 
@@ -392,12 +392,19 @@ impl Vfs {
                 .ingest_stream(access.owner_id, stream, max_bytes)
                 .await?;
             self.record_usage(access.owner_id, new_bytes).await?;
+            // Re-fetch the child to get a fresh snapshot, avoiding TOCTOU
+            // between the stat_access above and this write.
+            let fresh_child = self
+                .db
+                .find_child(access.owner_id, parent_id, &access.node.name)
+                .await?
+                .ok_or(VfsError::NotFound)?;
             return self
                 .finalize_put_at(
                     access.owner_id,
                     parent_id,
                     &access.node.name,
-                    Some(crate::vfs::to_db(&access.node)),
+                    Some(fresh_child),
                     &manifest,
                 )
                 .await;
@@ -547,7 +554,7 @@ fn mount_from_row(row: &ReceivedShare) -> Result<Mount, VfsError> {
         content_id,
         size: row.size.max(0) as u64,
         modified_at: row.modified_at,
-        permission: Perm::parse(&row.permission),
+        permission: Perm::parse(&row.permission).unwrap_or(Perm::Read),
     })
 }
 

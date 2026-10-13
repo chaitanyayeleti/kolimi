@@ -17,7 +17,8 @@ use kolimi_db::{DbError, ShareRow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{AppState, api, audit};
+use crate::auth::cookie_value;
+use crate::{AppState, api, api_browse::root_path, audit};
 
 /// Default lifetime of a public link (30 days).
 pub const DEFAULT_LINK_TTL_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -50,11 +51,11 @@ pub async fn create(
     }
     let access = match state.vfs.resolve_access(user.user_id, &req.path).await {
         Ok(access) => access,
-        Err(kolimi_vfs::VfsError::NotFound) => return not_found(),
-        Err(_) => return not_found(),
+        Err(kolimi_vfs::VfsError::NotFound) => return api::not_found(),
+        Err(_) => return api::not_found(),
     };
     if access.owner_id != user.user_id || access.is_mount_root {
-        return forbidden("you can only share your own files");
+        return api::forbidden("you can only share your own files");
     }
     if access.node.parent_id.is_none() {
         return api::bad_request("the root cannot be shared");
@@ -203,10 +204,10 @@ pub async fn list(
 ) -> Response {
     let access = match state.vfs.resolve_access(user.user_id, &query.path).await {
         Ok(access) => access,
-        Err(_) => return not_found(),
+        Err(_) => return api::not_found(),
     };
     if access.owner_id != user.user_id {
-        return forbidden("not your file");
+        return api::forbidden("not your file");
     }
     let shares = match state.db.shares_for_node(user.user_id, access.node.id).await {
         Ok(shares) => shares,
@@ -271,7 +272,7 @@ pub async fn group_members(
     Path(name): Path<String>,
 ) -> Response {
     let Some(group) = state.db.group_by_name(&name).await.ok().flatten() else {
-        return not_found();
+        return api::not_found();
     };
     let members = match state.db.group_members(group.id).await {
         Ok(members) => members,
@@ -279,7 +280,7 @@ pub async fn group_members(
     };
     // Rosters are only for the group's own members and administrators.
     if !user.is_admin && !members.iter().any(|member| member.id == user.user_id) {
-        return forbidden("not a member of this group");
+        return api::forbidden("not a member of this group");
     }
     let names: Vec<&str> = members
         .iter()
@@ -325,10 +326,10 @@ pub async fn update(
     Json(req): Json<UpdateShareRequest>,
 ) -> Response {
     let Some(share) = state.db.share_by_id(share_id).await.ok().flatten() else {
-        return not_found();
+        return api::not_found();
     };
     if share.owner_id != user.user_id {
-        return forbidden("only the owner can modify a share");
+        return api::forbidden("only the owner can modify a share");
     }
 
     if let Some(permission) = req.permission.as_deref() {
@@ -388,7 +389,7 @@ pub async fn update(
     }
 
     let Some(share) = state.db.share_by_id(share_id).await.ok().flatten() else {
-        return not_found();
+        return api::not_found();
     };
     audit(
         &state,
@@ -412,7 +413,7 @@ pub async fn delete(
     Path(share_id): Path<i64>,
 ) -> Response {
     let Some(share) = state.db.share_by_id(share_id).await.ok().flatten() else {
-        return not_found();
+        return api::not_found();
     };
     let mut allowed = share.owner_id == user.user_id;
     if !allowed {
@@ -435,7 +436,7 @@ pub async fn delete(
         };
     }
     if !allowed {
-        return forbidden("not allowed to revoke this share");
+        return api::forbidden("not allowed to revoke this share");
     }
     match state.db.delete_share(share_id).await {
         Ok(true) => {
@@ -458,7 +459,7 @@ pub async fn delete(
             .await;
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => not_found(),
+        Ok(false) => api::not_found(),
         Err(_) => api::internal_error(),
     }
 }
@@ -528,8 +529,8 @@ async fn public_list_inner(
         .await
     {
         Ok(node) => node,
-        Err(kolimi_vfs::VfsError::NotFound) => return not_found(),
-        Err(_) => return not_found(),
+        Err(kolimi_vfs::VfsError::NotFound) => return api::not_found(),
+        Err(_) => return api::not_found(),
     };
     if !node.is_dir() {
         return api::bad_request("not a directory");
@@ -580,7 +581,7 @@ async fn public_download_inner(
         .await
     {
         Ok(node) => node,
-        Err(_) => return not_found(),
+        Err(_) => return api::not_found(),
     };
     if node.is_dir() {
         return api::bad_request("not a file");
@@ -711,10 +712,6 @@ pub struct PathQuery {
     path: String,
 }
 
-fn root_path() -> String {
-    "/".to_string()
-}
-
 fn link_cookie_name(share_id: i64) -> String {
     format!("kolimi_link_{share_id}")
 }
@@ -737,7 +734,7 @@ async fn load_link(
     token: &str,
 ) -> Result<(ShareRow, kolimi_vfs::Node), Response> {
     let Some(share) = state.db.share_by_token(token).await.ok().flatten() else {
-        return Err(not_found());
+        return Err(api::not_found());
     };
     if share
         .expires_at
@@ -751,7 +748,7 @@ async fn load_link(
     }
     let node = match state.vfs.link_node(share.owner_id, share.node_id, "").await {
         Ok(node) => node,
-        Err(_) => return Err(not_found()),
+        Err(_) => return Err(api::not_found()),
     };
     Ok((share, node))
 }
@@ -840,31 +837,6 @@ async fn share_json(state: &AppState, share: &ShareRow, generated_password: Opti
         "expires_at": share.expires_at,
         "created_at": share.created_at,
     })
-}
-
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    for value in headers.get_all(header::COOKIE) {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for pair in value.split(';') {
-            let pair = pair.trim();
-            if let Some((key, value)) = pair.split_once('=')
-                && key == name
-            {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn not_found() -> Response {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response()
-}
-
-fn forbidden(message: &str) -> Response {
-    (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response()
 }
 
 fn conflict(message: &str) -> Response {

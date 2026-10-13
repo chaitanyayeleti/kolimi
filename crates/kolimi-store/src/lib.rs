@@ -43,12 +43,6 @@ pub enum StoreError {
         /// Configured maximum size in bytes.
         limit: u64,
     },
-    /// The owner is over their storage quota.
-    #[error("storage quota exceeded (limit {limit} bytes)")]
-    QuotaExceeded {
-        /// Configured per-user limit in bytes.
-        limit: u64,
-    },
     /// The upload stream failed.
     #[error("upload stream failed: {0}")]
     Stream(String),
@@ -622,6 +616,9 @@ fn range_segments(
     end_exclusive: u64,
 ) -> Vec<(Hash, usize, usize)> {
     let mut segments = Vec::new();
+    if start >= end_exclusive {
+        return segments;
+    }
     let mut offset = 0u64;
     for chunk in &manifest.chunks {
         let chunk_start = offset;

@@ -2534,6 +2534,7 @@ dependencies = [
  "clap",
  "kolimi-chunk",
  "kolimi-crypto",
+ "percent-encoding",
  "reqwest",
  "rpassword",
  "serde",

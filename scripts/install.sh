@@ -62,6 +62,16 @@ detect_target() {
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# Rollback tracking: files installed during this run, removed on failure.
+INSTALLED_FILES=()
+
+rollback() {
+    for f in "${INSTALLED_FILES[@]}"; do
+        rm -f "$f"
+    done
+}
+trap 'rollback' ERR
+
 if [ -z "$BINARY" ]; then
     need curl
     need tar
@@ -73,10 +83,10 @@ if [ -z "$BINARY" ]; then
         base="https://github.com/$REPO/releases/download/$VERSION"
     fi
     say "downloading $asset"
-    curl -fsSL "$base/$asset" -o "$tmp/$asset" || fail "download failed: $base/$asset"
+    curl -fsSL "$base/$asset" -o "$tmp/$asset"
     if [ "$VERIFY" = 1 ]; then
         if curl -fsSL "$base/$asset.sha256" -o "$tmp/$asset.sha256"; then
-            (cd "$tmp" && sha256sum -c "$asset.sha256") || fail "checksum mismatch"
+            (cd "$tmp" && sha256sum -c "$asset.sha256")
             say "checksum verified"
         else
             fail "could not fetch $asset.sha256 (use --no-verify to override)"
@@ -89,7 +99,7 @@ if [ -z "$BINARY" ]; then
                     --signature "$tmp/$asset.sig" \
                     --certificate-identity-regexp "https://github.com/$REPO/" \
                     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-                    "$tmp/$asset" >/dev/null || fail "cosign verification failed"
+                    "$tmp/$asset" >/dev/null
                 say "signature verified (cosign)"
             fi
         fi
@@ -111,6 +121,7 @@ install_bin() {
         need sudo
         sudo install -Dm755 "$src" "$dst"
     fi
+    INSTALLED_FILES+=("$dst")
     say "installed $dst"
 }
 
@@ -121,7 +132,7 @@ if [ -n "$SYNC_BINARY" ] && [ -x "$SYNC_BINARY" ]; then
 fi
 
 if [ "$NO_SYSTEMD" = 0 ] && command -v systemctl >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
-    need systemd-sysusers || true
+    need systemd-sysusers
     if [ -f /usr/lib/sysusers.d/kolimi.conf ]; then
         systemd-sysusers /usr/lib/sysusers.d/kolimi.conf 2>/dev/null || true
     fi

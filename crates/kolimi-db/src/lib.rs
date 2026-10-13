@@ -482,9 +482,12 @@ impl Db {
     /// A page of users with an admin-chosen sort, order, and filter.
     ///
     /// Keyset pagination (`after_id`) only applies to the default `Id`
-    /// order; other orders return the first `limit` rows. `default_quota`
-    /// is the server-wide quota in bytes (`0` = unlimited), used to decide
-    /// which users are over quota when they have no per-user override.
+    /// order. For other sorts the `after_id` cursor is intentionally ignored
+    /// and the first `limit` rows are returned. Callers that need deep
+    /// pagination on non-id sorts must use `UserSort::Id` or implement
+    /// offset-based pagination. `default_quota` is the server-wide quota in
+    /// bytes (`0` = unlimited), used to decide which users are over quota
+    /// when they have no per-user override.
     pub async fn users_page_sorted(
         &self,
         after_id: i64,

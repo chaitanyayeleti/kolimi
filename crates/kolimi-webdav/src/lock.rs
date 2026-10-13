@@ -57,17 +57,6 @@ pub enum LockError {
     NotFound,
 }
 
-/// Result of evaluating a write against the active locks.
-#[derive(Debug, PartialEq, Eq)]
-pub enum WriteAccess {
-    /// No lock governs the write, or the `If` conditions are satisfied.
-    Allow,
-    /// A lock governs the write but no matching token was supplied.
-    Locked,
-    /// An `If` header was present whose conditions do not hold.
-    PreconditionFailed,
-}
-
 const MIN_TIMEOUT: u64 = 60;
 const DEFAULT_TIMEOUT: u64 = 3600;
 const MAX_TIMEOUT: u64 = 604_800;
@@ -203,33 +192,6 @@ impl LockManager {
             .into_iter()
             .map(|lock| lock.token.clone())
             .collect()
-    }
-
-    /// Evaluates a write against active locks and any `If` header.
-    pub fn evaluate(
-        &self,
-        owner: i64,
-        path: &str,
-        if_present: bool,
-        tokens: &[String],
-    ) -> WriteAccess {
-        let now = Instant::now();
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.purge(now);
-        let covering = inner.covering(owner, path);
-        if if_present {
-            // Only lock-token conditions are evaluated. An `If` whose tokens
-            // match no covering lock is a false condition -> 412. An `If`
-            // carrying no lock tokens is treated as satisfied.
-            if !tokens.is_empty() && !covering.iter().any(|lock| tokens.contains(&lock.token)) {
-                return WriteAccess::PreconditionFailed;
-            }
-            WriteAccess::Allow
-        } else if covering.is_empty() {
-            WriteAccess::Allow
-        } else {
-            WriteAccess::Locked
-        }
     }
 }
 

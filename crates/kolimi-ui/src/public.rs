@@ -1,10 +1,10 @@
 //! The anonymous public-link page served at `/s/{token}`.
 
+use crate::app::{encode_path, human_size};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
 use crate::api;
@@ -32,29 +32,6 @@ enum Meta {
     Loading,
     Ready(Value),
     Missing(String),
-}
-
-fn encode_path(path: &str) -> String {
-    path.split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| utf8_percent_encode(segment, NON_ALPHANUMERIC).to_string())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 #[component]

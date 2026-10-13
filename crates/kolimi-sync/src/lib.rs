@@ -22,10 +22,13 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use std::io::Write;
+
 use kolimi_chunk::{ChunkRef, Manifest, chunker};
 use kolimi_crypto::{
-    Argon2Params, FileKey, Identity, Keyring, MasterKey, generate_recovery_code,
-    recovery_code_parse,
+    Argon2Params, FileKey, Identity, Keyring, MasterKey, generate_recovery_code, hex_decode,
+    hex_encode, recovery_code_parse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -139,6 +142,9 @@ struct State {
     /// Wrapped file keys by relative path (base64), cached from the server.
     #[serde(default)]
     keys: BTreeMap<String, String>,
+    /// Directories already created on the server (absolute paths).
+    #[serde(default)]
+    created_dirs: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,9 +180,25 @@ impl State {
     fn save(&self, local: &Path) -> Result<(), SyncError> {
         let path = Self::state_path(local);
         let tmp = local.join(".kolimi").join("state.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(&serde_json::to_vec_pretty(self)?)?;
+        file.sync_all()?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
+    }
+}
+
+/// Removes stale temp files left behind by interrupted sync passes.
+fn cleanup_stale_temp_files(local: &Path) {
+    let kolimi = local.join(".kolimi");
+    if let Ok(entries) = std::fs::read_dir(&kolimi) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".tmp") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 }
 
@@ -193,6 +215,7 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
     let http = Http::new(config)?;
     std::fs::create_dir_all(config.local_dir.join(".kolimi"))?;
     let mut state = State::load(&config.local_dir)?;
+    cleanup_stale_temp_files(&config.local_dir);
     let e2ee = unlock_e2ee(&http, config).await?;
     let mut report = SyncReport::default();
     pull(&http, config, &root, e2ee.as_ref(), &mut state, &mut report).await?;
@@ -303,9 +326,12 @@ async fn ensure_identity(http: &Http, master: &MasterKey) -> Result<Identity, Sy
     let (status, body) = http.get_json("/api/e2ee/identity").await?;
     match status {
         200 => {
-            let wrapped = STANDARD
-                .decode(body["wrapped_private"].as_str().unwrap_or_default())
-                .map_err(|error| SyncError::E2ee(format!("identity: {error}")))?;
+            let wrapped =
+                STANDARD
+                    .decode(body["wrapped_private"].as_str().ok_or_else(|| {
+                        SyncError::E2ee("malformed identity response".to_string())
+                    })?)
+                    .map_err(|error| SyncError::E2ee(format!("identity: {error}")))?;
             Ok(master.unwrap_identity(&wrapped)?)
         }
         404 => {
@@ -445,11 +471,14 @@ pub async fn share_path(
                 "{member} has no E2EE identity (they must unlock E2EE once first)"
             )));
         }
-        let public_key: [u8; 32] = STANDARD
-            .decode(body["public_key"].as_str().unwrap_or_default())
-            .map_err(|error| SyncError::E2ee(format!("{member} key: {error}")))?
-            .try_into()
-            .map_err(|_| SyncError::E2ee(format!("{member} key must be 32 bytes")))?;
+        let public_key: [u8; 32] =
+            STANDARD
+                .decode(body["public_key"].as_str().ok_or_else(|| {
+                    SyncError::E2ee(format!("{member}: malformed identity response"))
+                })?)
+                .map_err(|error| SyncError::E2ee(format!("{member} key: {error}")))?
+                .try_into()
+                .map_err(|_| SyncError::E2ee(format!("{member} key must be 32 bytes")))?;
         recipients.push((member, public_key));
     }
     if recipients.is_empty() {
@@ -481,7 +510,8 @@ pub async fn share_path(
     if local_root.is_file() {
         files.push(rel_path.to_string());
     } else if local_root.is_dir() {
-        collect_files(&config.local_dir, &local_root, &mut files)?;
+        let state = State::load(&config.local_dir)?;
+        collect_files(&config.local_dir, &local_root, &mut files, &state)?;
     } else {
         return Err(SyncError::E2ee(format!(
             "{rel_path} does not exist locally"
@@ -502,7 +532,11 @@ pub async fn share_path(
             });
         }
         let wrapped = STANDARD
-            .decode(body["wrapped_key"].as_str().unwrap_or_default())
+            .decode(
+                body["wrapped_key"]
+                    .as_str()
+                    .ok_or_else(|| SyncError::E2ee("malformed file key response".to_string()))?,
+            )
             .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
         let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
         for (member, public_key) in &recipients {
@@ -633,7 +667,9 @@ fn write_device_file(local: &Path, file: &DeviceFile) -> Result<(), SyncError> {
     let dir = local.join(".kolimi");
     std::fs::create_dir_all(&dir)?;
     let tmp = dir.join("device.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&serde_json::to_vec_pretty(file)?)?;
+    f.sync_all()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -641,28 +677,6 @@ fn write_device_file(local: &Path, file: &DeviceFile) -> Result<(), SyncError> {
     }
     std::fs::rename(&tmp, device_file_path(local))?;
     Ok(())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
-
-fn hex_decode(text: &str) -> Result<Vec<u8>, SyncError> {
-    let text = text.trim();
-    if !text.len().is_multiple_of(2) {
-        return Err(SyncError::E2ee("hex length must be even".to_string()));
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&text[i..i + 2], 16)
-                .map_err(|_| SyncError::E2ee("invalid hex digits".to_string()))
-        })
-        .collect()
 }
 
 /// Enrolls this device (RFC 0008): creates an enrollment, waits for an
@@ -699,7 +713,9 @@ pub async fn enroll_device(config: &SyncConfig, device_name: &str) -> Result<i64
             return Err(SyncError::Server { status, path });
         }
         if body["approved"].as_bool() == Some(true) {
-            let wrapped = body["wrapped_master_key"].as_str().unwrap_or_default();
+            let wrapped = body["wrapped_master_key"]
+                .as_str()
+                .ok_or_else(|| SyncError::E2ee("malformed enrollment response".to_string()))?;
             break STANDARD
                 .decode(wrapped)
                 .map_err(|error| SyncError::E2ee(format!("wrapped key: {error}")))?;
@@ -745,9 +761,16 @@ pub async fn approve_device(config: &SyncConfig, id: i64) -> Result<String, Sync
     if status != 200 {
         return Err(SyncError::Server { status, path });
     }
-    let name = body["device_name"].as_str().unwrap_or_default().to_string();
+    let name = body["device_name"]
+        .as_str()
+        .ok_or_else(|| SyncError::E2ee("malformed enrollment response".to_string()))?
+        .to_string();
     let public = STANDARD
-        .decode(body["device_public_key"].as_str().unwrap_or_default())
+        .decode(
+            body["device_public_key"]
+                .as_str()
+                .ok_or_else(|| SyncError::E2ee("malformed enrollment response".to_string()))?,
+        )
         .map_err(|error| SyncError::E2ee(format!("device public key: {error}")))?;
     let public: [u8; 32] = public
         .try_into()
@@ -872,25 +895,12 @@ impl Http {
 }
 
 fn encode(value: &str) -> String {
-    percent_encode(value)
-}
-
-fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
+    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
 fn encode_path(path: &str) -> String {
     path.split('/')
-        .map(percent_encode)
+        .map(|part| utf8_percent_encode(part, NON_ALPHANUMERIC).to_string())
         .collect::<Vec<_>>()
         .join("/")
 }
@@ -1005,6 +1015,21 @@ async fn pull(
     let remote = remote_files(http, root).await?;
 
     for (rel, file) in &remote {
+        // Validate encryption requirements before touching the local path.
+        if file.encrypted {
+            let Some(e2ee) = e2ee else {
+                return Err(SyncError::E2ee(format!(
+                    "remote file /{rel} is encrypted but no e2ee roots are configured"
+                )));
+            };
+            // Shared files are encrypted by their owner; local roots only
+            // govern which of *our* files we encrypt.
+            if !file.shared && !e2ee.options.covers(rel) {
+                return Err(SyncError::E2ee(format!(
+                    "remote file /{rel} is encrypted but not under a configured e2ee root"
+                )));
+            }
+        }
         let local = config.local_dir.join(rel);
         if let Some(known) = state.files.get(rel).cloned() {
             if known.content_id == file.content_id {
@@ -1020,6 +1045,12 @@ async fn pull(
             }
             // The remote changed. If the local copy was modified since the
             // last sync, leave it alone: push will detect the conflict.
+            //
+            // Size+mtime is a heuristic: it can miss content changes that
+            // preserve both size and mtime (e.g. same-length writes within
+            // the same nanosecond, or files restored from backups). This is
+            // a known tradeoff — the server's content_id remains the
+            // authoritative conflict detector.
             let locally_modified = !known.deleted
                 && match std::fs::metadata(&local) {
                     Ok(metadata) => {
@@ -1027,32 +1058,34 @@ async fn pull(
                     }
                     Err(_) => false,
                 };
-            if locally_modified {
+            if known.deleted || locally_modified {
                 continue;
             }
         }
         let manifest_path = format!("/api/files/manifest?path={}", encode(&file.path));
         let (status, manifest_value) = http.get_json(&manifest_path).await?;
-        if status != 200 {
+        if status == 404 {
             // Raced with a delete; the next pass will clean up.
             continue;
         }
+        if status != 200 {
+            return Err(SyncError::Server {
+                status,
+                path: manifest_path,
+            });
+        }
         let manifest: Manifest = serde_json::from_value(manifest_value)?;
+        if !manifest.is_consistent() {
+            return Err(SyncError::E2ee(format!(
+                "manifest for /{rel} has inconsistent size"
+            )));
+        }
         let file_key = if file.encrypted {
-            let Some(e2ee) = e2ee else {
-                return Err(SyncError::E2ee(format!(
-                    "remote file /{rel} is encrypted but no e2ee roots are configured"
-                )));
-            };
-            // Shared files are encrypted by their owner; local roots only
-            // govern which of *our* files we encrypt.
-            if !file.shared && !e2ee.options.covers(rel) {
-                return Err(SyncError::E2ee(format!(
-                    "remote file /{rel} is encrypted but not under a configured e2ee root"
-                )));
-            }
+            let e2ee = e2ee.ok_or_else(|| {
+                SyncError::E2ee("remote file is encrypted but e2ee is not configured".to_string())
+            })?;
             if file.shared {
-                Some(load_shared_file_key(http, e2ee, &file.path).await?)
+                Some(load_shared_file_key(http, state, e2ee, &file.path).await?)
             } else {
                 Some(load_file_key(http, state, e2ee, rel).await?)
             }
@@ -1063,10 +1096,27 @@ async fn pull(
         let chunk_context = file.shared.then_some(file.path.as_str());
         for chunk in &manifest.chunks {
             let bytes = chunk_bytes(http, config, &chunk.hash.to_hex(), chunk_context).await?;
+            // The bytes we got (from cache or the server) must match the hash
+            // the manifest names — this also validates cached chunks.
+            if kolimi_chunk::Hash::of(&bytes) != chunk.hash {
+                return Err(SyncError::Protocol(format!(
+                    "chunk {} failed its integrity check for /{rel}",
+                    chunk.hash.to_hex()
+                )));
+            }
             match &file_key {
                 Some(key) => data.extend_from_slice(&key.decrypt_chunk(&bytes)?),
                 None => data.extend_from_slice(&bytes),
             }
+        }
+        // For plaintext files the manifest describes `data` itself. An
+        // *encrypted* manifest hashes the ciphertext chunks, so the whole-file
+        // check does not apply to decrypted data; each chunk was authenticated
+        // above and by its AEAD tag.
+        if file_key.is_none() {
+            kolimi_chunk::verify(&data, &manifest).map_err(|error| {
+                SyncError::E2ee(format!("verification failed for /{rel}: {error}"))
+            })?;
         }
         if let Some(parent) = local.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1075,7 +1125,11 @@ async fn pull(
             .local_dir
             .join(".kolimi")
             .join(format!("pull-{}.tmp", std::process::id()));
-        std::fs::write(&tmp, &data)?;
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&data)?;
+            file.sync_all()?;
+        }
         std::fs::rename(&tmp, &local)?;
         state.files.insert(
             rel.clone(),
@@ -1099,8 +1153,24 @@ async fn pull(
         .collect();
     for rel in stale {
         let local = config.local_dir.join(&rel);
-        if local.exists() {
-            std::fs::remove_file(&local)?;
+        if local.exists() || local.symlink_metadata().is_ok() {
+            let locally_modified = if let Some(known) = state.files.get(&rel) {
+                match std::fs::metadata(&local) {
+                    Ok(metadata) => {
+                        metadata.len() != known.size
+                            || mtime_ns(&local).unwrap_or(0) != known.mtime_ns
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
+            if locally_modified {
+                let conflict = conflict_path(&local);
+                std::fs::rename(&local, &conflict)?;
+            } else {
+                std::fs::remove_file(&local)?;
+            }
         }
         state.files.remove(&rel);
         state.keys.remove(&rel);
@@ -1137,17 +1207,19 @@ async fn load_file_key(
     Ok(file_key)
 }
 
-/// Loads an existing file key or generates one for a new encrypted file.
-///
-/// Returns the key plus, for new files, the wrapped blob to upload after
-/// the manifest commit has created the node (the server stores keys per
-/// node, so the node must exist first).
 /// Fetches and unwraps the share key for a file shared with this user.
 async fn load_shared_file_key(
     http: &Http,
+    state: &mut State,
     e2ee: &E2ee,
     server_path: &str,
 ) -> Result<FileKey, SyncError> {
+    if let Some(cached) = state.keys.get(server_path) {
+        let wrapped = STANDARD
+            .decode(cached)
+            .map_err(|error| SyncError::E2ee(format!("cached share key: {error}")))?;
+        return Ok(e2ee.identity.unwrap_file_key(&wrapped)?);
+    }
     let path = format!("/api/e2ee/share-key?path={}", encode(server_path));
     let (status, body) = http.get_json(&path).await?;
     if status != 200 {
@@ -1155,12 +1227,24 @@ async fn load_shared_file_key(
             "no share key for {server_path}; ask the owner to re-share it"
         )));
     }
+    let encoded = body["wrapped_key"]
+        .as_str()
+        .ok_or_else(|| SyncError::E2ee("malformed share key response".to_string()))?;
     let wrapped = STANDARD
-        .decode(body["wrapped_key"].as_str().unwrap_or_default())
+        .decode(encoded)
         .map_err(|error| SyncError::E2ee(format!("share key: {error}")))?;
-    Ok(e2ee.identity.unwrap_file_key(&wrapped)?)
+    let file_key = e2ee.identity.unwrap_file_key(&wrapped)?;
+    state
+        .keys
+        .insert(server_path.to_string(), encoded.to_string());
+    Ok(file_key)
 }
 
+/// Loads an existing file key or generates one for a new encrypted file.
+///
+/// Returns the key plus, for new files, the wrapped blob to upload after
+/// the manifest commit has created the node (the server stores keys per
+/// node, so the node must exist first).
 async fn fetch_or_create_file_key(
     http: &Http,
     state: &mut State,
@@ -1222,7 +1306,11 @@ async fn chunk_bytes(
     if let Some(parent) = cached.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&cached, &bytes)?;
+    {
+        let mut file = std::fs::File::create(&cached)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
     Ok(bytes)
 }
 
@@ -1235,7 +1323,7 @@ async fn push(
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
     let mut locals: Vec<String> = Vec::new();
-    collect_files(&config.local_dir, &config.local_dir, &mut locals)?;
+    collect_files(&config.local_dir, &config.local_dir, &mut locals, state)?;
     locals.sort();
 
     // Create remote directories for every parent path first.
@@ -1254,7 +1342,11 @@ async fn push(
         }
     }
     for dir in &dirs {
+        if state.created_dirs.contains(dir) {
+            continue;
+        }
         mkcol(http, dir).await?;
+        state.created_dirs.insert(dir.clone());
     }
 
     for rel in locals {
@@ -1262,6 +1354,7 @@ async fn push(
         let metadata = std::fs::metadata(&local_path)?;
         let mtime = mtime_ns(&local_path)?;
         if let Some(known) = state.files.get(&rel)
+            && !known.deleted
             && known.size == metadata.len()
             && known.mtime_ns == mtime
         {
@@ -1396,10 +1489,16 @@ async fn mkcol(http: &Http, dir: &str) -> Result<(), SyncError> {
     Ok(())
 }
 
-/// Whether `name` looks like a preserved conflict copy (`*.conflict-<unix>`).
-fn is_conflict_name(name: &str) -> bool {
+/// Whether `name` looks like a preserved conflict copy (`*.conflict-<unix>`)
+/// AND the corresponding original file exists in state (indicating this file
+/// was created by our conflict resolution, not by the user).
+fn is_conflict_name(name: &str, state: &State) -> bool {
     match name.rsplit_once(".conflict-") {
-        Some((_, stamp)) => !stamp.is_empty() && stamp.chars().all(|c| c.is_ascii_digit()),
+        Some((original, stamp)) => {
+            !stamp.is_empty()
+                && stamp.chars().all(|c| c.is_ascii_digit())
+                && state.files.contains_key(original)
+        }
         None => false,
     }
 }
@@ -1407,7 +1506,7 @@ fn is_conflict_name(name: &str) -> bool {
 fn conflict_path(local: &Path) -> PathBuf {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_nanos())
         .unwrap_or(0);
     let name = local
         .file_name()
@@ -1416,7 +1515,12 @@ fn conflict_path(local: &Path) -> PathBuf {
     local.with_file_name(format!("{name}.conflict-{stamp}"))
 }
 
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), SyncError> {
+fn collect_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    state: &State,
+) -> Result<(), SyncError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -1425,7 +1529,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), S
             continue;
         }
         // Preserved conflict copies are local-only; never push them back.
-        if is_conflict_name(&name) {
+        if is_conflict_name(&name, state) {
             continue;
         }
         // Shared files are read-only mirrors of someone else's tree.
@@ -1433,7 +1537,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), S
             continue;
         }
         if path.is_dir() {
-            collect_files(root, &path, out)?;
+            collect_files(root, &path, out, state)?;
         } else if path.is_file() {
             let rel = path
                 .strip_prefix(root)
@@ -1451,7 +1555,7 @@ fn mtime_ns(path: &Path) -> Result<i64, SyncError> {
     Ok(modified
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos() as i64)
-        .unwrap_or(0))
+        .unwrap_or(1))
 }
 
 #[cfg(test)]
