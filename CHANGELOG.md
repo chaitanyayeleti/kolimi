@@ -40,7 +40,8 @@ follow [Semantic Versioning](https://semver.org/).
   **AppImage** (Tauri bundler) with icons and a `.desktop` entry, plus an AUR
   package (`kolimi-desktop`). A new **Desktop Release** workflow builds both
   bundles and updates the AUR on `desktop-v*` tags. CI now also runs the
-  desktop unit tests and a `.deb` packaging check.
+  desktop unit tests and a `.deb` packaging check. First release:
+  **`desktop-v0.1.11`**.
 
 ## [0.1.11]
 
