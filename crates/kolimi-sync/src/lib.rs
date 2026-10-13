@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -37,7 +37,7 @@ use serde_json::Value;
 pub const SHARED_MOUNT: &str = "Shared with me";
 
 /// Configuration for one sync root.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SyncConfig {
     /// Base URL, e.g. `https://cloud.example.com`.
     pub server: String,
@@ -51,8 +51,21 @@ pub struct SyncConfig {
     pub e2ee: Option<E2eeOptions>,
 }
 
+impl std::fmt::Debug for SyncConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the basic-auth password.
+        f.debug_struct("SyncConfig")
+            .field("server", &self.server)
+            .field("username", &self.username)
+            .field("password", &"[redacted]")
+            .field("local_dir", &self.local_dir)
+            .field("e2ee", &self.e2ee)
+            .finish()
+    }
+}
+
 /// E2EE settings for a sync root.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct E2eeOptions {
     /// Passphrase used to unlock the master key.
     pub passphrase: Option<String>,
@@ -63,6 +76,27 @@ pub struct E2eeOptions {
     pub prf_secret: Option<Vec<u8>>,
     /// Relative paths whose files are encrypted end-to-end.
     pub encrypted_roots: Vec<String>,
+}
+
+impl std::fmt::Debug for E2eeOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print unlock material.
+        f.debug_struct("E2eeOptions")
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "recovery_code",
+                &self.recovery_code.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "prf_secret",
+                &self.prf_secret.as_ref().map(|_| "[redacted]"),
+            )
+            .field("encrypted_roots", &self.encrypted_roots)
+            .finish()
+    }
 }
 
 impl E2eeOptions {
@@ -248,6 +282,24 @@ fn relative_to_root(server_path: &str, root: &str) -> Option<String> {
     let rest = server_path.strip_prefix(root)?;
     let rel = rest.strip_prefix('/')?;
     Some(rel.to_string())
+}
+
+/// Rejects a server-controlled relative path that could escape the sync root.
+///
+/// Remote tree entries are untrusted: a `..` component, an absolute path, or a
+/// Windows separator would otherwise let `local_dir.join(rel)` read or write
+/// outside the mirror.
+fn safe_rel(rel: &str) -> Result<(), SyncError> {
+    let unsafe_path = rel.is_empty()
+        || rel.starts_with('/')
+        || rel.contains('\\')
+        || rel
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..");
+    if unsafe_path {
+        return Err(SyncError::Protocol(format!("unsafe remote path: {rel:?}")));
+    }
+    Ok(())
 }
 
 /// Unlocked E2EE session state.
@@ -639,7 +691,7 @@ pub async fn upload_keyring(config: &SyncConfig, keyring: &Keyring) -> Result<()
 /// file is equivalent to the master key at rest; it is written `0600` and
 /// is intended to be replaced by an OS keystore / passkey-PRF wrap in the
 /// desktop shell.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceFile {
     /// Label of this device.
     pub name: String,
@@ -649,6 +701,18 @@ pub struct DeviceFile {
     pub wrapped_master_key: String,
     /// This device's X25519 public key (base64).
     pub device_public_key: String,
+}
+
+impl std::fmt::Debug for DeviceFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the device secret or the wrapped master key.
+        f.debug_struct("DeviceFile")
+            .field("name", &self.name)
+            .field("device_secret", &"[redacted]")
+            .field("wrapped_master_key", &"[redacted]")
+            .field("device_public_key", &self.device_public_key)
+            .finish()
+    }
 }
 
 fn device_file_path(local: &Path) -> PathBuf {
@@ -802,7 +866,13 @@ struct Http {
 
 impl Http {
     fn new(config: &SyncConfig) -> Result<Self, SyncError> {
-        let client = reqwest::Client::builder().build()?;
+        // Bound connection setup and the whole request so a hung or stalled
+        // server can never block a sync pass forever. Chunks are small, so a
+        // per-request ceiling is safe.
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(300))
+            .build()?;
         Ok(Self {
             client,
             base: config.server.trim_end_matches('/').to_string(),
@@ -1015,6 +1085,9 @@ async fn pull(
     let remote = remote_files(http, root).await?;
 
     for (rel, file) in &remote {
+        // The remote tree is untrusted: never join a path that could escape
+        // the sync root.
+        safe_rel(rel)?;
         // Validate encryption requirements before touching the local path.
         if file.encrypted {
             let Some(e2ee) = e2ee else {
@@ -1293,7 +1366,13 @@ async fn chunk_bytes(
         .join(&hash[..2])
         .join(hash);
     if let Ok(bytes) = std::fs::read(&cached) {
-        return Ok(bytes);
+        // Only serve a cache hit that actually matches the requested hash;
+        // a torn write or bit-rot must not be trusted (it would be hashed
+        // into a content_id and pushed back as "correct").
+        if kolimi_chunk::Hash::of(&bytes).to_hex() == *hash {
+            return Ok(bytes);
+        }
+        let _ = std::fs::remove_file(&cached);
     }
     let path = match context {
         Some(context) => format!("/api/chunks/{hash}?path={}", encode(context)),
@@ -1523,6 +1602,12 @@ fn collect_files(
 ) -> Result<(), SyncError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
+        // Never follow symlinks: they can point outside the root (reading
+        // files we must not mirror) or form cycles (infinite recursion).
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if name == ".kolimi" {
@@ -1536,9 +1621,9 @@ fn collect_files(
         if name == SHARED_MOUNT && dir == root {
             continue;
         }
-        if path.is_dir() {
+        if file_type.is_dir() {
             collect_files(root, &path, out, state)?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             let rel = path
                 .strip_prefix(root)
                 .map_err(|_| std::io::Error::other("path outside root"))?
@@ -1560,7 +1645,20 @@ fn mtime_ns(path: &Path) -> Result<i64, SyncError> {
 
 #[cfg(test)]
 mod root_tests {
-    use super::{SyncError, relative_to_root, remote_prefix};
+    use super::{SyncError, relative_to_root, remote_prefix, safe_rel};
+
+    #[test]
+    fn rejects_unsafe_remote_paths() {
+        assert!(safe_rel("a/b.txt").is_ok());
+        assert!(safe_rel("a b/c.txt").is_ok());
+        assert!(safe_rel("../etc/passwd").is_err());
+        assert!(safe_rel("a/../../b").is_err());
+        assert!(safe_rel("/abs").is_err());
+        assert!(safe_rel("").is_err());
+        assert!(safe_rel("a//b").is_err());
+        assert!(safe_rel("a\\b").is_err());
+        assert!(safe_rel("./a").is_err());
+    }
 
     #[test]
     fn locked_is_distinct_from_e2ee_error() {

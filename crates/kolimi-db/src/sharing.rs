@@ -135,8 +135,9 @@ impl Db {
 
     /// Deletes a group (memberships and group shares cascade).
     pub async fn delete_group(&self, group_id: i64) -> Result<bool, DbError> {
+        let mut tx = self.pool.begin().await?;
         // Drop wrapped keys for the group's shares before the share rows
-        // cascade away.
+        // cascade away, in the same transaction as the delete.
         sqlx::query(
             "DELETE FROM e2ee_share_keys
              WHERE node_id IN (
@@ -145,12 +146,13 @@ impl Db {
              )",
         )
         .bind(group_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         let result = sqlx::query("DELETE FROM groups WHERE id = ?")
             .bind(group_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -169,17 +171,30 @@ impl Db {
 
     /// Removes a member from a group. Returns whether the row existed.
     pub async fn remove_group_member(&self, group_id: i64, user_id: i64) -> Result<bool, DbError> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query("DELETE FROM group_members WHERE group_id = ? AND user_id = ?")
             .bind(group_id)
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         if result.rows_affected() > 0 {
             // The member can no longer resolve the shared paths, so their
-            // wrapped keys are dead weight; remove them.
-            self.delete_share_keys_for_group_member(group_id, user_id)
-                .await?;
+            // wrapped keys are dead weight; remove them in the same
+            // transaction so the removal is all-or-nothing.
+            sqlx::query(
+                "DELETE FROM e2ee_share_keys
+                 WHERE recipient_id = ?
+                   AND node_id IN (
+                       SELECT node_id FROM shares
+                       WHERE kind = 'group' AND recipient_group_id = ?
+                   )",
+            )
+            .bind(user_id)
+            .bind(group_id)
+            .execute(&mut *tx)
+            .await?;
         }
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 

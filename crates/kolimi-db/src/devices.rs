@@ -165,33 +165,25 @@ impl Db {
         if public_key.len() != 32 {
             return Err(DbError::Conflict("device public key length".to_string()));
         }
-        let existing: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM e2ee_devices WHERE user_id = ? AND public_key = ?")
-                .bind(user_id)
-                .bind(public_key)
-                .fetch_optional(&self.pool)
-                .await?;
-        if let Some(existing) = existing {
-            sqlx::query("UPDATE e2ee_devices SET name = ?, last_seen_at = ? WHERE id = ?")
-                .bind(name)
-                .bind(now_millis())
-                .bind(existing)
-                .execute(&self.pool)
-                .await?;
-            return Ok(existing);
-        }
-        let result = sqlx::query(
+        // Idempotent on (user_id, public_key): the unique index makes this a
+        // single atomic upsert, so concurrent registrations cannot create a
+        // duplicate device row.
+        let now = now_millis();
+        let id: i64 = sqlx::query_scalar(
             "INSERT INTO e2ee_devices (user_id, name, public_key, created_at, last_seen_at)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, public_key)
+             DO UPDATE SET name = excluded.name, last_seen_at = excluded.last_seen_at
+             RETURNING id",
         )
         .bind(user_id)
         .bind(name)
         .bind(public_key)
-        .bind(now_millis())
-        .bind(now_millis())
-        .execute(&self.pool)
+        .bind(now)
+        .bind(now)
+        .fetch_one(&self.pool)
         .await?;
-        Ok(result.last_insert_rowid())
+        Ok(id)
     }
 
     /// Lists a user's registered devices, newest first.

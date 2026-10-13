@@ -340,14 +340,16 @@ impl Db {
 
     /// Disables TOTP: removes the secret and all recovery codes.
     pub async fn clear_totp(&self, user_id: i64) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM totp_secrets WHERE user_id = ?")
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -431,17 +433,16 @@ impl Db {
         validate_username(username)?;
         let now = now_millis();
         let mut tx = self.pool.begin().await?;
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
-            .fetch_one(&mut *tx)
-            .await?;
+        // The first user becomes admin. The election runs *inside* the INSERT
+        // (with the table's write lock held), so two concurrent calls can't
+        // both observe an empty table and both become admin.
         let user = sqlx::query_as::<_, User>(
             "INSERT INTO users (username, password_hash, is_admin, created_at)
-             VALUES (?, ?, ?, ?)
+             VALUES (?, ?, (SELECT COUNT(*) FROM users) = 0, ?)
              RETURNING *",
         )
         .bind(username)
         .bind(password_hash)
-        .bind(count == 0)
         .bind(now)
         .fetch_one(&mut *tx)
         .await
