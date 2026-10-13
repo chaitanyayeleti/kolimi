@@ -60,17 +60,21 @@ detect_target() {
 }
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+installed="$(mktemp)"
 
-# Rollback tracking: files installed during this run, removed on failure.
-INSTALLED_FILES=()
-
-rollback() {
-    for f in "${INSTALLED_FILES[@]}"; do
-        rm -f "$f"
-    done
+# Remove any partially installed files if the script exits non-zero.
+cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        while IFS= read -r file; do
+            if [ -n "$file" ]; then
+                rm -f "$file"
+            fi
+        done < "$installed"
+    fi
+    rm -rf "$tmp" "$installed"
 }
-trap 'rollback' ERR
+trap 'cleanup' EXIT
 
 if [ -z "$BINARY" ]; then
     need curl
@@ -121,7 +125,7 @@ install_bin() {
         need sudo
         sudo install -Dm755 "$src" "$dst"
     fi
-    INSTALLED_FILES+=("$dst")
+    printf '%s\n' "$dst" >> "$installed"
     say "installed $dst"
 }
 
