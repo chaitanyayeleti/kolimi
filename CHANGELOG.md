@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.11]
+
 ### Added
 - **Upload tray**: a floating panel with per-file **progress bars** and
   **retry** on failure (uploads now use `XMLHttpRequest` so progress is
