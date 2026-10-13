@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.9]
+
 ### Added
 - **Web-UI multi-device management**: the Encryption dialog now has a
   **Devices** panel — approve pending enrollments, revoke devices, and
