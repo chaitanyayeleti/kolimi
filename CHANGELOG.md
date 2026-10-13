@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.10]
+
 ### Added
 - **Web-UI polish**: a **storage ring** in the sidebar (used/quota donut,
   `GET /api/me/usage`), **right-click context menus**, an image **lightbox**,
