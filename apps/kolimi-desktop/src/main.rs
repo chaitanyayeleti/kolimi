@@ -945,6 +945,22 @@ fn open_account(app: AppHandle, server: String) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
+        // Single instance: a second launch (e.g. re-launching after an update)
+        // focuses the running one instead of starting a second tray icon.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let window = app
+                .get_webview_window("main")
+                .or_else(|| app.get_webview_window("settings"));
+            match window {
+                Some(window) => {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+                None => open_settings(app),
+            }
+            run_sync(app.clone());
+        }))
         .invoke_handler(tauri::generate_handler![
             get_settings,
             sign_in,

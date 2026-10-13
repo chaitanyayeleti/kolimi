@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-10-13
+
+### Fixed
+- **Desktop single instance**: launching the client again (e.g. re-launching
+  after an update) now focuses the running instance instead of starting a
+  second process and a **second tray icon**. The second process exits.
+
 ## [0.1.13] - 2026-10-13
 
 ### Fixed
