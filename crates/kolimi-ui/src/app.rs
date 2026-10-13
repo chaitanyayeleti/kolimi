@@ -55,6 +55,25 @@ struct SearchHit {
     snippet: String,
 }
 
+/// Upload-tray status for one file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UploadStatus {
+    Uploading,
+    Done,
+    Failed,
+}
+
+/// One file in the upload tray.
+#[derive(Clone, PartialEq)]
+struct UploadItem {
+    id: u32,
+    name: String,
+    dir: String,
+    progress: u8,
+    status: UploadStatus,
+    file: web_sys::File,
+}
+
 fn parse_results(body: &Value) -> Vec<SearchHit> {
     body.get("results")
         .and_then(Value::as_array)
@@ -394,11 +413,11 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
             </label>
             <Show when=move || needs_code.get()>
                 <label>
-                    "Two-factor code"
+                    "Two-factor or recovery code"
                     <input
                         type="text"
-                        inputmode="numeric"
                         autocomplete="one-time-code"
+                        placeholder="6-digit code or recovery code"
                         prop:value=move || code.get()
                         on:input=move |ev| code.set(event_target_value(&ev))
                     />
@@ -450,6 +469,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let lightbox = RwSignal::new(Option::<Entry>::None);
     let move_drag = RwSignal::new(Option::<Entry>::None);
     let undo = RwSignal::new(Option::<(String, i64)>::None);
+    let uploads = RwSignal::new(Vec::<UploadItem>::new());
+    let upload_seq = RwSignal::new(0u32);
+    let selected = RwSignal::new(std::collections::HashSet::<String>::new());
     // Administrators get the user-management panel.
     spawn_local(async move {
         if let Ok(r) = api::get("/api/me").await
@@ -543,50 +565,103 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         }
     };
 
-    let upload_files = move |selected: Vec<web_sys::File>| {
-        if selected.is_empty() {
+    // Uploads one file, tracking it in the tray.
+    let start_upload = move |file: web_sys::File, dir: String, id: u32| {
+        let url = format!(
+            "/dav{}",
+            encode_path(&format!("{}/{}", dir.trim_end_matches('/'), file.name()))
+        );
+        let progress_signal = uploads;
+        let done_signal = uploads;
+        spawn_local(async move {
+            let bytes = match api::read_file(&file).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    progress_signal.update(|list| {
+                        if let Some(item) = list.iter_mut().find(|item| item.id == id) {
+                            item.status = UploadStatus::Failed;
+                        }
+                    });
+                    error.set(e);
+                    return;
+                }
+            };
+            api::upload(
+                &url,
+                bytes,
+                move |pct| {
+                    progress_signal.update(|list| {
+                        if let Some(item) = list.iter_mut().find(|item| item.id == id) {
+                            item.progress = pct;
+                        }
+                    });
+                },
+                move |result| {
+                    let (ok, warning) = match result {
+                        Ok((status, warning)) => (matches!(status, 201 | 204), warning),
+                        Err(_) => (false, None),
+                    };
+                    if let Some(percent) = warning {
+                        quota_warn.set(Some(percent));
+                    }
+                    done_signal.update(|list| {
+                        if let Some(item) = list.iter_mut().find(|item| item.id == id) {
+                            item.status = if ok {
+                                UploadStatus::Done
+                            } else {
+                                UploadStatus::Failed
+                            };
+                        }
+                    });
+                    if !done_signal
+                        .get_untracked()
+                        .iter()
+                        .any(|item| item.status == UploadStatus::Uploading)
+                    {
+                        let snapshot = done_signal.get_untracked();
+                        let done = snapshot
+                            .iter()
+                            .filter(|item| item.status == UploadStatus::Done)
+                            .count();
+                        let failed = snapshot
+                            .iter()
+                            .filter(|item| item.status == UploadStatus::Failed)
+                            .count();
+                        if failed == 0 {
+                            notice.set(format!(
+                                "Uploaded {done} file{}",
+                                if done == 1 { "" } else { "s" }
+                            ));
+                        } else {
+                            error.set(format!("Uploaded {done}, {failed} failed"));
+                        }
+                        load(path.get_untracked());
+                    }
+                },
+            );
+        });
+    };
+
+    let upload_files = move |files: Vec<web_sys::File>| {
+        if files.is_empty() {
             return;
         }
-        let current = path.get_untracked();
-        let total = selected.len();
-        upload_label.set(format!("0/{total}"));
-        spawn_local(async move {
-            let mut uploaded = 0usize;
-            let mut failed = 0usize;
-            for (index, file) in selected.into_iter().enumerate() {
-                let name = file.name();
-                upload_label.set(format!("{}/{total}", index + 1));
-                let result = match api::read_file(&file).await {
-                    Ok(bytes) => {
-                        let url = format!(
-                            "/dav{}",
-                            encode_path(&format!("{}/{}", current.trim_end_matches('/'), name))
-                        );
-                        api::dav("PUT", &url, Some(bytes), &[]).await
-                    }
-                    Err(e) => Err(e),
-                };
-                match result {
-                    Ok(r) if matches!(r.status, 201 | 204) => {
-                        uploaded += 1;
-                        if let Some(percent) = r.quota_warning {
-                            quota_warn.set(Some(percent));
-                        }
-                    }
-                    _ => failed += 1,
-                }
-            }
-            upload_label.set("Upload".to_string());
-            if failed == 0 {
-                notice.set(format!(
-                    "Uploaded {uploaded} file{}",
-                    if uploaded == 1 { "" } else { "s" }
-                ));
-            } else {
-                error.set(format!("Uploaded {uploaded}, {failed} failed"));
-            }
-            load(current);
-        });
+        let dir = path.get_untracked();
+        for file in files {
+            let id = upload_seq.get_untracked() + 1;
+            upload_seq.set(id);
+            uploads.update(|list| {
+                list.push(UploadItem {
+                    id,
+                    name: file.name(),
+                    dir: dir.clone(),
+                    progress: 0,
+                    status: UploadStatus::Uploading,
+                    file: file.clone(),
+                });
+            });
+            start_upload(file, dir.clone(), id);
+        }
     };
 
     let collect_files = move |files: web_sys::FileList| {
@@ -720,6 +795,66 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 Err(e) => error.set(e),
             }
         });
+    };
+
+    // ---- Multi-select + bulk actions ----
+    let toggle_select = move |target: String| {
+        selected.update(|set| {
+            if !set.insert(target.clone()) {
+                set.remove(&target);
+            }
+        });
+    };
+
+    let bulk_trash = move |_| {
+        let paths: Vec<String> = selected.get_untracked().into_iter().collect();
+        let current = path.get_untracked();
+        let count = paths.len();
+        spawn_local(async move {
+            for target in &paths {
+                let url = format!("/dav{}", encode_path(target));
+                let _ = api::dav("DELETE", &url, None, &[]).await;
+            }
+            selected.set(std::collections::HashSet::new());
+            notice.set(format!("Moved {count} item(s) to trash"));
+            load(current);
+        });
+    };
+
+    let bulk_move = move |_| {
+        let Some(dest) = api::prompt("Move selected to (folder path)", "/") else {
+            return;
+        };
+        let paths: Vec<String> = selected.get_untracked().into_iter().collect();
+        let count = paths.len();
+        spawn_local(async move {
+            for target in &paths {
+                let name = target.rsplit('/').next().unwrap_or("file");
+                let destination = format!("/{}/{}", dest.trim_matches('/'), name);
+                let source = format!("/dav{}", encode_path(target));
+                let dav_dest = format!("/dav{}", encode_path(&destination));
+                let _ = api::dav("MOVE", &source, None, &[("destination", &dav_dest)]).await;
+            }
+            selected.set(std::collections::HashSet::new());
+            notice.set(format!("Moved {count} item(s)"));
+            load(path.get_untracked());
+        });
+    };
+
+    let bulk_download = move |_| {
+        let paths: Vec<String> = selected.get_untracked().into_iter().collect();
+        for target in paths {
+            let url = format!("/dav{}", encode_path(&target));
+            if let Some(document) = web_sys::window().and_then(|window| window.document())
+                && let Ok(element) = document.create_element("a")
+                && let Ok(anchor) = element.dyn_into::<web_sys::HtmlAnchorElement>()
+            {
+                anchor.set_href(&url);
+                anchor.set_download("");
+                anchor.click();
+            }
+        }
+        selected.set(std::collections::HashSet::new());
     };
 
     let restore = move |item: TrashItem| {
@@ -1072,6 +1207,21 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     </div>
                 </header>
                 <main class="content">
+                    <Show when=move || !selected.get().is_empty()>
+                        <div class="bulk-bar">
+                            <span class="bulk-count">
+                                {move || format!("{} selected", selected.get().len())}
+                            </span>
+                            <button on:click=bulk_download>"Download"</button>
+                            <button on:click=bulk_move>"Move to…"</button>
+                            <button class="danger" on:click=bulk_trash>"Trash"</button>
+                            <button
+                                on:click=move |_| selected.set(std::collections::HashSet::new())
+                            >
+                                "Clear"
+                            </button>
+                        </div>
+                    </Show>
 
         {move || {
             if search_active.get() {
@@ -1219,9 +1369,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let lightbox_copy = entry.clone();
                                                 let drag_copy = entry.clone();
                                                 let drop_copy = entry.clone();
+                                                let select_path = entry.path.clone();
+                                                let selected_path = entry.path.clone();
                                                 view! {
                                                     <div
                                                         class="tile"
+                                                        class:selected=move || {
+                                                            selected.get().contains(&selected_path)
+                                                        }
                                                         draggable="true"
                                                         on:dragstart=move |_| {
                                                             move_drag.set(Some(drag_copy.clone()));
@@ -1254,7 +1409,16 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                     >
                                                         <button
                                                             class="tile-open"
-                                                            on:click=move |_| open(open_entry.clone())
+                                                            on:click=move |ev: ev::MouseEvent| {
+                                                                if ev.ctrl_key()
+                                                                    || ev.meta_key()
+                                                                    || ev.shift_key()
+                                                                {
+                                                                    toggle_select(select_path.clone());
+                                                                } else {
+                                                                    open(open_entry.clone());
+                                                                }
+                                                            }
                                                         >
                                                             <span class=format!(
                                                                 "tile-thumb {}",
@@ -1383,9 +1547,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let ctx_copy = entry.clone();
                                                 let drag_copy = entry.clone();
                                                 let drop_copy = entry.clone();
+                                                let select_path = entry.path.clone();
+                                                let selected_path = entry.path.clone();
                                                 view! {
                                                     <li
                                                         class="file"
+                                                        class:selected=move || {
+                                                            selected.get().contains(&selected_path)
+                                                        }
                                                         draggable="true"
                                                         on:dragstart=move |_| {
                                                             move_drag.set(Some(drag_copy.clone()));
@@ -1418,7 +1587,16 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                     >
                                                         <button
                                                             class="file-open"
-                                                            on:click=move |_| open(open_entry.clone())
+                                                            on:click=move |ev: ev::MouseEvent| {
+                                                                if ev.ctrl_key()
+                                                                    || ev.meta_key()
+                                                                    || ev.shift_key()
+                                                                {
+                                                                    toggle_select(select_path.clone());
+                                                                } else {
+                                                                    open(open_entry.clone());
+                                                                }
+                                                            }
                                                         >
                                                             <span class=format!(
                                                                 "file-icon {}",
@@ -1682,6 +1860,78 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     </div>
                 </Show>
             </div>
+
+            <Show when=move || !uploads.get().is_empty()>
+                <div class="upload-tray">
+                    <div class="upload-tray-head">
+                        <b>"Uploads"</b>
+                        <button
+                            class="icon-btn"
+                            aria-label="Clear"
+                            on:click=move |_| uploads.set(Vec::new())
+                        >
+                            <Icon name="x"/>
+                        </button>
+                    </div>
+                    <ul>
+                        <For
+                            each=move || uploads.get()
+                            key=|item| item.id
+                            children=move |item| {
+                                let id = item.id;
+                                let name = item.name.clone();
+                                let progress = item.progress;
+                                let status = item.status;
+                                let retry_file = item.file.clone();
+                                let retry_dir = item.dir.clone();
+                                view! {
+                                    <li class="upload-item">
+                                        <span class="upload-name">{name}</span>
+                                        <span class="upload-bar">
+                                            <span
+                                                class="upload-bar-fill"
+                                                style=format!("width:{progress}%")
+                                            ></span>
+                                        </span>
+                                        <span class="upload-status">
+                                            {match status {
+                                                UploadStatus::Uploading => {
+                                                    view! { <span class="muted">{format!("{progress}%")}</span> }
+                                                        .into_any()
+                                                }
+                                                UploadStatus::Done => {
+                                                    view! { <span class="ok">"done"</span> }.into_any()
+                                                }
+                                                UploadStatus::Failed => {
+                                                    view! {
+                                                        <button
+                                                            class="icon-btn"
+                                                            title="Retry"
+                                                            on:click=move |_| {
+                                                                uploads
+                                                                    .update(|list| {
+                                                                        if let Some(it) = list.iter_mut().find(|i| i.id == id) {
+                                                                            it.status = UploadStatus::Uploading;
+                                                                            it.progress = 0;
+                                                                        }
+                                                                    });
+                                                                start_upload(retry_file.clone(), retry_dir.clone(), id);
+                                                            }
+                                                        >
+                                                            <Icon name="refresh"/>
+                                                        </button>
+                                                    }
+                                                        .into_any()
+                                                }
+                                            }}
+                                        </span>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+                </div>
+            </Show>
 
             {move || {
                 context_menu
@@ -2127,6 +2377,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let devices = RwSignal::new(Vec::<Value>::new());
     let device_name = RwSignal::new(String::new());
     let enrolling = RwSignal::new(Option::<(i64, [u8; 32])>::None);
+    let use_recovery = RwSignal::new(false);
     let close = move |_| on_close.run(());
 
     let load_devices = Callback::new(move |_: ()| {
@@ -2148,12 +2399,18 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let unlock = move |_| {
         let secret = passphrase.get_untracked();
         if secret.is_empty() {
-            error.set("Enter your E2EE passphrase".to_string());
+            error.set("Enter your passphrase or recovery code".to_string());
             return;
         }
+        let recovery = use_recovery.get_untracked();
         busy.set(true);
         spawn_local(async move {
-            match crate::e2ee::unlock(&secret).await {
+            let result = if recovery {
+                crate::e2ee::unlock_recovery(&secret).await
+            } else {
+                crate::e2ee::unlock(&secret).await
+            };
+            match result {
                 Ok(key) => {
                     master.set(Some(key));
                     busy.set(false);
@@ -2248,7 +2505,9 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                 </p>
                 <Show when=move || master.get().is_none()>
                     <label>
-                        "Passphrase"
+                        {move || {
+                            if use_recovery.get() { "Recovery code" } else { "Passphrase" }
+                        }}
                         <input
                             type="password"
                             autocomplete="off"
@@ -2260,6 +2519,21 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                         <button class="primary" disabled=move || busy.get() on:click=unlock>
                             <Icon name="lock"/>
                             {move || if busy.get() { "Unlocking…" } else { "Unlock" }}
+                        </button>
+                        <button
+                            class="ghost"
+                            on:click=move |_| {
+                                use_recovery.set(!use_recovery.get_untracked());
+                                error.set(String::new());
+                            }
+                        >
+                            {move || {
+                                if use_recovery.get() {
+                                    "Use passphrase"
+                                } else {
+                                    "Use recovery code"
+                                }
+                            }}
                         </button>
                     </div>
                 </Show>

@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Upload tray**: a floating panel with per-file **progress bars** and
+  **retry** on failure (uploads now use `XMLHttpRequest` so progress is
+  reported).
+- **Multi-select + bulk actions**: ctrl/cmd/shift-click to select, then
+  **download**, **move to…**, or **trash** the selection.
+- **E2EE recovery-code unlock**: the Encryption dialog can now unlock the
+  keyring with the **recovery code** ("Use recovery code"), and the login
+  field accepts a **TOTP recovery code** (relabelled "two-factor or recovery
+  code"). Added a **Recovery** section to `docs/operations.md` clarifying the
+  three secrets (login password, TOTP recovery codes, E2EE recovery code).
+
 ## [0.1.10]
 
 ### Added

@@ -51,6 +51,9 @@ web-sys = { version = "0.3", features = [
     "RequestInit",
     "Response",
     "Storage",
+    "ProgressEvent",
     "Url",
     "Window",
+    "XmlHttpRequest",
+    "XmlHttpRequestUpload",
 ] }

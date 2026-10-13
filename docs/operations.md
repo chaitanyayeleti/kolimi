@@ -280,6 +280,26 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   master key it already holds, so true revocation needs master-key
   rotation (MLS). See RFC 0007 / RFC 0008 and the roadmap.
 
+## Recovery
+
+Kolimi has **three independent recovery secrets** — don't confuse them:
+
+| Secret | What it recovers | How to use |
+| --- | --- | --- |
+| **Login password** | Account access (auth only) | An admin resets it: `kolimi-server user recover <user>`. Sessions are dropped; **no encrypted data is touched**. |
+| **TOTP recovery codes** | Second factor at login | Shown **once** at TOTP enrollment (10 codes, one-time). Enter one in the login **"two-factor or recovery code"** field when you lose your authenticator. Re-enroll TOTP for a fresh set. |
+| **E2EE recovery code** | The E2EE keyring (master key) | Shown **once** at `kolimi-sync --e2ee-setup`. In the web UI: **Encryption → "Use recovery code"**; on the CLI: `kolimi-sync --e2ee-recovery <code>`. |
+
+There is **no self-service password reset** — only an administrator can reset a
+login password. If a user loses every credential, an admin runs
+`kolimi-server user recover <user>` (add `--keep-totp` or `--remove-passkeys`
+as needed); the user then re-enrolls 2FA.
+
+**Important:** losing the E2EE passphrase *and* the E2EE recovery code makes
+the encrypted files unrecoverable — the server holds no keys and cannot help.
+A password reset never affects encrypted content (it is wrapped under the E2EE
+keyring, not the login password).
+
 ## Plugins
 
 Drop a component plus metadata into `<data>/plugins/` (see

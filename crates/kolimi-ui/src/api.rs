@@ -3,6 +3,7 @@
 use gloo_net::http::Request;
 use serde_json::Value;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{RequestCredentials, RequestInit};
 
@@ -81,12 +82,10 @@ pub async fn delete(url: &str) -> Result<ApiResponse, String> {
     to_api(response).await
 }
 
-/// A raw WebDAV response: status plus the near-quota warning, if any.
+/// A raw WebDAV response.
 pub struct DavResponse {
     /// HTTP status.
     pub status: u16,
-    /// Quota-usage percentage when the server warns (at or above 90%).
-    pub quota_warning: Option<u8>,
 }
 
 /// A raw `fetch` for WebDAV methods (PUT, MKCOL, MOVE, DELETE).
@@ -120,17 +119,81 @@ pub async fn dav(
         .await
         .map_err(|e| format!("{e:?}"))?;
     let response: web_sys::Response = response.dyn_into().map_err(|e| format!("{e:?}"))?;
-    let status = response.status();
-    let quota_warning = response
-        .headers()
-        .get("x-kolimi-quota-warning")
-        .ok()
-        .flatten()
-        .and_then(|value| value.parse::<u8>().ok());
     Ok(DavResponse {
-        status,
-        quota_warning,
+        status: response.status(),
     })
+}
+
+/// Uploads `bytes` to `url` via `XMLHttpRequest`, reporting upload progress
+/// (0..=100) and then the HTTP status. Used for the upload tray, where
+/// `fetch` cannot report upload progress.
+pub fn upload(
+    url: &str,
+    bytes: Vec<u8>,
+    on_progress: impl Fn(u8) + 'static,
+    on_done: impl FnOnce(Result<(u16, Option<u8>), String>) + 'static,
+) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let Ok(xhr) = web_sys::XmlHttpRequest::new() else {
+        on_done(Err("could not create the request".to_string()));
+        return;
+    };
+    if xhr.open("PUT", url).is_err() {
+        on_done(Err("could not open the request".to_string()));
+        return;
+    }
+    xhr.set_with_credentials(true);
+    if let Some(token) = csrf_token() {
+        let _ = xhr.set_request_header("X-CSRF-Token", &token);
+    }
+
+    if let Ok(upload) = xhr.upload() {
+        let progress = Rc::new(on_progress);
+        let handler = Closure::<dyn FnMut(web_sys::ProgressEvent)>::new(
+            move |event: web_sys::ProgressEvent| {
+                if event.length_computable() {
+                    let total = event.total();
+                    if total > 0.0 {
+                        let pct = ((event.loaded() / total) * 100.0).round().clamp(0.0, 100.0);
+                        progress(pct as u8);
+                    }
+                }
+            },
+        );
+        upload.set_onprogress(Some(handler.as_ref().unchecked_ref()));
+        handler.forget();
+    }
+
+    let done = Rc::new(RefCell::new(Some(on_done)));
+    let onload_done = done.clone();
+    let xhr_for_load = xhr.clone();
+    let onload = Closure::<dyn FnMut()>::new(move || {
+        if let Some(callback) = onload_done.borrow_mut().take() {
+            let status = xhr_for_load.status().unwrap_or(0);
+            let warning = xhr_for_load
+                .get_response_header("x-kolimi-quota-warning")
+                .ok()
+                .flatten()
+                .and_then(|value| value.parse::<u8>().ok());
+            callback(Ok((status, warning)));
+        }
+    });
+    xhr.set_onload(Some(onload.as_ref().unchecked_ref()));
+    onload.forget();
+
+    let onerror_done = done.clone();
+    let onerror = Closure::<dyn FnMut()>::new(move || {
+        if let Some(callback) = onerror_done.borrow_mut().take() {
+            callback(Err("upload failed".to_string()));
+        }
+    });
+    xhr.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+    onerror.forget();
+
+    let array = js_sys::Uint8Array::from(bytes.as_slice());
+    let _ = xhr.send_with_opt_buffer_source(Some(array.as_ref()));
 }
 
 /// Reads a file input's bytes.

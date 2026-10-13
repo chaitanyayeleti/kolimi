@@ -50,6 +50,24 @@ pub fn save_bytes(name: &str, bytes: &[u8]) {
 
 /// Unlocks the account's master key with a passphrase.
 pub async fn unlock(passphrase: &str) -> Result<MasterKey, String> {
+    let keyring = load_keyring().await?;
+    keyring
+        .unlock_with_passphrase(passphrase)
+        .map_err(|_| "Wrong passphrase".to_string())
+}
+
+/// Unlocks the account's master key with the recovery code.
+pub async fn unlock_recovery(code: &str) -> Result<MasterKey, String> {
+    let keyring = load_keyring().await?;
+    let parsed = kolimi_crypto::recovery_code_parse(code)
+        .map_err(|_| "Malformed recovery code".to_string())?;
+    keyring
+        .unlock_with_recovery(&parsed)
+        .map_err(|_| "Wrong recovery code".to_string())
+}
+
+/// Loads the account's keyring from the server.
+async fn load_keyring() -> Result<Keyring, String> {
     let response = api::get("/api/e2ee/keyring").await?;
     match response.status {
         200 => {}
@@ -67,10 +85,7 @@ pub async fn unlock(passphrase: &str) -> Result<MasterKey, String> {
         }
     }
     let keyring_json = response.body["keyring"].as_str().unwrap_or_default();
-    let keyring = Keyring::from_json(keyring_json).map_err(|_| "Malformed keyring".to_string())?;
-    keyring
-        .unlock_with_passphrase(passphrase)
-        .map_err(|_| "Wrong passphrase".to_string())
+    Keyring::from_json(keyring_json).map_err(|_| "Malformed keyring".to_string())
 }
 
 /// The raw file key and the ciphertext chunk lengths of an encrypted file.
