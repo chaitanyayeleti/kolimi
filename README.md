@@ -66,7 +66,7 @@ table and the next milestone (MLS group messaging, RFC 9420).
 | `crates/kolimi-ffi` | UniFFI bindings for the mobile shells (Kotlin/Swift) |
 | `crates/kolimi-ui` | Leptos (WASM) web UI, embedded into the server binary |
 | `crates/kolimi-server` | The single binary: HTTP routes, janitor, metrics, CLI, TLS |
-| `apps/kolimi-tray` | Tauri tray shell (separate workspace) |
+| `apps/kolimi-desktop` | Tauri desktop client (separate workspace) |
 | `docs/` | [Documentation index](docs/README.md): install, operations, architecture, audit, RFCs |
 | `fuzz/` | cargo-fuzz targets: chunking, preview decode, E2EE decrypt surface |
 
@@ -209,11 +209,12 @@ indexes or previews encrypted content. Test vectors
 are committed (`crates/kolimi-crypto/tests/vectors.json`) for other
 implementations; `crates/kolimi-crypto` holds the primitives.
 
-## Desktop tray + mobile core
+## Desktop client + mobile core
 
-- **Tray shell** (`apps/kolimi-tray`, Tauri, its own workspace): reads
-  `~/.config/kolimi/tray.json`, shows live sync status in the tray,
-  syncs on startup, every 5 minutes, and on demand.
+- **Desktop app** (`apps/kolimi-desktop`, Tauri, its own workspace): a native
+  window loads the server's `/app/` UI, with a first-run setup window
+  (`~/.config/kolimi/desktop.json`), a tray, and background sync on startup,
+  every 5 minutes, and on demand.
 - **Mobile core** (`crates/kolimi-ffi`, UniFFI): Kotlin/Swift/Python
   bindings for the sync core + E2EE setup (PRF secrets come from the
   platform ceremony). Background scheduling (WorkManager /

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kolimi — setup</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #10141c; color: #e6e9f0;
+    display: flex; justify-content: center;
+  }
+  main { width: 100%; max-width: 520px; padding: 28px 24px 40px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.lede { margin: 0 0 20px; color: #9aa4b8; }
+  label { display: block; margin-bottom: 14px; font-weight: 600; }
+  label small { display: block; font-weight: 400; color: #9aa4b8; margin-top: 2px; }
+  input {
+    display: block; width: 100%; margin-top: 6px; padding: 9px 11px;
+    border: 1px solid #2c3546; border-radius: 8px;
+    background: #171d27; color: inherit; font: inherit;
+  }
+  input:focus { outline: none; border-color: #5b8def; }
+  button {
+    width: 100%; margin-top: 8px; padding: 11px; border: 0; border-radius: 8px;
+    background: #5b8def; color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:hover { background: #4a7be0; }
+  #msg { margin-top: 14px; min-height: 20px; color: #ff8a8a; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kolimi</h1>
+  <p class="lede">
+    Connect to your Kolimi server. A local folder is kept in sync in the
+    background; browsing and sharing happen in the window.
+  </p>
+  <form id="setup">
+    <label>Server URL
+      <input name="server" placeholder="https://cloud.example.com" required autofocus>
+    </label>
+    <label>Username
+      <input name="username" required autocomplete="username">
+    </label>
+    <label>Password
+      <input name="password" type="password" required autocomplete="current-password">
+    </label>
+    <label>Local folder
+      <input name="local_dir" placeholder="~/Kolimi" required>
+    </label>
+    <label>Encrypted roots
+      <small>Comma-separated folders to encrypt end-to-end (optional).</small>
+      <input name="encrypted_roots" placeholder="Private">
+    </label>
+    <label>E2EE passphrase
+      <small>Only needed when encrypted roots are set (optional).</small>
+      <input name="e2ee_passphrase" type="password" autocomplete="off">
+    </label>
+    <button type="submit">Save &amp; open</button>
+  </form>
+  <p id="msg"></p>
+</main>
+<script>
+  const form = document.getElementById("setup");
+  const msg = document.getElementById("msg");
+
+  function expandHome(value) {
+    if (!value.startsWith("~")) return value;
+    return value.replace(/^~/, "");
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    msg.textContent = "";
+    const data = Object.fromEntries(new FormData(form).entries());
+    data.local_dir = expandHome(data.local_dir.trim());
+    data.server = data.server.trim().replace(/\/+$/, "");
+    data.encrypted_roots = data.encrypted_roots
+      ? data.encrypted_roots.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    data.e2ee_passphrase = data.e2ee_passphrase || null;
+    try {
+      await window.__TAURI__.core.invoke("save_config", { config: data });
+    } catch (error) {
+      msg.textContent = String(error);
+    }
+  });
+
+  window.__TAURI__.core.invoke("load_config").then((config) => {
+    if (!config) return;
+    for (const [key, value] of Object.entries(config)) {
+      const field = form.elements[key];
+      if (field) field.value = Array.isArray(value) ? value.join(",") : (value ?? "");
+    }
+  });
+</script>
+</body>
+</html>

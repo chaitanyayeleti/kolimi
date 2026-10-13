@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "kolimi-tray",
-  "version": "0.0.1",
-  "identifier": "dev.kolimi.tray",
+  "productName": "kolimi-desktop",
+  "version": "0.1.11",
+  "identifier": "dev.kolimi.desktop",
   "build": {
     "frontendDist": "ui"
   },
@@ -11,9 +11,9 @@
     "trayIcon": {
       "iconPath": "icon.png"
     },
-    "withGlobalTauri": false,
+    "withGlobalTauri": true,
     "security": {
-      "csp": "default-src 'none'"
+      "csp": null
     }
   },
   "bundle": {

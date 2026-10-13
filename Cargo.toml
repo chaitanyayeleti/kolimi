@@ -16,7 +16,7 @@ members = [
     "crates/kolimi-vfs",
     "crates/kolimi-webdav",
 ]
-exclude = ["fuzz", "apps/kolimi-tray"]
+exclude = ["fuzz", "apps/kolimi-desktop"]
 
 [profile.release]
 lto = "thin"

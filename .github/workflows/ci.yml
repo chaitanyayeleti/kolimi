@@ -123,20 +123,20 @@ jobs:
           test -s target/bindings/swift/kolimi_ffi.swift
           test -s target/bindings/python/kolimi_ffi.py
 
-  tray:
-    name: tray (Tauri)
+  desktop:
+    name: desktop (Tauri)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/kolimi-tray
+          workspaces: apps/kolimi-desktop
       - name: Install Tauri build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - run: cargo build --manifest-path apps/kolimi-tray/Cargo.toml
+      - run: cargo build --manifest-path apps/kolimi-desktop/Cargo.toml
 
   packaging:
     name: packaging (deb, helm, install smoke)

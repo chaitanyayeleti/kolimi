@@ -1,7 +1,18 @@
 # Decision 0002: Desktop client stack and plan (phase 1)
 
-Status: **Proposed — pending approval** · Date: 2026-10-12 · Depends on:
-RFC 0006 (sync client), [plan-clients.md](../plans/clients.md), issue #12
+Status: **Approved** · Date: 2026-10-12 · Approved: 2026-10-13 ·
+Depends on: RFC 0006 (sync client), [plan-clients.md](../plans/clients.md),
+issue #12
+
+## Outcome (approved 2026-10-13)
+
+- **Architecture: Option A** (remote webview) — the Tauri window loads the
+  server's `/app/` URL, with native tray + background sync alongside. Evolve
+  toward Option B (embedded UI + Rust proxy, offline) in phase 1.5.
+- **Repo:** promote `apps/kolimi-tray` in-repo → `apps/kolimi-desktop`.
+- **Scope:** Linux-only for phase 1; Windows/macOS follow.
+- **Distribution:** `.deb` + AppImage + AUR (`kolimi-desktop`); add the
+  optional Tauri auto-updater in week 6.
 
 ## Context
 

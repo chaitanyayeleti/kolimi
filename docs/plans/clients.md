@@ -16,9 +16,9 @@ emits Kotlin/Swift/Python bindings.
   boundary in `kolimi-ffi`. No OS dependencies, so every client reuses it.
 - **Desktop:** a full app built on **Tauri** (Rust backend + system
   webview) that **reuses the existing Leptos UI** (`kolimi-ui`) and adds
-  native background sync via `kolimi-sync`. `apps/kolimi-tray` already
-  proves the stack builds. (A Rust-native GUI — Dioxus/Slint/egui — is an
-  alternative if a webview is undesirable; it means a separate UI.)
+  native background sync via `kolimi-sync`. `apps/kolimi-desktop` is the
+  promoted tray shell (own workspace). (A Rust-native GUI — Dioxus/Slint/egui
+  — is an alternative if a webview is undesirable; it means a separate UI.)
 - **Mobile:** Kotlin + Jetpack Compose (Android) / SwiftUI (iOS) shells
   over the same UniFFI core; `WorkManager` / `BGTaskScheduler` for
   background sync. No Google Play Services, no Firebase.
@@ -27,7 +27,7 @@ emits Kotlin/Swift/Python bindings.
 
 | Week | Deliverable | Exit criteria |
 | --- | --- | --- |
-| **1 — stack + shell** | Decide Tauri-reuse vs Rust-native; promote `apps/kolimi-tray` into `apps/kolimi-desktop`; full window that loads the embedded UI and logs in | App opens, logs into a server, browses files |
+| **1 — stack + shell** | Decide Tauri-reuse vs Rust-native; promote `apps/kolimi-tray` into `apps/kolimi-desktop`; full window that loads the server `/app/` UI (Option A) and logs in | App opens, logs into a server, browses files |
 | **2 — files** | Upload/download, drag-and-drop, rename/move/delete, versions/trash, search, previews (reuse the JSON API + UI) | Feature parity with the web UI in the desktop shell |
 | **3 — native sync** | Embed `kolimi-sync`: local "Kolimi" folder, tray icon, auto-start, periodic + on-demand sync, conflict handling | Round-trip sync; background sync on Linux; conflicts → `.conflict-<ts>` |
 | **4 — auth & credentials** | Password + passkey/TOTP login; credentials in the OS secret store (libsecret / Credential Manager / Keychain); TLS trust | Secure storage works on Linux; no secrets in logs/config plaintext |

@@ -311,8 +311,9 @@ a 16 MiB memory cap; traps are contained and audited (`plugin.error`).
 
 ## Desktop and mobile clients
 
-- **Tray** (`apps/kolimi-tray`): config at
-  `~/.config/kolimi/tray.json`:
+- **Desktop** (`apps/kolimi-desktop`): a native Tauri window loads the
+  server's `/app/` UI, with a tray and background sync. On first run a setup
+  window writes `~/.config/kolimi/desktop.json`:
 
   ```json
   {
@@ -325,9 +326,9 @@ a 16 MiB memory cap; traps are contained and audited (`plugin.error`).
   }
   ```
 
-  It syncs at startup, every five minutes, and on demand, showing status
-  in the tray menu. `chmod 600` the file; platform keychain storage is
-  planned.
+  It syncs at startup, every five minutes, and on demand, showing status in
+  the tray menu. `chmod 600` the file; platform keychain storage is planned
+  (week 3). `KOLIMI_DESKTOP_CONFIG` overrides the path.
 - **CLI** (`kolimi-sync`): one-shot sync; run it from a timer or
   watcher. `--e2ee-setup`, `--share/--unshare`, `--group`.
 - **WebDAV / CalDAV / CardDAV**: any client. WebDAV is class 1 **and 2**:

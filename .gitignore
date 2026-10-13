@@ -10,8 +10,8 @@
 crates/kolimi-server/assets/ui/*
 !crates/kolimi-server/assets/ui/not-built.html
 
-# Tauri tray has its own workspace and target dir
-apps/kolimi-tray/target/
+# Desktop client has its own workspace and target dir
+apps/kolimi-desktop/target/
 
 # Example plugin build dirs
 examples/*/target/

@@ -115,7 +115,7 @@ and run against a real server (`build_app`) on an ephemeral
 ## Future work
 
 - uniffi bindings and mobile background upload (M5/M6 clients).
-- Tauri tray shell (status, pause/resume, selective sync).
+- Tauri desktop client (status, pause/resume, selective sync).
 - Watcher mode with debounce; upload batching.
 - Client-side chunk cache GC (LRU by last use).
 - E2EE: encrypt chunks and manifests client-side before `split()`;

@@ -18,7 +18,7 @@ A few facts that make this concrete:
 - Third-party code never links into the binary. Plugins are WebAssembly
   components run by `kolimi-plugins` in a wasmtime sandbox whose
   capabilities are the import list.
-- The desktop tray is a **separate workspace** (`apps/kolimi-tray`), so
+- The desktop client is a **separate workspace** (`apps/kolimi-desktop`), so
   the Tauri/webkit dependency tree never touches the server build.
 
 ## Crate map
@@ -39,7 +39,7 @@ A few facts that make this concrete:
 | `kolimi-ui` | Leptos web UI, compiled to wasm and embedded as assets | (wasm only) |
 | `kolimi-sync` | Desktop sync core + CLI | `chunk`, `crypto` |
 | `kolimi-ffi` | UniFFI bindings for mobile shells | `sync`, `crypto` |
-| `apps/kolimi-tray` | Tauri tray shell (own workspace) | `sync` |
+| `apps/kolimi-desktop` | Tauri desktop client (own workspace) | `sync` |
 
 Dependency direction is acyclic and points one way: leaf utilities →
 domain → protocols → composition root. The server crate is large

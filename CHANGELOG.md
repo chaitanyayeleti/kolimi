@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Desktop client (phase 1)**: promoted the tray into `apps/kolimi-desktop`
+  (Tauri v2, own workspace). A native window loads the server's `/app/` UI
+  (Option A), with a **first-run setup window** that writes
+  `~/.config/kolimi/desktop.json`, a tray menu (Open / Open folder / Sync now
+  / Setup / Quit), and background sync on startup, every 5 minutes, and on
+  demand. Decision 0002 approved (Option A, Linux-first, in-repo).
+
 ## [0.1.11]
 
 ### Added

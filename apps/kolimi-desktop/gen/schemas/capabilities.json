@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capability for the Kolimi desktop windows.","local":true,"windows":["main","settings"],"permissions":["core:default"]}}
