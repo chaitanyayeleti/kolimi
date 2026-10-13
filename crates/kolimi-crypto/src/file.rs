@@ -42,8 +42,11 @@ impl FileKey {
     /// equal chunks encrypt identically (CAS delta works) and different
     /// chunks never reuse a nonce.
     fn nonce_for(&self, plaintext: &[u8]) -> Result<[u8; NONCE_LEN], CryptoError> {
-        let mut info = b"kolimi-nonce-v1".to_vec();
-        info.extend(blake3::hash(plaintext).as_bytes());
+        const PREFIX: &[u8] = b"kolimi-nonce-v1";
+        // Fixed-size stack buffer: no heap allocation on the per-chunk path.
+        let mut info = [0u8; PREFIX.len() + 32];
+        info[..PREFIX.len()].copy_from_slice(PREFIX);
+        info[PREFIX.len()..].copy_from_slice(blake3::hash(plaintext).as_bytes());
         let derived = hkdf32(&self.0, None, &info)?;
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(&derived[..NONCE_LEN]);
@@ -56,7 +59,8 @@ impl FileKey {
     pub fn encrypt_chunk(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let key = self.chunk_key()?;
         let nonce = self.nonce_for(plaintext)?;
-        let mut out = nonce.to_vec();
+        let mut out = Vec::with_capacity(NONCE_LEN + plaintext.len() + TAG_LEN);
+        out.extend_from_slice(&nonce);
         out.extend(aead_encrypt(&key, &nonce, CHUNK_AAD, plaintext)?);
         Ok(out)
     }

@@ -164,6 +164,7 @@ impl kolimi::plugin::host::Host for StoreData {
 /// The plugin host: one engine, all loaded components.
 pub struct PluginHost {
     engine: Engine,
+    linker: Linker<StoreData>,
     plugins: BTreeMap<String, Loaded>,
 }
 
@@ -235,7 +236,19 @@ impl PluginHost {
                 );
             }
         }
-        Ok(Self { engine, plugins })
+        // Build the linker once: it is immutable and shared by every call.
+        let mut linker = Linker::new(&engine);
+        kolimi::plugin::host::add_to_linker::<StoreData, HasSelf<StoreData>>(&mut linker, |data| {
+            data
+        })
+        .map_err(|error| PluginError::Internal(error.to_string()))?;
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+            .map_err(|error| PluginError::Internal(error.to_string()))?;
+        Ok(Self {
+            engine,
+            linker,
+            plugins,
+        })
     }
 
     /// Metadata for all loaded plugins.
@@ -292,17 +305,7 @@ impl PluginHost {
             .map_err(|error| PluginError::Internal(error.to_string()))?;
         store.limiter(|data| &mut data.limits);
 
-        let mut linker = Linker::new(&self.engine);
-        kolimi::plugin::host::add_to_linker::<StoreData, HasSelf<StoreData>>(&mut linker, |data| {
-            data
-        })
-        .map_err(|error| PluginError::Internal(error.to_string()))?;
-        // WASI imports exist (the guest's std links them) but every
-        // capability is empty: no preopens, no sockets, no env, no args.
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .map_err(|error| PluginError::Internal(error.to_string()))?;
-
-        let bindings = Plugin::instantiate(&mut store, &loaded.component, &linker)
+        let bindings = Plugin::instantiate(&mut store, &loaded.component, &self.linker)
             .map_err(|error| PluginError::Trap(error.to_string()))?;
         let request = exports::kolimi::plugin::api::Request {
             method: request.method.clone(),

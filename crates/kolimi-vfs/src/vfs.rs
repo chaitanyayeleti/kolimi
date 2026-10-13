@@ -61,13 +61,7 @@ impl Node {
             _ => NodeKind::File,
         };
         let content_id = match (&node.content_id, kind) {
-            (Some(bytes), NodeKind::File) => {
-                let arr: [u8; 32] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| VfsError::Conflict("stored content id has wrong length".into()))?;
-                Some(Hash::from_bytes(arr))
-            }
+            (Some(bytes), NodeKind::File) => Some(content_id_from_bytes(bytes)?),
             _ => None,
         };
         Ok(Self {
@@ -695,12 +689,7 @@ impl Vfs {
             .await?
             .filter(|version| version.node_id == node.id)
             .ok_or(VfsError::NotFound)?;
-        let arr: [u8; 32] = version
-            .content_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| VfsError::Conflict("stored content id has wrong length".into()))?;
-        let content_id = Hash::from_bytes(arr);
+        let content_id = content_id_from_bytes(&version.content_id)?;
         let manifest = self.store.get_manifest(user_id, &content_id).await?;
         let db_node = self
             .db
@@ -865,10 +854,9 @@ impl Vfs {
         let mut keep_manifests: HashSet<Hash> = HashSet::new();
         let mut keep_chunks: HashSet<Hash> = HashSet::new();
         for bytes in content_ids {
-            let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+            let Ok(content_id) = content_id_from_bytes(&bytes) else {
                 continue;
             };
-            let content_id = Hash::from_bytes(arr);
             keep_manifests.insert(content_id);
             // A referenced manifest must be readable; if it is not, abort the
             // sweep rather than treating it as having no chunks (which would
@@ -896,10 +884,9 @@ impl Vfs {
         let content_ids = self.db.referenced_content_ids(user_id).await?;
         let mut total = 0u64;
         for bytes in content_ids {
-            let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+            let Ok(content_id) = content_id_from_bytes(&bytes) else {
                 continue;
             };
-            let content_id = Hash::from_bytes(arr);
             let manifest = self.store.get_manifest(user_id, &content_id).await?;
             total = total.saturating_add(manifest.size);
         }
@@ -921,10 +908,9 @@ impl Vfs {
         let mut checked = 0;
         let mut bytes = 0;
         for raw in content_ids {
-            let Ok(arr) = <[u8; 32]>::try_from(raw.as_slice()) else {
+            let Ok(content_id) = content_id_from_bytes(&raw) else {
                 continue;
             };
-            let content_id = Hash::from_bytes(arr);
             let stats = self.store.verify_manifest(user_id, &content_id).await?;
             checked += stats.chunks_checked;
             bytes += stats.bytes;
@@ -957,6 +943,14 @@ impl Vfs {
         }
         Ok((parent, name))
     }
+}
+
+/// Decodes a stored 32-byte content id, rejecting any other length.
+pub(crate) fn content_id_from_bytes(bytes: &[u8]) -> Result<Hash, VfsError> {
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| VfsError::Conflict("stored content id has wrong length".into()))?;
+    Ok(Hash::from_bytes(arr))
 }
 
 /// Builds the storage-quota error.

@@ -94,7 +94,7 @@ async fn handle(
         "MOVE" => copy_move(&vfs, &locks, user_id, &vfs_path, &headers, true).await,
         "LOCK" => lock_node(&vfs, &locks, &user, &segments, &vfs_path, &headers, body).await,
         "UNLOCK" => unlock_node(&locks, user_id, &vfs_path, &headers),
-        "REPORT" => report_file_tree(&vfs, &user, &segments, &vfs_path, body).await,
+        "REPORT" => report_file_tree(&vfs, &user, &vfs_path, body).await,
         _ => method_not_allowed(),
     }
 }
@@ -747,13 +747,7 @@ fn lock_response(status: StatusCode, segments: &[String], held: &lock::Lock) -> 
 /// `REPORT` on the file tree: RFC 6578 `sync-collection` over the user's
 /// change feed. Reports are scoped to the addressed directory (changes
 /// outside it are filtered out).
-async fn report_file_tree(
-    vfs: &Vfs,
-    user: &CurrentUser,
-    segments: &[String],
-    path: &str,
-    body: Body,
-) -> Response {
+async fn report_file_tree(vfs: &Vfs, user: &CurrentUser, path: &str, body: Body) -> Response {
     let body = match to_bytes(body, MAX_PROPFIND_BODY).await {
         Ok(bytes) => bytes,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
@@ -837,7 +831,6 @@ async fn report_file_tree(
             Err(_) => deleted.push(href_for(&change.path)),
         }
     }
-    let _ = segments;
 
     let requested = match props {
         ReportProps::Only(list) => xml::RequestedProps::Only(list),

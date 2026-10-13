@@ -10,6 +10,26 @@ follow [Semantic Versioning](https://semver.org/).
 - AUR build: set `AWS_LC_SYS_NO_JITTER_ENTROPY=1` in the PKGBUILD so
   `aws-lc-sys` (via rustls) compiles under Arch's hardened `CFLAGS` — its
   `jitterentropy` RNG requires `-O0`, which `makepkg`'s `-O2` overrode.
+- **Code-review hardening.** CSRF is now enforced for every cookie-auth
+  unsafe method (WebDAV, plugins), not just `/api/*`; passkey lockout is
+  keyed on (user, IP); the preview worker fails closed if its sandbox did
+  not apply; WebDAV escapes client-supplied property namespaces; the rate
+  limiter and lockout recover from a poisoned mutex and the rate-limit map
+  is hard-capped; the credential cache is invalidated on account changes.
+- **Data-loss fixes.** Garbage collection aborts if a referenced manifest
+  cannot be read (previously it could delete a live file's chunks); sync
+  rejects a malformed tree response instead of wiping local files; a
+  manifest's `size` must match its chunk lengths; quota is checked after
+  dedup; moving a node onto its own path is a no-op; CalDAV sync keeps the
+  latest change per object; `ingest_stream` cleans up on failure; sync
+  conflict copies are never re-uploaded; the device-unlock master key is
+  zeroized. Numerous DB errors that were masked as empty/false now surface.
+
+### Changed
+- Performance/cleanup: one shared content-id decoder, `HashSet` mount
+  dedup (was O(n²)), a per-owner shared-tree path cache, a reusable plugin
+  linker (built once, not per call), and a stack-allocated chunk nonce
+  (no per-chunk allocation).
 
 ## [0.1.7]
 

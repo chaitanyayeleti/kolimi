@@ -10,6 +10,8 @@
 //! Inheritance is therefore by mount; per-node evaluation only considers
 //! shares on the node itself, and the strongest matching share wins.
 
+use std::collections::{HashMap, HashSet};
+
 use kolimi_chunk::{Hash, Manifest};
 use kolimi_db::ReceivedShare;
 
@@ -135,28 +137,29 @@ impl Vfs {
     pub async fn received_mounts(&self, caller_id: i64) -> Result<Vec<Mount>, VfsError> {
         let rows = self.db.received_shares(caller_id).await?;
         let mut mounts: Vec<Mount> = Vec::new();
+        let mut by_node: HashMap<(i64, i64), usize> = HashMap::new();
         for row in rows {
-            if let Some(existing) = mounts
-                .iter_mut()
-                .find(|m| m.owner_id == row.owner_id && m.node_id == row.node_id)
-            {
-                if row.permission == "write" {
-                    existing.permission = Perm::Write;
+            match by_node.get(&(row.owner_id, row.node_id)) {
+                Some(&index) => {
+                    if row.permission == "write" {
+                        mounts[index].permission = Perm::Write;
+                    }
                 }
-                continue;
+                None => {
+                    by_node.insert((row.owner_id, row.node_id), mounts.len());
+                    mounts.push(mount_from_row(&row)?);
+                }
             }
-            mounts.push(mount_from_row(&row)?);
         }
-        let mut used: Vec<String> = Vec::with_capacity(mounts.len());
+        let mut used: HashSet<String> = HashSet::with_capacity(mounts.len());
         for mount in mounts.iter_mut() {
             let base = mount.name.clone();
             let mut name = base.clone();
             let mut suffix = 1;
-            while used.contains(&name) {
+            while !used.insert(name.clone()) {
                 suffix += 1;
                 name = format!("{base} ({suffix})");
             }
-            used.push(name.clone());
             mount.name = name;
         }
         Ok(mounts)
@@ -531,13 +534,7 @@ fn mount_from_row(row: &ReceivedShare) -> Result<Mount, VfsError> {
         NodeKind::File
     };
     let content_id = match (&row.content_id, kind) {
-        (Some(bytes), NodeKind::File) => {
-            let arr: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| VfsError::Conflict("stored content id has wrong length".into()))?;
-            Some(Hash::from_bytes(arr))
-        }
+        (Some(bytes), NodeKind::File) => Some(crate::vfs::content_id_from_bytes(bytes)?),
         _ => None,
     };
     Ok(Mount {

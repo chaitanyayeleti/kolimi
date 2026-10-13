@@ -218,6 +218,7 @@ pub async fn shared_tree(
     let mut seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
     let mut nodes_cache: HashMap<i64, Vec<kolimi_db::Node>> = HashMap::new();
     let mut encrypted_cache: HashMap<i64, std::collections::HashSet<i64>> = HashMap::new();
+    let mut info_cache: HashMap<i64, HashMap<i64, (Option<i64>, String)>> = HashMap::new();
 
     for share in shares {
         if !seen.insert((share.owner_id, share.node_id)) {
@@ -243,10 +244,15 @@ pub async fn shared_tree(
         let nodes = &nodes_cache[&share.owner_id];
         let encrypted = &encrypted_cache[&share.owner_id];
 
-        let mut info: HashMap<i64, (Option<i64>, String)> = HashMap::new();
-        for node in nodes {
-            info.insert(node.id, (node.parent_id, node.name.clone()));
+        // Build the id→(parent, name) map once per owner, not per share.
+        if let std::collections::hash_map::Entry::Vacant(entry) = info_cache.entry(share.owner_id) {
+            let mut info: HashMap<i64, (Option<i64>, String)> = HashMap::new();
+            for node in nodes {
+                info.insert(node.id, (node.parent_id, node.name.clone()));
+            }
+            entry.insert(info);
         }
+        let info = &info_cache[&share.owner_id];
 
         for node in nodes {
             if node.kind != "file" {
