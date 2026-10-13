@@ -113,9 +113,24 @@ pub enum SyncError {
     /// E2EE failure (missing keyring, wrong secret, mixed plaintext state).
     #[error("e2ee error: {0}")]
     E2ee(String),
+    /// E2EE is configured but **locked**: no keyring exists yet, no usable
+    /// unlock material is held locally, or the stored secret did not unlock
+    /// it. This is a *state the user resolves* (enter the passphrase, use the
+    /// recovery code, enroll the device), not a sync failure — clients should
+    /// surface it as "locked", not as an error.
+    #[error("e2ee locked: {0}")]
+    Locked(String),
     /// Crypto primitive failure.
     #[error("crypto error: {0}")]
     Crypto(#[from] kolimi_crypto::CryptoError),
+}
+
+impl SyncError {
+    /// Whether this is an E2EE **locked** state (user action needed) rather
+    /// than a genuine failure.
+    pub fn is_locked(&self) -> bool {
+        matches!(self, SyncError::Locked(_))
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -227,8 +242,8 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
     match status {
         200 => {}
         404 => {
-            return Err(SyncError::E2ee(
-                "no keyring on the server; run `kolimi-sync --e2ee-setup` first".to_string(),
+            return Err(SyncError::Locked(
+                "no keyring on the server yet; set up encryption first".to_string(),
             ));
         }
         status => {
@@ -245,12 +260,12 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
     let master = if let Some(passphrase) = &options.passphrase {
         keyring
             .unlock_with_passphrase(passphrase)
-            .map_err(|_| SyncError::E2ee("wrong passphrase".to_string()))?
+            .map_err(|_| SyncError::Locked("wrong encryption passphrase".to_string()))?
     } else if let Some(code) = &options.recovery_code {
         let code = recovery_code_parse(code)?;
         keyring
             .unlock_with_recovery(&code)
-            .map_err(|_| SyncError::E2ee("wrong recovery code".to_string()))?
+            .map_err(|_| SyncError::Locked("wrong recovery code".to_string()))?
     } else if let Some(prf) = &options.prf_secret {
         let prf: [u8; 32] = prf
             .as_slice()
@@ -258,7 +273,7 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
             .map_err(|_| SyncError::E2ee("PRF secret must be exactly 32 bytes".to_string()))?;
         keyring
             .unlock_with_prf(&prf)
-            .map_err(|_| SyncError::E2ee("PRF secret does not unlock the keyring".to_string()))?
+            .map_err(|_| SyncError::Locked("passkey does not unlock the keyring".to_string()))?
     } else if let Some(device) = load_device_file(&config.local_dir)? {
         // Enrolled device: unlock the master key from the local device file.
         let secret = hex_decode(&device.device_secret)?;
@@ -270,9 +285,8 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
             .map_err(|error| SyncError::E2ee(format!("device key: {error}")))?;
         MasterKey::from_bytes(kolimi_crypto::unwrap_secret(&secret, &wrapped)?)
     } else {
-        return Err(SyncError::E2ee(
-            "e2ee roots are configured but no passphrase, recovery code, PRF, or device key was found"
-                .to_string(),
+        return Err(SyncError::Locked(
+            "enter your encryption passphrase to unlock these folders".to_string(),
         ));
     };
     let identity = ensure_identity(http, &master).await?;
@@ -1442,7 +1456,14 @@ fn mtime_ns(path: &Path) -> Result<i64, SyncError> {
 
 #[cfg(test)]
 mod root_tests {
-    use super::{relative_to_root, remote_prefix};
+    use super::{SyncError, relative_to_root, remote_prefix};
+
+    #[test]
+    fn locked_is_distinct_from_e2ee_error() {
+        assert!(SyncError::Locked("enter passphrase".into()).is_locked());
+        assert!(!SyncError::E2ee("mixed plaintext".into()).is_locked());
+        assert!(!SyncError::Protocol("bad response".into()).is_locked());
+    }
 
     #[test]
     fn prefix_normalization() {

@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
     image::Image,
-    menu::{CheckMenuItem, Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     webview::DownloadEvent,
 };
@@ -50,6 +50,66 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Whether the "close to tray" tip has been shown this session.
 static CLOSE_TIP_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// Whether the "encryption is locked" tip has been shown this session.
+static LOCKED_TIP_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// Script injected into the server webview. Adds a **Sync folders** button
+/// that asks the native shell to open the **Accounts & Sync** window, so
+/// synced folders are reachable from inside the app and not only via the
+/// tray. When the server UI's toolbar exists the button is placed there so
+/// it aligns with the other controls; otherwise it falls back to a floating
+/// pill at the bottom-**center** (the bottom-right corner belongs to the
+/// upload tray and toasts). It navigates to a sentinel path that
+/// `on_navigation` intercepts — no remote IPC, no extra capabilities.
+const DESKTOP_INIT_JS: &str = r#"
+(function () {
+  if (window.__kolimiDesktop) return;
+  window.__kolimiDesktop = true;
+
+  var SENTINEL = '/__kolimi/open-settings';
+
+  function makeButton() {
+    var b = document.createElement('button');
+    b.id = 'kolimi-sync-button';
+    b.type = 'button';
+    b.title = 'Open Accounts & Sync';
+    b.textContent = '\u21C4 Sync folders';
+    b.addEventListener('click', function () { window.location.href = SENTINEL; });
+    return b;
+  }
+
+  function place() {
+    if (!document.body) return;
+    var el = document.getElementById('kolimi-sync-button');
+    var host = document.querySelector('.topbar-actions');
+    if (host) {
+      if (el && el.parentElement === host) return;
+      if (el) el.remove();
+      var b = makeButton();
+      b.className = 'button ghost';
+      host.appendChild(b);
+      return;
+    }
+    if (el && el.classList.contains('kolimi-floating')) return;
+    if (el) el.remove();
+    var f = makeButton();
+    f.classList.add('kolimi-floating');
+    f.style.cssText = 'position:fixed;z-index:2147483647;left:50%;transform:translateX(-50%);bottom:16px;padding:9px 14px;border:0;border-radius:999px;background:#4f46e5;color:#fff;font:600 13px system-ui,-apple-system,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.35);cursor:pointer';
+    document.body.appendChild(f);
+  }
+
+  function start() {
+    place();
+    setInterval(place, 1000);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
+"#;
+
+/// Sentinel path (blocked by `on_navigation`) that opens the settings window.
+const SETTINGS_SENTINEL: &str = "/__kolimi/open-settings";
 
 // ---------------------------------------------------------------------------
 // Settings model (on disk)
@@ -539,6 +599,10 @@ fn set_tray_icon(app: &AppHandle, state: &str) {
         "syncing" => (include_bytes!("../tray-syncing.png"), "Kolimi — syncing…"),
         "error" => (include_bytes!("../tray-error.png"), "Kolimi — sync problem"),
         "paused" => (include_bytes!("../tray-idle.png"), "Kolimi — paused"),
+        "locked" => (
+            include_bytes!("../tray-idle.png"),
+            "Kolimi — locked (unlock encryption)",
+        ),
         _ => (include_bytes!("../tray-idle.png"), "Kolimi"),
     };
     if let Ok(icon) = Image::from_bytes(bytes)
@@ -583,9 +647,21 @@ fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
     let base = server.trim_end_matches('/');
     let url = Url::parse(&format!("{base}/app/"))
         .map_err(|error| format!("invalid server URL: {error}"))?;
+    // The injected "Sync folders" button navigates to a sentinel path that we
+    // intercept here (blocking the navigation) to open the Accounts & Sync
+    // window. This avoids granting IPC to the remote server origin.
+    let nav_handle = app.clone();
     let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("Kolimi")
         .inner_size(1100.0, 720.0)
+        .initialization_script(DESKTOP_INIT_JS)
+        .on_navigation(move |url| {
+            if url.path() == SETTINGS_SENTINEL {
+                open_settings(&nav_handle);
+                return false;
+            }
+            true
+        })
         .disable_drag_drop_handler()
         .on_download(|webview, event| {
             match event {
@@ -700,6 +776,7 @@ fn run_sync(app: AppHandle) {
         let total = jobs.len();
         let (mut pushed, mut pulled, mut conflicts) = (0u64, 0u64, 0u64);
         let mut errors = startup_errors;
+        let mut locked: Vec<String> = Vec::new();
         for (label, remote, config) in jobs {
             match kolimi_sync::sync_once_rooted(&config, &remote).await {
                 Ok(report) => {
@@ -707,12 +784,30 @@ fn run_sync(app: AppHandle) {
                     pulled += report.pulled;
                     conflicts += report.conflicts;
                 }
+                // Encryption locked: a state to resolve, not a failure.
+                Err(error) if error.is_locked() => locked.push(label),
                 Err(error) => errors.push(format!("{label}: {error}")),
             }
         }
         let state = app_handle.state::<DesktopState>();
         state.syncing.store(false, Ordering::SeqCst);
-        if errors.is_empty() {
+        if !errors.is_empty() {
+            let first = errors.first().cloned().unwrap_or_default();
+            let _ = state.status_item.set_text(format!("Sync failed: {first}"));
+            set_tray_icon(&app_handle, "error");
+            notify_user("Kolimi sync problem", &errors.join("\n"));
+        } else if !locked.is_empty() {
+            let _ = state
+                .status_item
+                .set_text("Encryption locked — open Accounts & Sync to unlock");
+            set_tray_icon(&app_handle, "locked");
+            if !LOCKED_TIP_SHOWN.swap(true, Ordering::SeqCst) {
+                notify_user(
+                    "Kolimi",
+                    "Encrypted folders are locked. Open Accounts & Sync to enter your passphrase.",
+                );
+            }
+        } else {
             let _ = state.status_item.set_text(format!(
                 "Synced {total} dir(s): ↑{pushed} ↓{pulled} ⚠{conflicts}"
             ));
@@ -725,11 +820,6 @@ fn run_sync(app: AppHandle) {
             } else {
                 set_tray_icon(&app_handle, "idle");
             }
-        } else {
-            let first = errors.first().cloned().unwrap_or_default();
-            let _ = state.status_item.set_text(format!("Sync failed: {first}"));
-            set_tray_icon(&app_handle, "error");
-            notify_user("Kolimi sync problem", &errors.join("\n"));
         }
     });
 }
@@ -750,6 +840,10 @@ struct AccountView {
     server: String,
     username: String,
     signed_in: bool,
+    /// Whether any synced folder is end-to-end encrypted.
+    has_e2ee: bool,
+    /// Whether an E2EE passphrase is stored for this account.
+    e2ee_unlocked: bool,
     pairs: Vec<PairView>,
 }
 
@@ -766,19 +860,29 @@ fn get_settings(app: AppHandle) -> SettingsView {
     let accounts = settings
         .accounts
         .iter()
-        .map(|account| AccountView {
-            signed_in: keyring_get(&account_key(&account.server, &account.username)).is_some(),
-            server: account.server.clone(),
-            username: account.username.clone(),
-            pairs: account
-                .pairs
-                .iter()
-                .map(|pair| PairView {
-                    local_dir: pair.local_dir.clone(),
-                    remote: pair.remote.clone(),
-                    encrypted_roots: pair.encrypted_roots.clone(),
-                })
-                .collect(),
+        .map(|account| {
+            let secrets = keyring_get(&account_key(&account.server, &account.username));
+            AccountView {
+                signed_in: secrets.is_some(),
+                has_e2ee: account
+                    .pairs
+                    .iter()
+                    .any(|pair| !pair.encrypted_roots.is_empty()),
+                e2ee_unlocked: secrets
+                    .as_ref()
+                    .is_some_and(|secrets| secrets.e2ee_passphrase.is_some()),
+                server: account.server.clone(),
+                username: account.username.clone(),
+                pairs: account
+                    .pairs
+                    .iter()
+                    .map(|pair| PairView {
+                        local_dir: pair.local_dir.clone(),
+                        remote: pair.remote.clone(),
+                        encrypted_roots: pair.encrypted_roots.clone(),
+                    })
+                    .collect(),
+            }
         })
         .collect();
     SettingsView {
@@ -801,11 +905,15 @@ async fn sign_in(
         return Err("server and username are required".to_string());
     }
     validate_login(&server, &username, &password).await?;
+    // Re-authenticating must not drop the E2EE passphrase the user already
+    // stored for this account.
+    let key = account_key(&server, &username);
+    let e2ee_passphrase = keyring_get(&key).and_then(|secrets| secrets.e2ee_passphrase);
     store_secrets(
-        &account_key(&server, &username),
+        &key,
         &Secrets {
             password,
-            e2ee_passphrase: None,
+            e2ee_passphrase,
         },
     );
     {
@@ -914,6 +1022,73 @@ fn remove_pair(
     Ok(())
 }
 
+/// Change a synced directory's local path and/or remote subfolder in place
+/// (no remove + re-add).
+#[tauri::command]
+fn update_pair(
+    app: AppHandle,
+    server: String,
+    username: String,
+    dir: String,
+    new_dir: String,
+    remote: String,
+) -> Result<(), String> {
+    let local = expand_home(&new_dir);
+    if local.is_empty() {
+        return Err("directory is required".to_string());
+    }
+    std::fs::create_dir_all(&local).map_err(|error| format!("cannot create {local}: {error}"))?;
+    {
+        let state = app.state::<DesktopState>();
+        let mut settings = state.settings.lock().unwrap();
+        let account = settings
+            .accounts
+            .iter_mut()
+            .find(|account| account.server == server && account.username == username)
+            .ok_or_else(|| "account not found".to_string())?;
+        if account
+            .pairs
+            .iter()
+            .any(|pair| pair.local_dir == local && pair.local_dir != dir)
+        {
+            return Err("that directory is already synced".to_string());
+        }
+        let pair = account
+            .pairs
+            .iter_mut()
+            .find(|pair| pair.local_dir == dir)
+            .ok_or_else(|| "directory not found".to_string())?;
+        pair.local_dir = local;
+        pair.remote = normalize_remote(&remote);
+    }
+    let settings = app.state::<DesktopState>().settings.lock().unwrap().clone();
+    save_settings_file(&settings)?;
+    run_sync(app);
+    Ok(())
+}
+
+/// Set (or clear, when empty) the E2EE passphrase stored for an account, then
+/// sync so encrypted folders unlock immediately.
+#[tauri::command]
+fn set_e2ee_passphrase(
+    app: AppHandle,
+    server: String,
+    username: String,
+    passphrase: String,
+) -> Result<(), String> {
+    let key = account_key(&server, &username);
+    let mut secrets =
+        keyring_get(&key).ok_or_else(|| "sign in to this account first".to_string())?;
+    secrets.e2ee_passphrase = if passphrase.is_empty() {
+        None
+    } else {
+        Some(passphrase)
+    };
+    store_secrets(&key, &secrets);
+    run_sync(app);
+    Ok(())
+}
+
 /// Toggle the "start on login" autostart entry.
 #[tauri::command]
 fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
@@ -968,6 +1143,8 @@ fn main() {
             remove_account,
             add_pair,
             remove_pair,
+            update_pair,
+            set_e2ee_passphrase,
             set_autostart_enabled,
             sync_now,
             open_account
@@ -1000,16 +1177,22 @@ fn main() {
             let settings_item =
                 MenuItem::with_id(app, "settings", "Accounts & Sync…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let sep_a = PredefinedMenuItem::separator(app)?;
+            let sep_b = PredefinedMenuItem::separator(app)?;
+            let sep_c = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(
                 app,
                 &[
                     &status,
+                    &sep_a,
                     &open,
                     &folder,
                     &sync_now_item,
                     &pause,
                     &autostart,
+                    &sep_b,
                     &settings_item,
+                    &sep_c,
                     &quit,
                 ],
             )?;

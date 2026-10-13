@@ -44,9 +44,16 @@
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
     padding: 8px 0; border-top: 1px solid #232b3a;
   }
+  ul.pairs li.editing { align-items: flex-start; }
+  ul.pairs li.editing .field { flex: 1; min-width: 0; }
+  ul.pairs li.editing label { margin: 0 0 4px; }
+  ul.pairs li.editing label + input { margin-bottom: 10px; }
+  ul.pairs li > .row { flex: none; align-items: flex-start; }
   .path { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
   .remote { color: #9aa4b8; }
   .empty { color: #9aa4b8; font-style: italic; }
+  details.e2ee { margin-top: 14px; padding-top: 12px; border-top: 1px solid #232b3a; }
+  details.e2ee > summary { display: flex; align-items: center; gap: 8px; }
   #msg { min-height: 20px; margin-top: 14px; white-space: pre-wrap; }
   #msg.err { color: #ff8a8a; }
   #msg.ok { color: #59d98a; }
@@ -118,6 +125,55 @@
     );
   }
 
+  function renderPair(account, pair) {
+    const li = el("li", {});
+
+    const display = () => {
+      li.classList.remove("editing");
+      li.replaceChildren(
+        el("span", { class: "path" },
+          pair.local_dir, " ", el("span", { class: "remote" }, "→ " + pair.remote)),
+        el("div", { class: "row" },
+          el("button", { class: "ghost", onclick: edit }, "Edit"),
+          el("button", { class: "danger", onclick: async () => {
+            try {
+              await invoke("remove_pair", { server: account.server, username: account.username, dir: pair.local_dir });
+              setMsg("Removed " + pair.local_dir, "ok");
+              refresh();
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "Remove")
+        )
+      );
+    };
+
+    const edit = () => {
+      li.classList.add("editing");
+      const dirInput = el("input", { value: pair.local_dir });
+      const remoteInput = el("input", { value: pair.remote });
+      li.replaceChildren(
+        el("div", { class: "field" },
+          el("label", {}, "Local folder"), dirInput,
+          el("label", {}, "Remote folder"), remoteInput),
+        el("div", { class: "row" },
+          el("button", { onclick: async () => {
+            try {
+              await invoke("update_pair", {
+                server: account.server, username: account.username,
+                dir: pair.local_dir, newDir: dirInput.value, remote: remoteInput.value || "/"
+              });
+              setMsg("Updated " + dirInput.value, "ok");
+              refresh();
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "Save"),
+          el("button", { class: "ghost", onclick: display }, "Cancel")
+        )
+      );
+    };
+
+    display();
+    return li;
+  }
+
   function renderAccount(account) {
     const card = el("div", { class: "card" });
 
@@ -153,21 +209,46 @@
       pairs.append(el("li", {}, el("span", { class: "empty" }, "No synced directories")));
     }
     for (const pair of account.pairs) {
-      pairs.append(
-        el("li", {},
-          el("span", { class: "path" },
-            pair.local_dir, " ", el("span", { class: "remote" }, "→ " + pair.remote)),
-          el("button", { class: "danger", onclick: async () => {
-            try {
-              await invoke("remove_pair", { server: account.server, username: account.username, dir: pair.local_dir });
-              setMsg("Removed " + pair.local_dir, "ok");
-              refresh();
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "Remove")
+      pairs.append(renderPair(account, pair));
+    }
+    card.append(pairs);
+
+    if (account.has_e2ee) {
+      const pass = el("input", { type: "password", placeholder: "Encryption passphrase", autocomplete: "off" });
+      const actions = [
+        el("button", { onclick: async () => {
+          try {
+            await invoke("set_e2ee_passphrase", { server: account.server, username: account.username, passphrase: pass.value });
+            setMsg("Encryption unlocked", "ok");
+            refresh();
+          } catch (e) { setMsg(String(e), "err"); }
+        } }, "Unlock")
+      ];
+      if (account.e2ee_unlocked) {
+        actions.push(el("button", { class: "ghost", onclick: async () => {
+          try {
+            await invoke("set_e2ee_passphrase", { server: account.server, username: account.username, passphrase: "" });
+            setMsg("Encryption passphrase forgotten", "ok");
+            refresh();
+          } catch (e) { setMsg(String(e), "err"); }
+        } }, "Forget"));
+      }
+      card.append(
+        el("details", { class: "e2ee", style: "margin-top:12px" },
+          el("summary", {},
+            "End-to-end encryption ",
+            el("span", { class: "badge " + (account.e2ee_unlocked ? "on" : "off") },
+              account.e2ee_unlocked ? "unlocked" : "locked")),
+          el("p", { class: "muted", style: "margin:8px 0" },
+            account.e2ee_unlocked
+              ? "Your encrypted folders are unlocked for syncing."
+              : "Encrypted folders are locked. Enter your encryption passphrase to sync them."),
+          el("label", {}, account.e2ee_unlocked ? "Change passphrase" : "Encryption passphrase"),
+          pass,
+          el("div", { class: "row", style: "margin-top:8px" }, ...actions)
         )
       );
     }
-    card.append(pairs);
 
     const dirInput = el("input", { placeholder: "~/Kolimi", style: "margin-top:6px" });
     const remoteInput = el("input", { placeholder: "/", style: "margin-top:6px" });

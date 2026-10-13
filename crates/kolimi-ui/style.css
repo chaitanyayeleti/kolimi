@@ -285,10 +285,11 @@ textarea:focus {
 
 /* ---- toasts ---------------------------------------------------------- */
 
+/* Top-right, below the top bar: keeps clear of the bottom-right upload tray. */
 .toasts {
   position: fixed;
   right: 1rem;
-  bottom: calc(1rem + env(safe-area-inset-bottom));
+  top: calc(var(--topbar-h) + 0.75rem);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -325,7 +326,7 @@ textarea:focus {
 @keyframes toast-in {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(-6px);
   }
   to {
     opacity: 1;
@@ -1403,11 +1404,6 @@ textarea:focus {
   display: block;
   width: 180px;
   height: 180px;
-}
-
-.modal h3 {
-  margin: 16px 0 6px;
-  font-size: 14px;
 }
 
 /* ---- Storage ring (sidebar) ---- */

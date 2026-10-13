@@ -6,6 +6,34 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-10-13
+
+### Added
+- **In-app "Sync folders" button**: the desktop window now has a *Sync folders*
+  button that opens the **Accounts & Sync** window, so synced folders are
+  reachable without the tray. When the server UI's toolbar is present it is
+  placed there (aligned with the other controls); otherwise it falls back to a
+  floating pill at the bottom-center. It works by intercepting a sentinel
+  navigation, so the remote server origin is **not** granted any Tauri IPC.
+- **Inline editing of synced folders**: each directory in **Accounts & Sync**
+  can be edited in place (change the local path and/or remote subfolder)
+  instead of removing and re-adding it.
+
+### Changed
+- **UI polish / alignment**: the desktop tray menu is grouped with separators;
+  the **Accounts & Sync** window aligns its edit rows and the encryption
+  section; and the web UI moves **toasts to the top-right** so they no longer
+  collide with the bottom-right upload tray. Duplicate modal/CSS rules removed.
+- **Encryption is "locked", not "error"** (RFC 0011). A configured encrypted
+  folder with no usable passphrase/recovery/device key — or an account with no
+  keyring yet — is now a distinct **locked** state: the tray shows *locked*
+  (not red), the status line says to unlock, and a notification fires **once
+  per session** instead of every poll. `kolimi_sync::SyncError` gains a
+  `Locked` variant (`is_locked()`); genuine policy/data E2EE errors remain
+  `E2ee`. The desktop **Accounts & Sync** window now also takes the E2EE
+  passphrase (stored in the OS keychain) to **unlock or forget** it, and
+  re-signing in no longer drops a stored passphrase.
+
 ## [0.1.14] - 2026-10-13
 
 ### Fixed
