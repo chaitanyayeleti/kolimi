@@ -219,6 +219,13 @@ install -Dm755 target/release/kolimi-server ~/.local/bin/kolimi-server
 install -Dm755 target/release/kolimi-sync ~/.local/bin/kolimi-sync
 ```
 
+> **Hardened distros (Arch, Gentoo):** `rustls` pulls in `aws-lc-sys`, whose
+> `jitterentropy` RNG must be compiled with `-O0`. If your environment forces
+> `-O2` via `CFLAGS` (e.g. `makepkg`), the build fails with a `#error` from
+> `jitterentropy-base.c`. Disable that fallback so the OS RNG is used:
+> `export AWS_LC_SYS_NO_JITTER_ENTROPY=1` before building. (The AUR package
+> sets this automatically.)
+
 Run it (all flags also have environment variables):
 
 ```sh

@@ -17,11 +17,16 @@ sha256sums=('SKIP') # replaced with the real hash at release time
 build() {
     cd "kolimi-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
+    # aws-lc-sys (pulled in by rustls) requires -O0 for its jitterentropy RNG,
+    # but Arch's hardened CFLAGS force -O2 afterwards, tripping a compile-time
+    # #error. Disable the jitterentropy fallback so the OS RNG is used instead.
+    export AWS_LC_SYS_NO_JITTER_ENTROPY=1
     cargo build --release --locked -p kolimi-server -p kolimi-sync
 }
 
 check() {
     cd "kolimi-$pkgver"
+    export AWS_LC_SYS_NO_JITTER_ENTROPY=1
     # A fast subset: the full workspace suite runs in CI.
     cargo test --release --locked -p kolimi-chunk -p kolimi-crypto -p kolimi-db
 }

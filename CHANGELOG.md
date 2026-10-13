@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- AUR build: set `AWS_LC_SYS_NO_JITTER_ENTROPY=1` in the PKGBUILD so
+  `aws-lc-sys` (via rustls) compiles under Arch's hardened `CFLAGS` — its
+  `jitterentropy` RNG requires `-O0`, which `makepkg`'s `-O2` overrode.
+
 ## [0.1.7]
 
 ### Added
