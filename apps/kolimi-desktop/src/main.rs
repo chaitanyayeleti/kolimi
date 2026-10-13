@@ -47,6 +47,9 @@ use url::Url;
 /// Background sync cadence.
 const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// Whether the "close to tray" tip has been shown this session.
+static CLOSE_TIP_SHOWN: AtomicBool = AtomicBool::new(false);
+
 // ---------------------------------------------------------------------------
 // Settings model (on disk)
 // ---------------------------------------------------------------------------
@@ -486,7 +489,7 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
              Type=Application\n\
              Name=Kolimi\n\
              Comment=Kolimi desktop client (background sync)\n\
-             Exec={}\n\
+             Exec={} --hidden\n\
              X-GNOME-Autostart-enabled=true\n\
              Terminal=false\n",
             exe.display()
@@ -570,13 +573,14 @@ async fn validate_login(server: &str, username: &str, password: &str) -> Result<
 
 fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
         let _ = window.set_focus();
         return Ok(());
     }
     let base = server.trim_end_matches('/');
     let url = Url::parse(&format!("{base}/app/"))
         .map_err(|error| format!("invalid server URL: {error}"))?;
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("Kolimi")
         .inner_size(1100.0, 720.0)
         .disable_drag_drop_handler()
@@ -611,6 +615,22 @@ fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
         })
         .build()
         .map_err(|error| error.to_string())?;
+
+    // Closing the window hides it to the tray so background sync keeps
+    // running. The tray's "Quit" is the way to actually exit.
+    let handle = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = handle.hide();
+            if !CLOSE_TIP_SHOWN.swap(true, Ordering::SeqCst) {
+                notify_user(
+                    "Kolimi",
+                    "Still running in the tray — sync continues in the background.",
+                );
+            }
+        }
+    });
     Ok(())
 }
 
@@ -1057,20 +1077,26 @@ fn main() {
                 paused: AtomicBool::new(false),
             });
 
+            // Launched by autostart? Start in the tray without a window.
+            let start_hidden = std::env::args().any(|arg| arg == "--hidden")
+                || std::env::var_os("KOLIMI_START_HIDDEN").is_some();
+
             if has_account {
-                let server = app
-                    .state::<DesktopState>()
-                    .settings
-                    .lock()
-                    .unwrap()
-                    .accounts
-                    .first()
-                    .map(|account| account.server.clone());
-                if let Some(server) = server
-                    && let Err(error) = open_main(app.handle(), &server)
-                {
-                    eprintln!("kolimi-desktop: {error}");
-                    open_settings(app.handle());
+                if !start_hidden {
+                    let server = app
+                        .state::<DesktopState>()
+                        .settings
+                        .lock()
+                        .unwrap()
+                        .accounts
+                        .first()
+                        .map(|account| account.server.clone());
+                    if let Some(server) = server
+                        && let Err(error) = open_main(app.handle(), &server)
+                    {
+                        eprintln!("kolimi-desktop: {error}");
+                        open_settings(app.handle());
+                    }
                 }
             } else {
                 open_settings(app.handle());
