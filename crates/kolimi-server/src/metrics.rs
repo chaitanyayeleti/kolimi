@@ -394,6 +394,7 @@ mod tests {
             quota_bytes: quota,
             used_bytes: used,
             usage_updated_at: None,
+            credentials_version: 0,
         }
     }
 

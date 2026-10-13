@@ -113,7 +113,10 @@ fn chunk_encryption_matches_committed_vector() {
     let file_key = FileKey::from_bytes(file_key);
     let ciphertext = file_key.encrypt_chunk(&plaintext).unwrap();
     assert_eq!(hex(&ciphertext), case["ciphertext"].as_str().unwrap());
-    assert_eq!(file_key.decrypt_chunk(&ciphertext).unwrap(), plaintext);
+    assert_eq!(
+        file_key.decrypt_chunk(&ciphertext).unwrap().as_slice(),
+        plaintext.as_slice()
+    );
 }
 
 fn hex(bytes: &[u8]) -> String {

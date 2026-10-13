@@ -397,7 +397,7 @@ async fn independent_decoder_reads_client_uploads() {
             !bytes.windows(MARKER.len()).any(|window| window == MARKER),
             "chunk {hash} contains plaintext"
         );
-        decoded.extend_from_slice(&file_key.decrypt_chunk(&bytes).unwrap());
+        decoded.extend_from_slice(file_key.decrypt_chunk(&bytes).unwrap().as_slice());
     }
     assert_eq!(decoded, secret);
 

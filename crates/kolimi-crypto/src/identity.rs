@@ -87,6 +87,7 @@ impl Identity {
         let wrap_key = share_wrap_key(shared.as_bytes(), &ephemeral_public, &self.public_key())?;
         let bytes = aead_decrypt(&wrap_key, &nonce, SHARE_AAD, ciphertext)?;
         let bytes: [u8; KEY_LEN] = bytes
+            .as_slice()
             .try_into()
             .map_err(|_| CryptoError::Malformed("file key length".to_string()))?;
         Ok(FileKey::from_bytes(bytes))
@@ -232,6 +233,7 @@ pub fn unwrap_secret(
     )?;
     let bytes = aead_decrypt(&wrap_key, &nonce, DEVICE_AAD, ciphertext)?;
     bytes
+        .as_slice()
         .try_into()
         .map_err(|_| CryptoError::Malformed("device secret length".to_string()))
 }

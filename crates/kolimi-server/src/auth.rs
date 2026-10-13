@@ -124,8 +124,18 @@ async fn authenticate_basic(
     }
 
     let key = credential_cache_key(username, password);
-    let user = if let Some(user_id) = state.cred_cache.get(&key) {
-        state.db.get_user(user_id).await.ok().flatten()
+    // A cache hit is only trusted while the account's credentials are
+    // unchanged: a password reset (even from the CLI) bumps the version, so
+    // the old password stops authenticating immediately.
+    let cached = match state.cred_cache.get(&key) {
+        Some((user_id, version)) => match state.db.get_user(user_id).await.ok().flatten() {
+            Some(user) if !user.disabled && user.credentials_version == version => Some(user),
+            _ => None,
+        },
+        None => None,
+    };
+    let user = if let Some(user) = cached {
+        Some(user)
     } else {
         match state.db.find_user(username).await.ok().flatten() {
             Some(user) if !user.disabled => {
@@ -138,7 +148,9 @@ async fn authenticate_basic(
                 .unwrap_or(false);
                 if verified {
                     state.lockout.record_success(&lockout_key);
-                    state.cred_cache.insert(key, user.id);
+                    state
+                        .cred_cache
+                        .insert(key, user.id, user.credentials_version);
                     Some(user)
                 } else {
                     state.lockout.record_failure(&lockout_key);

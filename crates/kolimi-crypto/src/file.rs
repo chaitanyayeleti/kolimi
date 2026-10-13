@@ -1,6 +1,6 @@
 //! Per-file keys and deterministic chunk encryption.
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     CryptoError,
@@ -66,7 +66,7 @@ impl FileKey {
     }
 
     /// Decrypts one chunk produced by [`Self::encrypt_chunk`].
-    pub fn decrypt_chunk(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    pub fn decrypt_chunk(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         if ciphertext.len() < NONCE_LEN + TAG_LEN {
             return Err(CryptoError::Malformed(format!(
                 "chunk ciphertext is {} bytes",
@@ -109,7 +109,10 @@ mod tests {
         for plaintext in [b"".as_slice(), b"hello".as_slice(), &[0x42u8; 300_000]] {
             let ciphertext = key.encrypt_chunk(plaintext).unwrap();
             assert_eq!(ciphertext.len(), plaintext.len() + FileKey::CHUNK_OVERHEAD);
-            assert_eq!(key.decrypt_chunk(&ciphertext).unwrap(), plaintext);
+            assert_eq!(
+                key.decrypt_chunk(&ciphertext).unwrap().as_slice(),
+                plaintext
+            );
         }
     }
 

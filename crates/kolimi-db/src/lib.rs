@@ -71,6 +71,9 @@ pub struct User {
     pub used_bytes: i64,
     /// When `used_bytes` was last reconciled from disk.
     pub usage_updated_at: Option<i64>,
+    /// Bumped on every password change so credential caches can be
+    /// invalidated (e.g. after an out-of-process `user recover`).
+    pub credentials_version: i64,
 }
 
 /// Sort key for the admin user list (`GET /api/users`).
@@ -577,11 +580,14 @@ impl Db {
 
     /// Replaces a user's password hash.
     pub async fn set_password(&self, username: &str, password_hash: &str) -> Result<(), DbError> {
-        let result = sqlx::query("UPDATE users SET password_hash = ? WHERE username = ?")
-            .bind(password_hash)
-            .bind(username)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE users SET password_hash = ?, credentials_version = credentials_version + 1
+             WHERE username = ?",
+        )
+        .bind(password_hash)
+        .bind(username)
+        .execute(&self.pool)
+        .await?;
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("user {username}")));
         }

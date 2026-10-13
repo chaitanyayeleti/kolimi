@@ -68,7 +68,7 @@ pub(crate) fn aead_decrypt(
     nonce: &[u8; NONCE_LEN],
     aad: &[u8],
     ciphertext: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     let cipher = XChaCha20Poly1305::new(key.into());
     cipher
         .decrypt(
@@ -79,6 +79,7 @@ pub(crate) fn aead_decrypt(
             },
         )
         .map_err(|_| CryptoError::Decryption)
+        .map(Zeroizing::new)
 }
 
 /// Wraps a 32-byte key under `kek` with a random nonce.
@@ -123,7 +124,8 @@ pub(crate) fn unwrap(
         .try_into()
         .map_err(|_| CryptoError::Malformed("nonce".to_string()))?;
     let key = aead_decrypt(kek, &nonce, aad, ciphertext)?;
-    key.try_into()
+    key.as_slice()
+        .try_into()
         .map_err(|_| CryptoError::Malformed("key length".to_string()))
 }
 

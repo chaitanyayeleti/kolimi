@@ -818,7 +818,7 @@ fn run_sync(app: AppHandle) {
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let total = jobs.len();
-        let (mut pushed, mut pulled, mut conflicts) = (0u64, 0u64, 0u64);
+        let (mut pushed, mut pulled, mut conflicts, mut failed) = (0u64, 0u64, 0u64, 0u64);
         let mut errors = startup_errors;
         let mut locked: Vec<String> = Vec::new();
         for (label, remote, config) in jobs {
@@ -827,6 +827,7 @@ fn run_sync(app: AppHandle) {
                     pushed += report.pushed;
                     pulled += report.pulled;
                     conflicts += report.conflicts;
+                    failed += report.failed;
                 }
                 // Encryption locked: a state to resolve, not a failure.
                 Err(error) if error.is_locked() => locked.push(label),
@@ -852,8 +853,13 @@ fn run_sync(app: AppHandle) {
                 );
             }
         } else {
+            let failed_note = if failed > 0 {
+                format!(" ✗{failed} skipped")
+            } else {
+                String::new()
+            };
             let _ = state.status_item.set_text(format!(
-                "Synced {total} dir(s): ↑{pushed} ↓{pulled} ⚠{conflicts}"
+                "Synced {total} dir(s): ↑{pushed} ↓{pulled} ⚠{conflicts}{failed_note}"
             ));
             if conflicts > 0 {
                 set_tray_icon(&app_handle, "error");

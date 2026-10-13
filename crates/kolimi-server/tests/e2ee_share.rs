@@ -269,7 +269,7 @@ async fn independent_recipient_decoder() {
             )
         };
         assert_eq!(status, 200, "chunk {hash}");
-        decoded.extend_from_slice(&file_key.decrypt_chunk(&bytes).unwrap());
+        decoded.extend_from_slice(file_key.decrypt_chunk(&bytes).unwrap().as_slice());
     }
     assert_eq!(decoded, secret);
 

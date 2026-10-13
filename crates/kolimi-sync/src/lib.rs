@@ -122,6 +122,8 @@ pub struct SyncReport {
     pub conflicts: u64,
     /// Remote files deleted because they were deleted locally.
     pub removed_remote: u64,
+    /// Files skipped this pass due to a per-file error (not fatal).
+    pub failed: u64,
 }
 
 /// Errors from the sync core.
@@ -1105,136 +1107,148 @@ async fn pull(
     let remote = remote_files(http, root).await?;
 
     for (rel, file) in &remote {
-        // The remote tree is untrusted: never join a path that could escape
-        // the sync root.
-        safe_rel(rel)?;
-        // Validate encryption requirements before touching the local path.
-        if file.encrypted {
-            let Some(e2ee) = e2ee else {
-                return Err(SyncError::E2ee(format!(
-                    "remote file /{rel} is encrypted but no e2ee roots are configured"
-                )));
-            };
-            // Shared files are encrypted by their owner; local roots only
-            // govern which of *our* files we encrypt.
-            if !file.shared && !e2ee.options.covers(rel) {
-                return Err(SyncError::E2ee(format!(
-                    "remote file /{rel} is encrypted but not under a configured e2ee root"
-                )));
-            }
-        }
-        let local = config.local_dir.join(rel);
-        if let Some(known) = state.files.get(rel).cloned() {
-            if known.content_id == file.content_id {
-                if local.exists() {
-                    continue;
-                }
-                // Synced before and gone locally: the user deleted it.
-                // Mark a tombstone and let push propagate the deletion.
-                if let Some(entry) = state.files.get_mut(rel) {
-                    entry.deleted = true;
-                }
-                continue;
-            }
-            // The remote changed. If the local copy was modified since the
-            // last sync, leave it alone: push will detect the conflict.
-            //
-            // Size+mtime is a heuristic: it can miss content changes that
-            // preserve both size and mtime (e.g. same-length writes within
-            // the same nanosecond, or files restored from backups). This is
-            // a known tradeoff — the server's content_id remains the
-            // authoritative conflict detector.
-            let locally_modified = !known.deleted
-                && match std::fs::metadata(&local) {
-                    Ok(metadata) => {
-                        metadata.len() != known.size || mtime_ns(&local)? != known.mtime_ns
-                    }
-                    Err(_) => false,
+        // One bad file must not abort the whole pass: capture a per-file error
+        // and keep going. State is only mutated on success.
+        let outcome: Result<(), SyncError> = async {
+            // The remote tree is untrusted: never join a path that could escape
+            // the sync root.
+            safe_rel(rel)?;
+            // Validate encryption requirements before touching the local path.
+            if file.encrypted {
+                let Some(e2ee) = e2ee else {
+                    return Err(SyncError::E2ee(format!(
+                        "remote file /{rel} is encrypted but no e2ee roots are configured"
+                    )));
                 };
-            if known.deleted || locally_modified {
-                continue;
+                // Shared files are encrypted by their owner; local roots only
+                // govern which of *our* files we encrypt.
+                if !file.shared && !e2ee.options.covers(rel) {
+                    return Err(SyncError::E2ee(format!(
+                        "remote file /{rel} is encrypted but not under a configured e2ee root"
+                    )));
+                }
             }
-        }
-        let manifest_path = format!("/api/files/manifest?path={}", encode(&file.path));
-        let (status, manifest_value) = http.get_json(&manifest_path).await?;
-        if status == 404 {
-            // Raced with a delete; the next pass will clean up.
-            continue;
-        }
-        if status != 200 {
-            return Err(SyncError::Server {
-                status,
-                path: manifest_path,
-            });
-        }
-        let manifest: Manifest = serde_json::from_value(manifest_value)?;
-        if !manifest.is_consistent() {
-            return Err(SyncError::E2ee(format!(
-                "manifest for /{rel} has inconsistent size"
-            )));
-        }
-        let file_key = if file.encrypted {
-            let e2ee = e2ee.ok_or_else(|| {
-                SyncError::E2ee("remote file is encrypted but e2ee is not configured".to_string())
-            })?;
-            if file.shared {
-                Some(load_shared_file_key(http, state, e2ee, &file.path).await?)
-            } else {
-                Some(load_file_key(http, state, e2ee, rel).await?)
+            let local = config.local_dir.join(rel);
+            if let Some(known) = state.files.get(rel).cloned() {
+                if known.content_id == file.content_id {
+                    if local.exists() {
+                        return Ok(());
+                    }
+                    // Synced before and gone locally: the user deleted it.
+                    // Mark a tombstone and let push propagate the deletion.
+                    if let Some(entry) = state.files.get_mut(rel) {
+                        entry.deleted = true;
+                    }
+                    return Ok(());
+                }
+                // The remote changed. If the local copy was modified since the
+                // last sync, leave it alone: push will detect the conflict.
+                //
+                // Size+mtime is a heuristic: it can miss content changes that
+                // preserve both size and mtime (e.g. same-length writes within
+                // the same nanosecond, or files restored from backups). This is
+                // a known tradeoff — the server's content_id remains the
+                // authoritative conflict detector.
+                let locally_modified = !known.deleted
+                    && match std::fs::metadata(&local) {
+                        Ok(metadata) => {
+                            metadata.len() != known.size || mtime_ns(&local)? != known.mtime_ns
+                        }
+                        Err(_) => false,
+                    };
+                if known.deleted || locally_modified {
+                    return Ok(());
+                }
             }
-        } else {
-            None
-        };
-        let mut data = Vec::with_capacity(manifest.size as usize);
-        let chunk_context = file.shared.then_some(file.path.as_str());
-        for chunk in &manifest.chunks {
-            let bytes = chunk_bytes(http, config, &chunk.hash.to_hex(), chunk_context).await?;
-            // The bytes we got (from cache or the server) must match the hash
-            // the manifest names — this also validates cached chunks.
-            if kolimi_chunk::Hash::of(&bytes) != chunk.hash {
-                return Err(SyncError::Protocol(format!(
-                    "chunk {} failed its integrity check for /{rel}",
-                    chunk.hash.to_hex()
+            let manifest_path = format!("/api/files/manifest?path={}", encode(&file.path));
+            let (status, manifest_value) = http.get_json(&manifest_path).await?;
+            if status == 404 {
+                // Raced with a delete; the next pass will clean up.
+                return Ok(());
+            }
+            if status != 200 {
+                return Err(SyncError::Server {
+                    status,
+                    path: manifest_path,
+                });
+            }
+            let manifest: Manifest = serde_json::from_value(manifest_value)?;
+            if !manifest.is_consistent() {
+                return Err(SyncError::E2ee(format!(
+                    "manifest for /{rel} has inconsistent size"
                 )));
             }
-            match &file_key {
-                Some(key) => data.extend_from_slice(&key.decrypt_chunk(&bytes)?),
-                None => data.extend_from_slice(&bytes),
+            let file_key = if file.encrypted {
+                let e2ee = e2ee.ok_or_else(|| {
+                    SyncError::E2ee(
+                        "remote file is encrypted but e2ee is not configured".to_string(),
+                    )
+                })?;
+                if file.shared {
+                    Some(load_shared_file_key(http, state, e2ee, &file.path).await?)
+                } else {
+                    Some(load_file_key(http, state, e2ee, rel).await?)
+                }
+            } else {
+                None
+            };
+            let mut data = Vec::with_capacity(manifest.size as usize);
+            let chunk_context = file.shared.then_some(file.path.as_str());
+            for chunk in &manifest.chunks {
+                let bytes = chunk_bytes(http, config, &chunk.hash.to_hex(), chunk_context).await?;
+                // The bytes we got (from cache or the server) must match the hash
+                // the manifest names — this also validates cached chunks.
+                if kolimi_chunk::Hash::of(&bytes) != chunk.hash {
+                    return Err(SyncError::Protocol(format!(
+                        "chunk {} failed its integrity check for /{rel}",
+                        chunk.hash.to_hex()
+                    )));
+                }
+                match &file_key {
+                    Some(key) => data.extend_from_slice(key.decrypt_chunk(&bytes)?.as_slice()),
+                    None => data.extend_from_slice(&bytes),
+                }
             }
+            // For plaintext files the manifest describes `data` itself. An
+            // *encrypted* manifest hashes the ciphertext chunks, so the whole-file
+            // check does not apply to decrypted data; each chunk was authenticated
+            // above and by its AEAD tag.
+            if file_key.is_none() {
+                kolimi_chunk::verify(&data, &manifest).map_err(|error| {
+                    SyncError::E2ee(format!("verification failed for /{rel}: {error}"))
+                })?;
+            }
+            if let Some(parent) = local.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let tmp = config
+                .local_dir
+                .join(".kolimi")
+                .join(format!("pull-{}.tmp", std::process::id()));
+            {
+                let mut file = std::fs::File::create(&tmp)?;
+                file.write_all(&data)?;
+                file.sync_all()?;
+            }
+            std::fs::rename(&tmp, &local)?;
+            state.files.insert(
+                rel.clone(),
+                StateFile {
+                    content_id: file.content_id.clone(),
+                    size: data.len() as u64,
+                    mtime_ns: mtime_ns(&local)?,
+                    deleted: false,
+                    shared: file.shared,
+                },
+            );
+            report.pulled += 1;
+            Ok(())
         }
-        // For plaintext files the manifest describes `data` itself. An
-        // *encrypted* manifest hashes the ciphertext chunks, so the whole-file
-        // check does not apply to decrypted data; each chunk was authenticated
-        // above and by its AEAD tag.
-        if file_key.is_none() {
-            kolimi_chunk::verify(&data, &manifest).map_err(|error| {
-                SyncError::E2ee(format!("verification failed for /{rel}: {error}"))
-            })?;
+        .await;
+        if let Err(error) = outcome {
+            report.failed += 1;
+            eprintln!("kolimi-sync: skipped /{rel}: {error}");
         }
-        if let Some(parent) = local.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = config
-            .local_dir
-            .join(".kolimi")
-            .join(format!("pull-{}.tmp", std::process::id()));
-        {
-            let mut file = std::fs::File::create(&tmp)?;
-            file.write_all(&data)?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp, &local)?;
-        state.files.insert(
-            rel.clone(),
-            StateFile {
-                content_id: file.content_id.clone(),
-                size: data.len() as u64,
-                mtime_ns: mtime_ns(&local)?,
-                deleted: false,
-                shared: file.shared,
-            },
-        );
-        report.pulled += 1;
     }
 
     // Remote deletions.

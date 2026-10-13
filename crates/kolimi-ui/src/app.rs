@@ -876,12 +876,25 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         let current = path.get_untracked();
         let count = paths.len();
         spawn_local(async move {
+            let mut failed = 0usize;
             for target in &paths {
                 let url = format!("/dav{}", encode_path(target));
-                let _ = api::dav("DELETE", &url, None, &[]).await;
+                match api::dav("DELETE", &url, None, &[]).await {
+                    Ok(r) if (200..300).contains(&r.status) => {}
+                    Ok(r) => {
+                        failed += 1;
+                        error.set(format!("Delete failed (HTTP {})", r.status));
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        error.set(e);
+                    }
+                }
             }
             selected.set(std::collections::HashSet::new());
-            notice.set(format!("Moved {count} item(s) to trash"));
+            if failed == 0 {
+                notice.set(format!("Moved {count} item(s) to trash"));
+            }
             load(current);
         });
     };
@@ -893,15 +906,28 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         let paths: Vec<String> = selected.get_untracked().into_iter().collect();
         let count = paths.len();
         spawn_local(async move {
+            let mut failed = 0usize;
             for target in &paths {
                 let name = target.rsplit('/').next().unwrap_or("file");
                 let destination = format!("{}/{}", dest.trim_end_matches('/'), name);
                 let source = format!("/dav{}", encode_path(target));
                 let dav_dest = format!("/dav{}", encode_path(&destination));
-                let _ = api::dav("MOVE", &source, None, &[("destination", &dav_dest)]).await;
+                match api::dav("MOVE", &source, None, &[("destination", &dav_dest)]).await {
+                    Ok(r) if (200..300).contains(&r.status) => {}
+                    Ok(r) => {
+                        failed += 1;
+                        error.set(format!("Move failed (HTTP {})", r.status));
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        error.set(e);
+                    }
+                }
             }
             selected.set(std::collections::HashSet::new());
-            notice.set(format!("Moved {count} item(s)"));
+            if failed == 0 {
+                notice.set(format!("Moved {count} item(s)"));
+            }
             load(path.get_untracked());
         });
     };

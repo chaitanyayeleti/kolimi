@@ -118,7 +118,7 @@ pub async fn decrypt_file(master: &MasterKey, path: &str) -> Result<(String, Vec
         let plaintext = file_key
             .decrypt_chunk(&ciphertext)
             .map_err(|_| "Decryption failed (wrong key or corrupt data)".to_string())?;
-        out.extend_from_slice(&plaintext);
+        out.extend_from_slice(plaintext.as_slice());
     }
     Ok((name, out))
 }
@@ -141,7 +141,7 @@ pub fn decrypt_public(
         let plaintext = file_key
             .decrypt_chunk(&ciphertext[offset..end])
             .map_err(|_| "Decryption failed (wrong key or corrupt data)".to_string())?;
-        out.extend_from_slice(&plaintext);
+        out.extend_from_slice(plaintext.as_slice());
         offset = end;
     }
     Ok(out)

@@ -483,16 +483,21 @@ impl Vfs {
         hash: &Hash,
         data: &[u8],
     ) -> Result<(), VfsError> {
-        // Dedup first: re-uploading an existing chunk adds no new bytes and
-        // must not be rejected by the quota.
-        if !self.store.put_chunk(user_id, hash, data).await? {
+        // Dedup: re-uploading an existing chunk adds no new bytes and must not
+        // be rejected by the quota.
+        if self.store.has_chunk(user_id, hash).await? {
             return Ok(());
         }
+        // Reject before writing the blob, so a failed quota check never leaves
+        // an orphan chunk (and a retry cannot bypass it via the dedup path).
         let (quota, used) = self.quota_state(user_id).await?;
         if quota > 0 && used.saturating_add(data.len() as u64) > quota {
             return Err(quota_error(quota));
         }
-        self.record_usage(user_id, data.len() as u64).await?;
+        // Count usage only when this call actually stored a new chunk.
+        if self.store.put_chunk(user_id, hash, data).await? {
+            self.record_usage(user_id, data.len() as u64).await?;
+        }
         Ok(())
     }
 
