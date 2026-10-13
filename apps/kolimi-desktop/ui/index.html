@@ -18,6 +18,8 @@
   p.lede { margin: 0 0 20px; color: #9aa4b8; }
   label { display: block; margin-bottom: 14px; font-weight: 600; }
   label small { display: block; font-weight: 400; color: #9aa4b8; margin-top: 2px; }
+  label.check { display: flex; align-items: center; gap: 8px; }
+  label.check input { width: auto; margin: 0; }
   input {
     display: block; width: 100%; margin-top: 6px; padding: 9px 11px;
     border: 1px solid #2c3546; border-radius: 8px;
@@ -60,6 +62,10 @@
       <small>Only needed when encrypted roots are set (optional).</small>
       <input name="e2ee_passphrase" type="password" autocomplete="off">
     </label>
+    <label class="check">
+      <input type="checkbox" name="autostart">
+      Start Kolimi on login (background sync)
+    </label>
     <button type="submit">Save &amp; open</button>
   </form>
   <p id="msg"></p>
@@ -83,6 +89,7 @@
       ? data.encrypted_roots.split(",").map((s) => s.trim()).filter(Boolean)
       : [];
     data.e2ee_passphrase = data.e2ee_passphrase || null;
+    data.autostart = form.elements.autostart.checked;
     try {
       await window.__TAURI__.core.invoke("save_config", { config: data });
     } catch (error) {
@@ -94,7 +101,9 @@
     if (!config) return;
     for (const [key, value] of Object.entries(config)) {
       const field = form.elements[key];
-      if (field) field.value = Array.isArray(value) ? value.join(",") : (value ?? "");
+      if (!field) continue;
+      if (field.type === "checkbox") field.checked = Boolean(value);
+      else field.value = Array.isArray(value) ? value.join(",") : (value ?? "");
     }
   });
 </script>

@@ -11,14 +11,17 @@
 //!   "password": "…",
 //!   "local_dir": "/home/alice/Kolimi",
 //!   "encrypted_roots": ["Private"],
-//!   "e2ee_passphrase": "…"
+//!   "e2ee_passphrase": "…",
+//!   "autostart": false
 //! }
 //! ```
 //!
 //! When no config exists, a first-run setup window writes it. It syncs on
-//! startup, every five minutes, and on demand from the tray menu. Platform
-//! keychains (week 3) will move the `password`/`e2ee_passphrase` fields out of
-//! this file; until then it is written `chmod 600`.
+//! startup, every five minutes, and on demand from the tray menu, with a tray
+//! icon that reflects idle/syncing/error and a desktop notification on
+//! failures and conflicts. Platform keychains (week 4) will move the
+//! `password`/`e2ee_passphrase` fields out of this file; until then it is
+//! written `chmod 600`.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -29,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     Manager, WebviewUrl, WebviewWindowBuilder,
     image::Image,
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem},
     tray::TrayIconBuilder,
     webview::DownloadEvent,
 };
@@ -38,7 +41,7 @@ use url::Url;
 /// Background sync cadence.
 const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// On-disk settings. (Secrets move to the OS keychain in week 3.)
+/// On-disk settings. (Secrets move to the OS keychain in week 4.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DesktopConfig {
     server: String,
@@ -49,6 +52,9 @@ struct DesktopConfig {
     encrypted_roots: Vec<String>,
     #[serde(default)]
     e2ee_passphrase: Option<String>,
+    /// Launch in the background on login (XDG autostart entry).
+    #[serde(default)]
+    autostart: bool,
 }
 
 impl DesktopConfig {
@@ -72,19 +78,23 @@ struct DesktopState {
     config: Mutex<Option<DesktopConfig>>,
     status_item: MenuItem<tauri::Wry>,
     syncing: AtomicBool,
+    paused: AtomicBool,
 }
 
 fn config_path() -> PathBuf {
     if let Ok(path) = std::env::var("KOLIMI_DESKTOP_CONFIG") {
         return PathBuf::from(path);
     }
-    let base = std::env::var("XDG_CONFIG_HOME")
+    config_base().join("kolimi").join("desktop.json")
+}
+
+fn config_base() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             PathBuf::from(home).join(".config")
-        });
-    base.join("kolimi").join("desktop.json")
+        })
 }
 
 fn load_config_file() -> Result<DesktopConfig, String> {
@@ -111,6 +121,42 @@ fn save_config_file(config: &DesktopConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Path of the XDG autostart entry.
+fn autostart_path() -> PathBuf {
+    config_base()
+        .join("autostart")
+        .join("kolimi-desktop.desktop")
+}
+
+/// Create or remove the XDG autostart entry.
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    let path = autostart_path();
+    if enabled {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+        }
+        let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+        let contents = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Kolimi\n\
+             Comment=Kolimi desktop client (background sync)\n\
+             Exec={}\n\
+             X-GNOME-Autostart-enabled=true\n\
+             Terminal=false\n",
+            exe.display()
+        );
+        std::fs::write(&path, contents)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))
+    } else if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("cannot remove {}: {error}", path.display()))
+    } else {
+        Ok(())
+    }
+}
+
 fn open_folder(path: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
@@ -127,6 +173,31 @@ fn downloads_dir() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
         .map(|home| PathBuf::from(home).join("Downloads"))
+}
+
+/// A desktop notification; a no-op if no notification daemon is present.
+fn notify_user(summary: &str, body: &str) {
+    let _ = notify_rust::Notification::new()
+        .appname("Kolimi")
+        .summary(summary)
+        .body(body)
+        .show();
+}
+
+/// Swap the tray icon + tooltip to reflect sync state.
+fn set_tray_icon(app: &tauri::AppHandle, state: &str) {
+    let (bytes, tooltip): (&[u8], &str) = match state {
+        "syncing" => (include_bytes!("../tray-syncing.png"), "Kolimi — syncing…"),
+        "error" => (include_bytes!("../tray-error.png"), "Kolimi — sync problem"),
+        "paused" => (include_bytes!("../tray-idle.png"), "Kolimi — paused"),
+        _ => (include_bytes!("../tray-idle.png"), "Kolimi"),
+    };
+    if let Ok(icon) = Image::from_bytes(bytes)
+        && let Some(tray) = app.tray_by_id("main")
+    {
+        let _ = tray.set_icon(Some(icon));
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
 }
 
 fn open_main(app: &tauri::AppHandle, config: &DesktopConfig) -> Result<(), String> {
@@ -192,7 +263,7 @@ fn open_settings(app: &tauri::AppHandle) {
 fn run_sync(app: tauri::AppHandle) {
     let (config, status_item) = {
         let state = app.state::<DesktopState>();
-        if state.syncing.swap(true, Ordering::SeqCst) {
+        if state.paused.load(Ordering::SeqCst) || state.syncing.swap(true, Ordering::SeqCst) {
             return;
         }
         let config = state.config.lock().unwrap().clone();
@@ -208,17 +279,36 @@ fn run_sync(app: tauri::AppHandle) {
     let sync_config = config.sync_config();
     let app_handle = app.clone();
     let _ = status_item.set_text("Syncing…");
+    set_tray_icon(&app, "syncing");
     tauri::async_runtime::spawn(async move {
-        let text = match kolimi_sync::sync_once(&sync_config).await {
-            Ok(report) => format!(
-                "Last sync: ↑{} ↓{} ⚠{}",
-                report.pushed, report.pulled, report.conflicts
-            ),
-            Err(error) => format!("Sync failed: {error}"),
-        };
+        let result = kolimi_sync::sync_once(&sync_config).await;
         let state = app_handle.state::<DesktopState>();
         state.syncing.store(false, Ordering::SeqCst);
-        let _ = status_item.set_text(text);
+        match result {
+            Ok(report) => {
+                let _ = state.status_item.set_text(format!(
+                    "Last sync: ↑{} ↓{} ⚠{}",
+                    report.pushed, report.pulled, report.conflicts
+                ));
+                if report.conflicts > 0 {
+                    set_tray_icon(&app_handle, "error");
+                    notify_user(
+                        "Kolimi sync",
+                        &format!(
+                            "{} conflict(s) — local edits kept as .conflict-* files",
+                            report.conflicts
+                        ),
+                    );
+                } else {
+                    set_tray_icon(&app_handle, "idle");
+                }
+            }
+            Err(error) => {
+                let _ = state.status_item.set_text(format!("Sync failed: {error}"));
+                set_tray_icon(&app_handle, "error");
+                notify_user("Kolimi sync failed", &error.to_string());
+            }
+        }
     });
 }
 
@@ -228,10 +318,13 @@ fn load_config() -> Option<DesktopConfig> {
     load_config_file().ok()
 }
 
-/// Persist settings, open the main window, and kick off a first sync.
+/// Persist settings, apply autostart, open the main window, and sync.
 #[tauri::command]
 fn save_config(app: tauri::AppHandle, config: DesktopConfig) -> Result<(), String> {
     save_config_file(&config)?;
+    if let Err(error) = set_autostart(config.autostart) {
+        notify_user("Kolimi", &format!("autostart: {error}"));
+    }
     *app.state::<DesktopState>().config.lock().unwrap() = Some(config.clone());
     open_main(&app, &config)?;
     if let Some(window) = app.get_webview_window("settings") {
@@ -245,16 +338,35 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![load_config, save_config])
         .setup(|app| {
+            let config = load_config_file().ok();
+            let autostart_on = config.as_ref().is_some_and(|config| config.autostart);
+
             let status = MenuItem::with_id(app, "status", "Last sync: never", false, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open Kolimi", true, None::<&str>)?;
             let folder = MenuItem::with_id(app, "folder", "Open folder", true, None::<&str>)?;
             let sync_now = MenuItem::with_id(app, "sync", "Sync now", true, None::<&str>)?;
+            let pause = MenuItem::with_id(app, "pause", "Pause syncing", true, None::<&str>)?;
+            let autostart = CheckMenuItem::with_id(
+                app,
+                "autostart",
+                "Start on login",
+                true,
+                autostart_on,
+                None::<&str>,
+            )?;
             let setup = MenuItem::with_id(app, "setup", "Setup…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&status, &open, &folder, &sync_now, &setup, &quit])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &status, &open, &folder, &sync_now, &pause, &autostart, &setup, &quit,
+                ],
+            )?;
 
-            let icon = Image::from_bytes(include_bytes!("../icon.png"))?;
-            TrayIconBuilder::new()
+            let pause_item = pause.clone();
+            let autostart_item = autostart.clone();
+            let icon = Image::from_bytes(include_bytes!("../tray-idle.png"))?;
+            TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .tooltip("Kolimi")
                 .menu(&menu)
@@ -275,17 +387,62 @@ fn main() {
                         }
                     }
                     "sync" => run_sync(app.clone()),
+                    "pause" => {
+                        let paused = {
+                            let state = app.state::<DesktopState>();
+                            let paused = !state.paused.load(Ordering::SeqCst);
+                            state.paused.store(paused, Ordering::SeqCst);
+                            paused
+                        };
+                        let _ = pause_item.set_text(if paused {
+                            "Resume syncing"
+                        } else {
+                            "Pause syncing"
+                        });
+                        let _ = app.state::<DesktopState>().status_item.set_text(if paused {
+                            "Paused"
+                        } else {
+                            "Idle"
+                        });
+                        if paused {
+                            set_tray_icon(app, "paused");
+                        } else {
+                            set_tray_icon(app, "idle");
+                            run_sync(app.clone());
+                        }
+                    }
+                    "autostart" => {
+                        let enabled = autostart_item.is_checked().unwrap_or(false);
+                        if let Err(error) = set_autostart(enabled) {
+                            notify_user("Kolimi", &format!("autostart: {error}"));
+                            let _ = autostart_item.set_checked(!enabled);
+                        } else {
+                            let saved = {
+                                let state = app.state::<DesktopState>();
+                                match state.config.lock().unwrap().as_mut() {
+                                    Some(config) => {
+                                        config.autostart = enabled;
+                                        Some(config.clone())
+                                    }
+                                    None => None,
+                                }
+                            };
+                            if let Some(config) = saved {
+                                let _ = save_config_file(&config);
+                            }
+                        }
+                    }
                     "setup" => open_settings(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .build(app)?;
 
-            let config = load_config_file().ok();
             app.manage(DesktopState {
                 config: Mutex::new(config.clone()),
                 status_item: status,
                 syncing: AtomicBool::new(false),
+                paused: AtomicBool::new(false),
             });
 
             match config {

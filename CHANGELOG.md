@@ -19,6 +19,11 @@ follow [Semantic Versioning](https://semver.org/).
   with the result shown in the tray (instead of failing silently). Rename,
   move, delete, versions/trash, search, and previews come from the loaded web
   UI, giving feature parity in the desktop shell.
+- **Desktop sync polish**: the tray shows **idle/syncing/error/paused**
+  states, **desktop notifications** fire on sync failure and on conflicts,
+  **XDG autostart** is a "Start on login" toggle (setup checkbox + tray menu),
+  and sync can be **paused/resumed** from the tray. Wayland-native via
+  GTK/webkit2gtk (`GDK_BACKEND` auto-selects Wayland or X11).
 
 ## [0.1.11]
 
