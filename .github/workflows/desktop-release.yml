@@ -68,6 +68,7 @@ jobs:
         run: |
           version="${RELEASE_TAG#desktop-v}"
           sed -i "s/^pkgver=.*/pkgver=$version/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
           url="https://github.com/chaitanyayeleti/kolimi/archive/refs/tags/desktop-v$version.tar.gz"
           sum=$(curl -sL "$url" | sha256sum | cut -d' ' -f1)
           sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" PKGBUILD
