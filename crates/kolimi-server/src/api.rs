@@ -130,8 +130,13 @@ pub async fn login(
         .await;
         return unauthorized("invalid credentials");
     }
-    // Second factor, when enrolled.
-    if let Some((secret_b32, last_step)) = state.db.totp_secret(user.id).await.ok().flatten() {
+    // Second factor, when enrolled. A DB error here must not silently
+    // downgrade the login to password-only.
+    let totp = match state.db.totp_secret(user.id).await {
+        Ok(totp) => totp,
+        Err(_) => return internal_error(),
+    };
+    if let Some((secret_b32, last_step)) = totp {
         let Some(code) = req.code.as_deref() else {
             audit(
                 &state,
@@ -277,8 +282,12 @@ pub async fn logout(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
-    if let Some(hash) = user.session_hash {
-        let _ = state.db.delete_session(&hash).await;
+    if let Some(hash) = user.session_hash
+        && let Err(error) = state.db.delete_session(&hash).await
+    {
+        // The session must not survive a "logout"; surface the failure.
+        tracing::error!(%error, "failed to revoke session on logout");
+        return internal_error();
     }
     audit(
         &state,
@@ -654,6 +663,9 @@ pub async fn update_user(
         )
         .await;
     }
+    // A change to an account (disabled/admin/quota) must invalidate any
+    // cached Basic-auth credential for it, so it takes effect immediately.
+    state.cred_cache.clear();
     match state.db.find_user(&username).await {
         Ok(Some(updated)) => Json(json!(updated)).into_response(),
         _ => internal_error(),
@@ -677,6 +689,8 @@ pub async fn delete_user(
     }
     match state.db.delete_user(&username).await {
         Ok(()) => {
+            // Drop any cached Basic-auth credential for the deleted account.
+            state.cred_cache.clear();
             // The row and its cascades are gone; drop the per-user blob
             // directory too, since the janitor only visits existing users.
             if let Err(error) = state.vfs.remove_user_data(target.id).await {

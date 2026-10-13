@@ -128,13 +128,12 @@ pub async fn tree(
         Ok(nodes) => nodes,
         Err(_) => return internal_error(),
     };
-    let encrypted: std::collections::HashSet<i64> = state
-        .db
-        .encrypted_node_ids(user.user_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let encrypted: std::collections::HashSet<i64> =
+        match state.db.encrypted_node_ids(user.user_id).await {
+            Ok(ids) => ids.into_iter().collect(),
+            // Never report ciphertext as plaintext on a DB error.
+            Err(_) => return internal_error(),
+        };
 
     let mut info: HashMap<i64, (Option<i64>, String)> = HashMap::new();
     for node in &nodes {
@@ -226,23 +225,19 @@ pub async fn shared_tree(
         }
         if let std::collections::hash_map::Entry::Vacant(entry) = nodes_cache.entry(share.owner_id)
         {
-            let nodes = state
-                .db
-                .all_live_nodes(share.owner_id)
-                .await
-                .unwrap_or_default();
+            let nodes = match state.db.all_live_nodes(share.owner_id).await {
+                Ok(nodes) => nodes,
+                Err(_) => return internal_error(),
+            };
             entry.insert(nodes);
         }
         if let std::collections::hash_map::Entry::Vacant(entry) =
             encrypted_cache.entry(share.owner_id)
         {
-            let ids = state
-                .db
-                .encrypted_node_ids(share.owner_id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
+            let ids = match state.db.encrypted_node_ids(share.owner_id).await {
+                Ok(ids) => ids.into_iter().collect(),
+                Err(_) => return internal_error(),
+            };
             entry.insert(ids);
         }
         let nodes = &nodes_cache[&share.owner_id];

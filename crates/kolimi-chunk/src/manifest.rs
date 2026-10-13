@@ -56,6 +56,19 @@ impl Manifest {
         }
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
+
+    /// The size implied by the chunk lengths.
+    pub fn declared_size(&self) -> u64 {
+        self.chunks.iter().map(|chunk| u64::from(chunk.len)).sum()
+    }
+
+    /// Whether `size` agrees with the sum of the chunk lengths.
+    ///
+    /// A manifest whose `size` lies can otherwise force an oversized
+    /// allocation (`Vec::with_capacity(size)`) when it is read.
+    pub fn is_consistent(&self) -> bool {
+        self.size == self.declared_size()
+    }
 }
 
 /// Reasons a manifest can fail to match a byte buffer.

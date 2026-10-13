@@ -35,7 +35,8 @@ impl FailedAuthTracker {
     /// Returns the remaining lockout duration, or `None` if not locked.
     pub fn check(&self, key: &str) -> Option<Duration> {
         let now = Instant::now();
-        let mut map = self.inner.lock().ok()?;
+        // Recover from a poisoned mutex rather than silently disabling lockout.
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let entry = map.get(key)?;
         match entry.locked_until {
             Some(until) if until > now => Some(until - now),
@@ -50,9 +51,7 @@ impl FailedAuthTracker {
     /// Records a failed attempt, locking the key out once the threshold is hit.
     pub fn record_failure(&self, key: &str) {
         let now = Instant::now();
-        let Ok(mut map) = self.inner.lock() else {
-            return;
-        };
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() > 10_000 {
             map.retain(|_, entry| {
                 entry.locked_until.is_some_and(|until| until > now)
@@ -76,9 +75,8 @@ impl FailedAuthTracker {
 
     /// Clears failure state for a key after a successful authentication.
     pub fn record_success(&self, key: &str) {
-        if let Ok(mut map) = self.inner.lock() {
-            map.remove(key);
-        }
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(key);
     }
 }
 

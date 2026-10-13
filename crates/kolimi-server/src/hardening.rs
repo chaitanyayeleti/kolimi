@@ -52,14 +52,21 @@ impl RateLimiter {
     }
 
     /// Records a hit for `key` and reports whether it stays within `max`
-    /// requests per `window`. Fails open if the lock is poisoned.
+    /// requests per `window`. Recovers from a poisoned lock.
     pub fn allow(&self, key: &str, max: u32, window: Duration) -> bool {
         let now = Instant::now();
-        let Ok(mut map) = self.inner.lock() else {
-            return true;
-        };
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() > MAX_KEYS {
             map.retain(|_, bucket| now.duration_since(bucket.start) < window);
+        }
+        // Hard cap: a flood of unique keys (e.g. spoofed X-Forwarded-For) must
+        // not grow the map without bound. Evict arbitrary entries until under
+        // the limit.
+        while map.len() > MAX_KEYS {
+            let Some(evict) = map.keys().next().cloned() else {
+                break;
+            };
+            map.remove(&evict);
         }
         let bucket = map.entry(key.to_string()).or_insert(Bucket {
             count: 0,

@@ -247,11 +247,14 @@ impl BlobStore {
 
         let mut batch = ScrubBatch::default();
         let mut last: Option<String> = None;
+        let mut has_more = false;
         for (rel, kind) in &blobs {
             if after.is_some_and(|after| rel.as_str() <= after) {
                 continue;
             }
             if batch.checked as usize >= limit {
+                // A blob remains beyond this batch: resume from `last`.
+                has_more = true;
                 break;
             }
             batch.checked += 1;
@@ -261,11 +264,7 @@ impl BlobStore {
                 batch.corrupt.push(rel.clone());
             }
         }
-        batch.next = if batch.checked as usize == limit {
-            last
-        } else {
-            None
-        };
+        batch.next = if has_more { last } else { None };
         Ok(batch)
     }
 
@@ -330,6 +329,11 @@ impl BlobStore {
         user_id: i64,
         manifest: &Manifest,
     ) -> Result<Hash, StoreError> {
+        if !manifest.is_consistent() {
+            return Err(StoreError::Internal(
+                "manifest size does not match its chunk lengths".to_string(),
+            ));
+        }
         let content_id = manifest.content_id();
         let path = self.manifest_path(user_id, &content_id);
         if tokio::fs::try_exists(&path).await? {
@@ -365,6 +369,11 @@ impl BlobStore {
         if manifest.content_id() != *content_id {
             return Err(StoreError::Corrupt(*content_id));
         }
+        // Guard against a manifest whose `size` lies about its chunks, which
+        // would otherwise drive an oversized allocation on read.
+        if !manifest.is_consistent() {
+            return Err(StoreError::Corrupt(*content_id));
+        }
         Ok(manifest)
     }
 
@@ -378,14 +387,21 @@ impl BlobStore {
     }
 
     /// Chunks and stores a byte buffer; returns the manifest.
-    pub async fn ingest_bytes(&self, user_id: i64, data: &[u8]) -> Result<Manifest, StoreError> {
+    pub async fn ingest_bytes(
+        &self,
+        user_id: i64,
+        data: &[u8],
+    ) -> Result<(Manifest, u64), StoreError> {
         let chunks: Vec<(Hash, Vec<u8>)> = kolimi_chunk::split(data)
             .into_iter()
             .map(|chunk| (chunk.hash, chunk.data.to_vec()))
             .collect();
         let mut refs = Vec::with_capacity(chunks.len());
+        let mut new_bytes = 0u64;
         for (hash, bytes) in &chunks {
-            self.put_chunk(user_id, hash, bytes).await?;
+            if self.put_chunk(user_id, hash, bytes).await? {
+                new_bytes += bytes.len() as u64;
+            }
             refs.push(ChunkRef {
                 hash: *hash,
                 len: bytes.len() as u32,
@@ -397,7 +413,7 @@ impl BlobStore {
             chunks: refs,
         };
         self.put_manifest(user_id, &manifest).await?;
-        Ok(manifest)
+        Ok((manifest, new_bytes))
     }
 
     /// Streams a body to a temp file, chunks it, and stores chunks + manifest.
@@ -432,9 +448,17 @@ impl BlobStore {
                 let _ = tokio::fs::remove_file(&tmp).await;
                 return Err(StoreError::TooLarge { limit: max_bytes });
             }
-            file.write_all(chunk).await?;
+            if let Err(e) = file.write_all(chunk).await {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(StoreError::Io(e));
+            }
         }
-        file.sync_all().await?;
+        if let Err(e) = file.sync_all().await {
+            drop(file);
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(StoreError::Io(e));
+        }
         drop(file);
 
         let chunks_dir = self.chunks_dir(user_id);
@@ -816,7 +840,7 @@ mod tests {
     async fn chunk_roundtrip_and_verification() {
         let (_dir, store) = store().await;
         let data = pseudorandom(5 * 1024 * 1024);
-        let manifest = store.ingest_bytes(1, &data).await.unwrap();
+        let manifest = store.ingest_bytes(1, &data).await.unwrap().0;
         assert!(manifest.chunks.len() > 1);
 
         let content = store.read_content(1, &manifest).await.unwrap();
@@ -834,8 +858,8 @@ mod tests {
     async fn identical_content_dedupes_chunks_and_manifest() {
         let (_dir, store) = store().await;
         let data = pseudorandom(3 * 1024 * 1024);
-        let first = store.ingest_bytes(1, &data).await.unwrap();
-        let second = store.ingest_bytes(1, &data).await.unwrap();
+        let first = store.ingest_bytes(1, &data).await.unwrap().0;
+        let second = store.ingest_bytes(1, &data).await.unwrap().0;
         assert_eq!(first.content_id(), second.content_id());
 
         // Uploading the same content twice must not duplicate chunk files.
@@ -848,7 +872,7 @@ mod tests {
     #[tokio::test]
     async fn blobs_are_scoped_per_user() {
         let (_dir, store) = store().await;
-        let manifest = store.ingest_bytes(1, b"private").await.unwrap();
+        let manifest = store.ingest_bytes(1, b"private").await.unwrap().0;
         assert!(matches!(
             store.get_manifest(2, &manifest.content_id()).await,
             Err(StoreError::NotFound(_))
@@ -913,7 +937,7 @@ mod tests {
     #[tokio::test]
     async fn tampered_chunk_is_detected() {
         let (_dir, store) = store().await;
-        let manifest = store.ingest_bytes(1, b"hello chunk world").await.unwrap();
+        let manifest = store.ingest_bytes(1, b"hello chunk world").await.unwrap().0;
         let hash = manifest.chunks[0].hash;
         let path = store.chunk_path(1, &hash);
         tokio::fs::write(&path, b"tampered").await.unwrap();
@@ -991,8 +1015,8 @@ mod tests {
     #[tokio::test]
     async fn sweep_removes_unreferenced_but_respects_grace() {
         let (_dir, store) = store().await;
-        let keep = store.ingest_bytes(1, b"keep me around").await.unwrap();
-        let stale = store.ingest_bytes(1, b"delete me later").await.unwrap();
+        let keep = store.ingest_bytes(1, b"keep me around").await.unwrap().0;
+        let stale = store.ingest_bytes(1, b"delete me later").await.unwrap().0;
         let keep_manifests: HashSet<Hash> = [keep.content_id()].into_iter().collect();
         let keep_chunks: HashSet<Hash> = keep.chunks.iter().map(|c| c.hash).collect();
 
@@ -1018,7 +1042,7 @@ mod tests {
     #[tokio::test]
     async fn copy_tree_backs_up_blobs() {
         let (_dir, store) = store().await;
-        let manifest = store.ingest_bytes(1, b"backup me").await.unwrap();
+        let manifest = store.ingest_bytes(1, b"backup me").await.unwrap().0;
 
         let dest = tempfile::tempdir().unwrap();
         let count = store.copy_tree_to(dest.path()).await.unwrap();

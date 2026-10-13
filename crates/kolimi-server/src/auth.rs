@@ -25,7 +25,6 @@ pub async fn require_auth(
     next: Next,
 ) -> Result<Response, Response> {
     let method = req.method().clone();
-    let path = req.uri().path().to_owned();
     let headers = req.headers().clone();
     let ip = hardening::client_ip(
         &headers,
@@ -37,8 +36,10 @@ pub async fn require_auth(
 
     let (user, via_cookie) = authenticate(&state, &headers, &ip).await?;
 
+    // Cookie-authenticated state-changing requests must carry the
+    // double-submit CSRF token on every surface (API, WebDAV, plugins), not
+    // just `/api/*`.
     if via_cookie
-        && path.starts_with("/api/")
         && matches!(
             method,
             Method::POST | Method::PUT | Method::PATCH | Method::DELETE

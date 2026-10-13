@@ -811,7 +811,10 @@ fn write_prop_element(
     };
     let mut start = BytesStart::new(start_name.as_str());
     if !namespace.is_empty() {
-        start.push_attribute(("xmlns:x", namespace));
+        // quick-xml writes attribute values verbatim, so escape the
+        // (client-supplied) namespace URI to prevent markup injection.
+        let escaped = escape_attr(namespace);
+        start.push_attribute(("xmlns:x", escaped.as_str()));
     }
     w.write_event(Event::Start(start))?;
     if let Some(value) = value {
@@ -959,7 +962,7 @@ pub fn lockdiscovery_body(href: &str, locks: &[Lock]) -> Vec<u8> {
     w.into_inner()
 }
 
-fn is_valid_ncname(name: &str) -> bool {
+pub(crate) fn is_valid_ncname(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}

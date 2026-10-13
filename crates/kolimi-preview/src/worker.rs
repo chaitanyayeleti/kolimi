@@ -47,6 +47,16 @@ pub fn run(kind: &str, input: &Path, max_dim: u32) -> Result<(), PreviewError> {
         "preview-worker: kind={kind} rlimits={} nnp={} landlock={} seccomp={}",
         hardening.rlimits, hardening.no_new_privs, hardening.landlock_abi, hardening.seccomp
     );
+    // Fail closed: never decode untrusted input unless the sandbox is in
+    // force. Landlock is required unless explicitly waived for kernels that
+    // do not support it (set KOLIMI_PREVIEW_ALLOW_NO_LANDLOCK=1).
+    let landlock_ok = hardening.landlock_abi > 0
+        || std::env::var_os("KOLIMI_PREVIEW_ALLOW_NO_LANDLOCK").is_some();
+    if !hardening.rlimits || !hardening.no_new_privs || !hardening.seccomp || !landlock_ok {
+        return Err(PreviewError::Worker(format!(
+            "sandbox not fully applied: {hardening:?}"
+        )));
+    }
 
     let metadata = std::fs::metadata(input)?;
     if metadata.len() > MAX_INPUT_BYTES {

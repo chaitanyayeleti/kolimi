@@ -107,6 +107,9 @@ pub enum SyncError {
         /// Request path.
         path: String,
     },
+    /// The server returned an unexpected or malformed response.
+    #[error("protocol error: {0}")]
+    Protocol(String),
     /// E2EE failure (missing keyring, wrong secret, mixed plaintext state).
     #[error("e2ee error: {0}")]
     E2ee(String),
@@ -665,8 +668,11 @@ pub async fn enroll_device(config: &SyncConfig, device_name: &str) -> Result<i64
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     };
 
-    // Verify the wrap opens with our key before persisting anything.
-    let _ = kolimi_crypto::unwrap_secret(&device.private_bytes(), &wrapped)?;
+    // Verify the wrap opens with our key before persisting anything; keep
+    // the unwrapped master key zeroized on drop.
+    let _master: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(
+        kolimi_crypto::unwrap_secret(&device.private_bytes(), &wrapped)?,
+    );
 
     write_device_file(
         &config.local_dir,
@@ -865,47 +871,25 @@ async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncE
         if status != 200 {
             return Err(SyncError::Server { status, path });
         }
+        // A malformed/absent `entries` array must never be read as "the
+        // server has no files" — that would make the caller delete every
+        // locally tracked file.
+        let Some(entries) = body["entries"].as_array() else {
+            return Err(SyncError::Protocol(format!(
+                "sync tree response for {path} has no 'entries' array"
+            )));
+        };
         let mut advanced = false;
-        if let Some(entries) = body["entries"].as_array() {
-            for entry in entries {
-                if let Some(id) = entry["id"].as_i64()
-                    && id > after
-                {
-                    after = id;
-                    advanced = true;
-                }
-                if entry["kind"].as_str() != Some("file") {
-                    continue;
-                }
-                let Some(server_path) = entry["path"].as_str() else {
-                    continue;
-                };
-                let Some(content_id) = entry["content_id"].as_str() else {
-                    continue;
-                };
-                let rel = server_path.trim_start_matches('/').to_string();
-                remote.insert(
-                    rel,
-                    RemoteFile {
-                        path: server_path.to_string(),
-                        content_id: content_id.to_string(),
-                        encrypted: entry["encrypted"].as_bool().unwrap_or(false),
-                        shared: false,
-                    },
-                );
-            }
-        }
-        if !body["has_more"].as_bool().unwrap_or(false) || !advanced {
-            break;
-        }
-    }
-
-    // Files shared with the user (read-only mirror under `Shared with me/`).
-    let (status, body) = http.get_json("/api/sync/shared-tree").await?;
-    if status == 200
-        && let Some(entries) = body["entries"].as_array()
-    {
         for entry in entries {
+            if let Some(id) = entry["id"].as_i64()
+                && id > after
+            {
+                after = id;
+                advanced = true;
+            }
+            if entry["kind"].as_str() != Some("file") {
+                continue;
+            }
             let Some(server_path) = entry["path"].as_str() else {
                 continue;
             };
@@ -918,11 +902,46 @@ async fn remote_files(http: &Http) -> Result<BTreeMap<String, RemoteFile>, SyncE
                 RemoteFile {
                     path: server_path.to_string(),
                     content_id: content_id.to_string(),
-                    encrypted: entry["encrypted"].as_bool().unwrap_or(false),
-                    shared: true,
+                    encrypted: entry["encrypted"].as_bool().unwrap_or(true),
+                    shared: false,
                 },
             );
         }
+        if !body["has_more"].as_bool().unwrap_or(false) || !advanced {
+            break;
+        }
+    }
+
+    // Files shared with the user (read-only mirror under `Shared with me/`).
+    let (status, body) = http.get_json("/api/sync/shared-tree").await?;
+    if status != 200 {
+        return Err(SyncError::Server {
+            status,
+            path: "/api/sync/shared-tree".to_string(),
+        });
+    }
+    let Some(entries) = body["entries"].as_array() else {
+        return Err(SyncError::Protocol(
+            "shared-tree response has no 'entries' array".to_string(),
+        ));
+    };
+    for entry in entries {
+        let Some(server_path) = entry["path"].as_str() else {
+            continue;
+        };
+        let Some(content_id) = entry["content_id"].as_str() else {
+            continue;
+        };
+        let rel = server_path.trim_start_matches('/').to_string();
+        remote.insert(
+            rel,
+            RemoteFile {
+                path: server_path.to_string(),
+                content_id: content_id.to_string(),
+                encrypted: entry["encrypted"].as_bool().unwrap_or(true),
+                shared: true,
+            },
+        );
     }
     Ok(remote)
 }
@@ -1324,6 +1343,14 @@ async fn mkcol(http: &Http, dir: &str) -> Result<(), SyncError> {
     Ok(())
 }
 
+/// Whether `name` looks like a preserved conflict copy (`*.conflict-<unix>`).
+fn is_conflict_name(name: &str) -> bool {
+    match name.rsplit_once(".conflict-") {
+        Some((_, stamp)) => !stamp.is_empty() && stamp.chars().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
 fn conflict_path(local: &Path) -> PathBuf {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1342,6 +1369,10 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), S
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if name == ".kolimi" {
+            continue;
+        }
+        // Preserved conflict copies are local-only; never push them back.
+        if is_conflict_name(&name) {
             continue;
         }
         // Shared files are read-only mirrors of someone else's tree.

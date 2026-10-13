@@ -208,8 +208,15 @@ pub struct LoginBegin {
 ///
 /// Returns 404 for unknown users and for users without passkeys alike,
 /// so the endpoint does not reveal which accounts exist.
-pub async fn login_begin(State(state): State<AppState>, Json(req): Json<LoginBegin>) -> Response {
-    if state.lockout.check(&req.username).is_some() {
+pub async fn login_begin(
+    State(state): State<AppState>,
+    crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
+    Json(req): Json<LoginBegin>,
+) -> Response {
+    // Key the lockout on (account, source) so one client cannot lock an
+    // account out for everyone.
+    let lockout_key = format!("passkey:{}:{}", req.username, ip);
+    if state.lockout.check(&lockout_key).is_some() {
         return too_many();
     }
     let Some(user) = state.db.find_user(&req.username).await.ok().flatten() else {
@@ -244,8 +251,13 @@ pub struct LoginFinish {
 }
 
 /// `POST /api/passkeys/login/finish` — verify the assertion and start a session.
-pub async fn login_finish(State(state): State<AppState>, Json(req): Json<LoginFinish>) -> Response {
-    if state.lockout.check(&req.username).is_some() {
+pub async fn login_finish(
+    State(state): State<AppState>,
+    crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
+    Json(req): Json<LoginFinish>,
+) -> Response {
+    let lockout_key = format!("passkey:{}:{}", req.username, ip);
+    if state.lockout.check(&lockout_key).is_some() {
         return too_many();
     }
     let Some(user) = state.db.find_user(&req.username).await.ok().flatten() else {
@@ -271,7 +283,7 @@ pub async fn login_finish(State(state): State<AppState>, Json(req): Json<LoginFi
         Ok(result) => result,
         Err(error) => {
             tracing::debug!(error = %error, "passkey authentication failed");
-            state.lockout.record_failure(&req.username);
+            state.lockout.record_failure(&lockout_key);
             audit(
                 &state,
                 None,
@@ -289,19 +301,23 @@ pub async fn login_finish(State(state): State<AppState>, Json(req): Json<LoginFi
         .into_iter()
         .find(|(_, passkey)| passkey.cred_id() == result.cred_id())
     else {
-        state.lockout.record_failure(&req.username);
+        state.lockout.record_failure(&lockout_key);
         return unauthorized("invalid credentials");
     };
 
     passkey.update_credential(&result);
-    if let Ok(serialized) = serde_json::to_string(&passkey) {
-        let _ = state
+    if let Ok(serialized) = serde_json::to_string(&passkey)
+        && let Err(error) = state
             .db
             .update_passkey(user.id, passkey_id, &serialized, kolimi_db::now_millis())
-            .await;
+            .await
+    {
+        // A stale sign counter weakens replay protection; surface it rather
+        // than silently reporting success.
+        tracing::error!(%error, "failed to persist passkey sign counter");
     }
 
-    state.lockout.record_success(&req.username);
+    state.lockout.record_success(&lockout_key);
     audit(
         &state,
         Some(user.id),

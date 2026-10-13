@@ -293,23 +293,18 @@ pub async fn shareable(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
-    let users: Vec<String> = state
-        .db
-        .list_users()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|u| u.id != user.user_id && !u.disabled)
-        .map(|u| u.username)
-        .collect();
-    let groups: Vec<String> = state
-        .db
-        .list_groups()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|g| g.name)
-        .collect();
+    let users: Vec<String> = match state.db.list_users().await {
+        Ok(users) => users
+            .into_iter()
+            .filter(|u| u.id != user.user_id && !u.disabled)
+            .map(|u| u.username)
+            .collect(),
+        Err(_) => return api::internal_error(),
+    };
+    let groups: Vec<String> = match state.db.list_groups().await {
+        Ok(groups) => groups.into_iter().map(|g| g.name).collect(),
+        Err(_) => return api::internal_error(),
+    };
     Json(json!({ "users": users, "groups": groups })).into_response()
 }
 

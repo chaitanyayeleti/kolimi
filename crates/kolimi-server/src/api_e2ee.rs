@@ -383,6 +383,9 @@ pub async fn create_enrollment(
     let Ok(public_key) = STANDARD.decode(req.device_public_key.as_bytes()) else {
         return api::bad_request("device_public_key must be base64");
     };
+    if public_key.len() != 32 {
+        return api::bad_request("device_public_key must be 32 bytes (X25519)");
+    }
     let name = req.device_name.trim();
     if name.is_empty() || name.len() > 64 {
         return api::bad_request("device_name must be 1..=64 characters");
@@ -440,8 +443,10 @@ pub async fn approve_enrollment(
     let Ok(wrapped) = STANDARD.decode(req.wrapped_master_key.as_bytes()) else {
         return api::bad_request("wrapped_master_key must be base64");
     };
-    let Some(enrollment) = state.db.enrollment(user.user_id, id).await.ok().flatten() else {
-        return api::not_found();
+    let enrollment = match state.db.enrollment(user.user_id, id).await {
+        Ok(Some(enrollment)) => enrollment,
+        Ok(None) => return api::not_found(),
+        Err(_) => return api::internal_error(),
     };
     match state
         .db
@@ -449,14 +454,19 @@ pub async fn approve_enrollment(
         .await
     {
         Ok(true) => {
-            let _ = state
+            if let Err(error) = state
                 .db
                 .register_device(
                     user.user_id,
                     &enrollment.device_name,
                     &enrollment.device_public_key,
                 )
-                .await;
+                .await
+            {
+                // The wrapped key is stored; surface the missing device record
+                // rather than silently leaving the device list out of sync.
+                tracing::error!(%error, "failed to register approved device");
+            }
             audit(
                 &state,
                 Some(user.user_id),

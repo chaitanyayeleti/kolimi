@@ -107,6 +107,12 @@ pub async fn dav(
     for (name, value) in headers {
         header_map.set(name, value).map_err(|e| format!("{e:?}"))?;
     }
+    // Cookie-authenticated unsafe DAV methods need the double-submit token.
+    if let Some(token) = csrf_token() {
+        header_map
+            .set("X-CSRF-Token", &token)
+            .map_err(|e| format!("{e:?}"))?;
+    }
     init.set_headers(&header_map);
     let request =
         web_sys::Request::new_with_str_and_init(url, &init).map_err(|e| format!("{e:?}"))?;

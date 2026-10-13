@@ -55,13 +55,11 @@ pub async fn browse(
     // The caller's own root also shows mounts.
     if segments.is_empty() {
         let mut entries = Vec::new();
-        let encrypted: std::collections::HashSet<i64> = state
-            .db
-            .encrypted_node_ids(user.user_id)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        let encrypted: std::collections::HashSet<i64> =
+            match state.db.encrypted_node_ids(user.user_id).await {
+                Ok(ids) => ids.into_iter().collect(),
+                Err(_) => return api::internal_error(),
+            };
         match state.vfs.list_access(user.user_id, "/").await {
             Ok((_, children)) => {
                 for child in children {
@@ -104,13 +102,11 @@ pub async fn browse(
                 None
             };
             let permission = shared.then(|| access.perm.as_str().to_string());
-            let encrypted: std::collections::HashSet<i64> = state
-                .db
-                .encrypted_node_ids(access.owner_id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
+            let encrypted: std::collections::HashSet<i64> =
+                match state.db.encrypted_node_ids(access.owner_id).await {
+                    Ok(ids) => ids.into_iter().collect(),
+                    Err(_) => return api::internal_error(),
+                };
             let entries: Vec<Value> = children
                 .iter()
                 .map(|child| {

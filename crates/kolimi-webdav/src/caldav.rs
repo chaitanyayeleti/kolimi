@@ -542,6 +542,12 @@ fn write_empty_element(w: &mut Writer<Vec<u8>>, ns: &str, local: &str) -> QResul
         APPLE_NS => "apple",
         _ => "d",
     };
+    // The local name comes from client input; never emit a raw element name.
+    let local = if crate::xml::is_valid_ncname(local) {
+        local
+    } else {
+        "unknown"
+    };
     w.create_element(format!("{prefix}:{local}"))
         .write_empty()?;
     Ok(())
@@ -640,7 +646,10 @@ async fn home(
                     Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                 };
                 for collection in &collections {
-                    let ctag = vfs.db().dav_latest_seq(collection.id).await.unwrap_or(0);
+                    let ctag = match vfs.db().dav_latest_seq(collection.id).await {
+                        Ok(seq) => seq,
+                        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    };
                     resources.push(collection_resource(user, kind, collection, ctag, None));
                 }
             }
@@ -671,15 +680,15 @@ async fn collection(
 
     let name = &segments[2];
     let db = vfs.db();
-    let Some(collection) = db
-        .dav_collection(user.user_id, kind.db_kind(), name)
-        .await
-        .ok()
-        .flatten()
-    else {
-        return StatusCode::NOT_FOUND.into_response();
+    let collection = match db.dav_collection(user.user_id, kind.db_kind(), name).await {
+        Ok(Some(collection)) => collection,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let ctag = db.dav_latest_seq(collection.id).await.unwrap_or(0);
+    let ctag = match db.dav_latest_seq(collection.id).await {
+        Ok(seq) => seq,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
 
     match method.as_str() {
         "OPTIONS" => options(),
@@ -1043,12 +1052,21 @@ async fn report(
                 Ok(changes) => changes,
                 Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             };
-            let latest = db.dav_latest_seq(collection.id).await.unwrap_or(since);
+            let latest_seq = match db.dav_latest_seq(collection.id).await {
+                Ok(seq) => seq.max(since),
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
             let mut resources = Vec::new();
             let mut deleted = Vec::new();
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for change in changes {
-                if !seen.insert(change.object_name.clone()) {
+            // Keep only the latest change per object, so a delete followed by
+            // a re-create in the same window reports the object as present.
+            let mut latest: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for (index, change) in changes.iter().enumerate() {
+                latest.insert(change.object_name.clone(), index);
+            }
+            for (index, change) in changes.into_iter().enumerate() {
+                if latest.get(&change.object_name) != Some(&index) {
                     continue;
                 }
                 let href = object_href(segments, &change.object_name);
@@ -1073,7 +1091,7 @@ async fn report(
                     _ => deleted.push(href),
                 }
             }
-            let token = format!("urn:kolimi:sync:{}:{}", collection.id, latest);
+            let token = format!("urn:kolimi:sync:{}:{}", collection.id, latest_seq);
             render_response(&resources, &deleted, &wanted, Some(&token))
         }
         Report::CalendarQuery { props } if kind == Kind::Calendar => {

@@ -206,12 +206,14 @@ impl Vfs {
         if existing.as_ref().is_some_and(|n| n.kind != "file") {
             return Err(VfsError::IsCollection);
         }
+        let (manifest, new_bytes) = self.store.ingest_bytes(user_id, data).await?;
+        // Quota applies to newly written bytes: re-uploading identical
+        // content (deduplicated) adds nothing and must not be rejected.
         let (quota, used) = self.quota_state(user_id).await?;
-        if quota > 0 && used.saturating_add(data.len() as u64) > quota {
+        if quota > 0 && used.saturating_add(new_bytes) > quota {
             return Err(quota_error(quota));
         }
-        let manifest = self.store.ingest_bytes(user_id, data).await?;
-        self.record_usage(user_id, data.len() as u64).await?;
+        self.record_usage(user_id, new_bytes).await?;
         self.finalize_put_at(user_id, parent.id, &name, existing, &manifest)
             .await
     }
@@ -475,13 +477,16 @@ impl Vfs {
         hash: &Hash,
         data: &[u8],
     ) -> Result<(), VfsError> {
+        // Dedup first: re-uploading an existing chunk adds no new bytes and
+        // must not be rejected by the quota.
+        if !self.store.put_chunk(user_id, hash, data).await? {
+            return Ok(());
+        }
         let (quota, used) = self.quota_state(user_id).await?;
         if quota > 0 && used.saturating_add(data.len() as u64) > quota {
             return Err(quota_error(quota));
         }
-        if self.store.put_chunk(user_id, hash, data).await? {
-            self.record_usage(user_id, data.len() as u64).await?;
-        }
+        self.record_usage(user_id, data.len() as u64).await?;
         Ok(())
     }
 
@@ -610,6 +615,11 @@ impl Vfs {
         }
 
         let existing = self.db.find_child(user_id, dst_parent_id, dst_name).await?;
+        if existing.as_ref().is_some_and(|node| node.id == src.id) {
+            // The destination is the source itself: a no-op. Without this,
+            // an overwrite would trash the source and then move a dead node.
+            return Ok(false);
+        }
         if let Some(existing) = &existing {
             if !overwrite {
                 return Err(VfsError::AlreadyExists);
@@ -860,13 +870,13 @@ impl Vfs {
             };
             let content_id = Hash::from_bytes(arr);
             keep_manifests.insert(content_id);
-            if let Ok(manifest) = self.store.get_manifest(user_id, &content_id).await {
-                for chunk in &manifest.chunks {
-                    keep_chunks.insert(chunk.hash);
-                }
+            // A referenced manifest must be readable; if it is not, abort the
+            // sweep rather than treating it as having no chunks (which would
+            // delete the live file's chunks).
+            let manifest = self.store.get_manifest(user_id, &content_id).await?;
+            for chunk in &manifest.chunks {
+                keep_chunks.insert(chunk.hash);
             }
-            // Corrupt or missing manifests keep their content id pinned but
-            // expose no chunks; under-deletion is the safe failure mode.
         }
         let stats = self
             .store
@@ -890,9 +900,8 @@ impl Vfs {
                 continue;
             };
             let content_id = Hash::from_bytes(arr);
-            if let Ok(manifest) = self.store.get_manifest(user_id, &content_id).await {
-                total = total.saturating_add(manifest.size);
-            }
+            let manifest = self.store.get_manifest(user_id, &content_id).await?;
+            total = total.saturating_add(manifest.size);
         }
         Ok(total)
     }
@@ -1231,7 +1240,7 @@ mod tests {
 
         // Commit genuinely different content with all chunks present.
         let edited = b"one plus more";
-        let stored = vfs.store.ingest_bytes(user, edited).await.unwrap();
+        let stored = vfs.store.ingest_bytes(user, edited).await.unwrap().0;
         let node = vfs
             .commit_manifest(user, "/a.txt", &stored, Some(&current))
             .await

@@ -90,7 +90,9 @@ async fn index_path(
             report.indexed += 1;
         }
         Ok(node) => {
-            let encrypted = state.db.is_encrypted(node.id).await.unwrap_or(false);
+            // On a DB error, treat the node as encrypted so we never index
+            // ciphertext as if it were text.
+            let encrypted = state.db.is_encrypted(node.id).await.unwrap_or(true);
             let content = if !encrypted && crate::preview::looks_textual(&node.name) {
                 match state.vfs.read_head(user_id, path, MAX_CONTENT_BYTES).await {
                     Ok((_, bytes)) => crate::preview::extract_text(&bytes),
