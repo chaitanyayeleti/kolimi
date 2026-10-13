@@ -367,14 +367,11 @@ textarea:focus {
 }
 
 .side-brand .logo {
-  display: grid;
-  place-items: center;
+  display: block;
   width: 30px;
   height: 30px;
   border-radius: 9px;
-  background: var(--accent);
-  color: var(--accent-fg);
-  font-size: 1rem;
+  overflow: hidden;
 }
 
 .nav {
@@ -917,15 +914,11 @@ textarea:focus {
 }
 
 .login .hero .logo {
-  display: grid;
-  place-items: center;
+  display: block;
   width: 52px;
   height: 52px;
   border-radius: 15px;
-  background: var(--accent);
-  color: var(--accent-fg);
-  font-size: 1.5rem;
-  font-weight: 700;
+  overflow: hidden;
   box-shadow: var(--shadow);
 }
 

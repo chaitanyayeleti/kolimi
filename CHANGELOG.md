@@ -6,7 +6,12 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-10-13
+
 ### Added
+- **Brand logo**: a gradient cloud mark, used as the web-UI favicon and
+  sidebar/login logo, the desktop app icon (`.deb`/AppImage/AUR), and the tray
+  icon (idle / syncing / error).
 - **Desktop closes to tray**: closing the window hides it (the tray and the
   background sync loop keep running; use the tray's *Quit* to exit). Autostart
   launches the client with `--hidden`, so login starts it silently in the tray.

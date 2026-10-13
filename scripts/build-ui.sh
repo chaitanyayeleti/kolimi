@@ -38,6 +38,7 @@ wasm-bindgen \
     --out-name app \
     "target/$TARGET/release/kolimi_ui.wasm"
 cp crates/kolimi-ui/index.html crates/kolimi-ui/style.css crates/kolimi-ui/bootstrap.js "$OUT/"
+cp crates/kolimi-ui/favicon.svg crates/kolimi-ui/favicon-32.png crates/kolimi-ui/apple-touch-icon.png "$OUT/"
 
 echo "UI staged in $OUT"
 ls -lh "$OUT"

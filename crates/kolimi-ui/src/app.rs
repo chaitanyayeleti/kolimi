@@ -239,6 +239,31 @@ fn Icon(name: &'static str) -> impl IntoView {
     view! { <span class="icon" inner_html=icon_svg(name)></span> }
 }
 
+/// The Kolimi brand mark: a gradient tile with a cloud. Matches the app/tray
+/// icons (`assets/branding/logo.svg`).
+fn logo_svg() -> String {
+    r##"<svg viewBox="0 0 32 32" width="100%" height="100%" aria-hidden="true">
+<defs><linearGradient id="kolimi-bg" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#5b8def"/><stop offset="0.55" stop-color="#6f7bf0"/><stop offset="1" stop-color="#9b5cf6"/>
+</linearGradient>
+<linearGradient id="kolimi-cloud" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#eaf0ff"/>
+</linearGradient></defs>
+<rect x="0" y="0" width="32" height="32" rx="8.5" fill="url(#kolimi-bg)"/>
+<rect x="0.5" y="0.5" width="31" height="31" rx="8" fill="none" stroke="#ffffff" stroke-opacity="0.18"/>
+<g fill="url(#kolimi-cloud)">
+<circle cx="12.6" cy="18.4" r="3.7"/><circle cx="17.1" cy="15.5" r="5.1"/>
+<circle cx="21.6" cy="18.6" r="3.4"/><rect x="12.6" y="17.4" width="9.4" height="4.6" rx="2.3"/>
+</g></svg>"##
+        .to_string()
+}
+
+/// The brand mark, sized for a header badge.
+#[component]
+fn Logo() -> impl IntoView {
+    view! { <span class="logo" inner_html=logo_svg()></span> }
+}
+
 /// The icon used for a file-list entry.
 fn file_icon(name: &str, kind: &str) -> &'static str {
     if kind == "dir" {
@@ -389,7 +414,7 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
         </button>
         <form class="card login" on:submit=submit>
             <div class="hero">
-                <span class="logo">"K"</span>
+                <Logo/>
                 <h2>"Sign in to Kolimi"</h2>
                 <p class="muted">"Your self-hosted cloud."</p>
             </div>
@@ -955,7 +980,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             </div>
             <aside class="sidebar">
                 <a class="side-brand" href="/app/">
-                    <span class="logo">"K"</span>
+                    <Logo/>
                     "Kolimi"
                 </a>
                 <nav class="nav">
