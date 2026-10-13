@@ -2493,6 +2493,7 @@ version = "0.1.11"
 dependencies = [
  "keyring",
  "kolimi-sync",
+ "libc",
  "notify-rust",
  "serde",
  "serde_json",

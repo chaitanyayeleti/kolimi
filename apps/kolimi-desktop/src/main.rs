@@ -20,8 +20,10 @@
 //! startup, every five minutes, and on demand from the tray menu, with a tray
 //! icon that reflects idle/syncing/error and a desktop notification on
 //! failures and conflicts. The `password` and `e2ee_passphrase` live in the
-//! **OS keychain** (Secret Service via zbus on Linux); only when no keychain
-//! is available do they fall back to the file, which is written `chmod 600`.
+//! **OS keychain** (Secret Service via zbus on Linux). If no keychain is
+//! running they fall back to the Linux **kernel session keyring** (`keyctl`,
+//! session-only, never written to disk); only if both are unavailable do they
+//! fall back to the file, which is written `chmod 600` and warned about.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -116,19 +118,15 @@ fn load_config_file() -> Result<DesktopConfig, String> {
 }
 
 fn save_config_file(config: &DesktopConfig) -> Result<SecretStorage, String> {
-    // Prefer the OS keychain; fall back to writing secrets into the (0600)
-    // file only when no keychain is available.
+    // Prefer the OS keychain, then a session-only kernel keyring; only write
+    // secrets into the (0600) file as a last resort.
     let secrets = Secrets {
         password: config.password.clone(),
         e2ee_passphrase: config.e2ee_passphrase.clone(),
     };
-    let storage = if store_secrets(&config.server, &secrets) {
-        SecretStorage::Keychain
-    } else {
-        SecretStorage::File
-    };
+    let storage = store_secrets(&config.server, &secrets);
     let mut on_disk = config.clone();
-    if storage == SecretStorage::Keychain {
+    if storage != SecretStorage::File {
         on_disk.password = String::new();
         on_disk.e2ee_passphrase = None;
     }
@@ -151,9 +149,11 @@ fn save_config_file(config: &DesktopConfig) -> Result<SecretStorage, String> {
 /// Where the account secrets ended up.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SecretStorage {
-    /// Stored in the OS keychain (encrypted at rest, out of the config file).
+    /// OS keychain (encrypted at rest, out of the config file).
     Keychain,
-    /// Fallback: written into the `0600` config file (no keychain available).
+    /// Linux kernel session keyring (session-only, never written to disk).
+    Session,
+    /// Fallback: written into the `0600` config file (nothing else available).
     File,
 }
 
@@ -186,21 +186,138 @@ struct Secrets {
 /// Keychain service name for secret entries.
 const KEYRING_SERVICE: &str = "kolimi-desktop";
 
-/// Read stored secrets for `server`, if a keychain entry exists.
+/// Read stored secrets for `server`: OS keychain first, then session keyring.
 fn keyring_get(server: &str) -> Option<Secrets> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, server).ok()?;
-    serde_json::from_str(&entry.get_password().ok()?).ok()
+    let raw = secret_service_get(server).or_else(|| session_get(server))?;
+    serde_json::from_str(&raw).ok()
 }
 
-/// Store secrets in the OS keychain; returns whether it succeeded.
-fn store_secrets(server: &str, secrets: &Secrets) -> bool {
+/// Store secrets: OS keychain, else session keyring, else the file.
+fn store_secrets(server: &str, secrets: &Secrets) -> SecretStorage {
+    let Ok(raw) = serde_json::to_string(secrets) else {
+        return SecretStorage::File;
+    };
+    if secret_service_set(server, &raw) {
+        return SecretStorage::Keychain;
+    }
+    if session_set(server, &raw) {
+        return SecretStorage::Session;
+    }
+    SecretStorage::File
+}
+
+fn secret_service_get(server: &str) -> Option<String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, server).ok()?;
+    entry.get_password().ok()
+}
+
+fn secret_service_set(server: &str, raw: &str) -> bool {
     let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, server) else {
         return false;
     };
-    let Ok(raw) = serde_json::to_string(secrets) else {
-        return false;
-    };
-    entry.set_password(&raw).is_ok()
+    entry.set_password(raw).is_ok()
+}
+
+/// Session-keyring description for a server.
+fn session_description(server: &str) -> String {
+    format!("{KEYRING_SERVICE}:{server}")
+}
+
+fn session_set(server: &str, raw: &str) -> bool {
+    keyctl::session_set(&session_description(server), raw.as_bytes())
+}
+
+fn session_get(server: &str) -> Option<String> {
+    let bytes = keyctl::session_get(&session_description(server))?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Linux kernel session keyring (`keyctl`): a session-only fallback that never
+/// touches disk. Non-Linux platforms are no-ops.
+#[cfg(target_os = "linux")]
+mod keyctl {
+    use std::ffi::CString;
+
+    const KEY_SPEC_SESSION_KEYRING: libc::c_long = -3;
+    const KEYCTL_SEARCH: libc::c_long = 10;
+    const KEYCTL_READ: libc::c_long = 11;
+
+    /// Add or update a "user" key in the session keyring.
+    pub fn session_set(description: &str, payload: &[u8]) -> bool {
+        let Ok(key_type) = CString::new("user") else {
+            return false;
+        };
+        let Ok(description) = CString::new(description) else {
+            return false;
+        };
+        let id = unsafe {
+            libc::syscall(
+                libc::SYS_add_key,
+                key_type.as_ptr(),
+                description.as_ptr(),
+                payload.as_ptr(),
+                payload.len(),
+                KEY_SPEC_SESSION_KEYRING,
+            )
+        };
+        id >= 0
+    }
+
+    /// Read the payload of a "user" key in the session keyring.
+    pub fn session_get(description: &str) -> Option<Vec<u8>> {
+        let key_type = CString::new("user").ok()?;
+        let description = CString::new(description).ok()?;
+        let id = unsafe {
+            libc::syscall(
+                libc::SYS_keyctl,
+                KEYCTL_SEARCH,
+                KEY_SPEC_SESSION_KEYRING,
+                key_type.as_ptr(),
+                description.as_ptr(),
+                0,
+            )
+        };
+        if id < 0 {
+            return None;
+        }
+        let len = unsafe {
+            libc::syscall(
+                libc::SYS_keyctl,
+                KEYCTL_READ,
+                id,
+                std::ptr::null_mut::<u8>(),
+                0,
+            )
+        };
+        if len < 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; len as usize];
+        let read = unsafe {
+            libc::syscall(
+                libc::SYS_keyctl,
+                KEYCTL_READ,
+                id,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            )
+        };
+        if read < 0 {
+            return None;
+        }
+        buffer.truncate(read as usize);
+        Some(buffer)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod keyctl {
+    pub fn session_set(_description: &str, _payload: &[u8]) -> bool {
+        false
+    }
+    pub fn session_get(_description: &str) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// Path of the XDG autostart entry.
@@ -407,7 +524,7 @@ fn save_config(app: tauri::AppHandle, config: DesktopConfig) -> Result<(), Strin
     if storage == SecretStorage::File {
         notify_user(
             "Kolimi",
-            "No system keychain found — the password is stored in the 0600 config file.",
+            "No OS keychain or session keyring — the password is stored in the 0600 config file.",
         );
     }
     if let Err(error) = set_autostart(config.autostart) {
@@ -576,4 +693,27 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Kolimi desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn session_keyring_round_trip() {
+        let description = "kolimi-desktop:selftest";
+        if !super::keyctl::session_set(description, b"secret-value") {
+            // No session keyring in this environment; nothing to assert.
+            return;
+        }
+        assert_eq!(
+            super::keyctl::session_get(description),
+            Some(b"secret-value".to_vec())
+        );
+        // Updating the same description replaces the payload.
+        assert!(super::keyctl::session_set(description, b"other"));
+        assert_eq!(
+            super::keyctl::session_get(description),
+            Some(b"other".to_vec())
+        );
+    }
 }

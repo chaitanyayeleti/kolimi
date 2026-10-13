@@ -26,10 +26,11 @@ follow [Semantic Versioning](https://semver.org/).
   GTK/webkit2gtk (`GDK_BACKEND` auto-selects Wayland or X11).
 - **Desktop OS keychain**: the account password and E2EE passphrase are stored
   in the **system keychain** (Secret Service via zbus on Linux; Credential
-  Manager / Keychain on Windows/macOS), keyed by server URL. When no keychain
-  is available (headless, no secret service) they fall back to the `0600`
-  config file. The plaintext `desktop.json` no longer holds the password when a
-  keychain is present.
+  Manager / Keychain on Windows/macOS), keyed by server URL. If no keychain is
+  running they fall back to the Linux **kernel session keyring** (`keyctl`,
+  session-only, never written to disk); only when neither is available do they
+  fall back to the `0600` config file. The plaintext `desktop.json` no longer
+  holds the password when a keychain or session keyring is present.
 - **Desktop E2EE surfacing**: the tray and setup window show the encryption
   state ("Encryption: N root(s), unlocked/locked"), and the app **notifies**
   when secrets fall back to the config file so the weaker storage is never

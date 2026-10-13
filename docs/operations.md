@@ -329,10 +329,12 @@ a 16 MiB memory cap; traps are contained and audited (`plugin.error`).
   It syncs at startup, every five minutes, and on demand, showing status in
   the tray menu. The account **password and E2EE passphrase are kept in the
   system keychain** (Secret Service via zbus on Linux; Credential Manager /
-  Keychain on Windows/macOS), keyed by server URL. When no keychain is
-  available (headless, no secret service) they fall back to the `0600` config
-  file and the app warns; treat that file like `.netrc` — same-user-readable,
-  not encrypted at rest — and keep it out of backups/syncs.
+  Keychain on Windows/macOS), keyed by server URL. If no keychain is running
+  they fall back to the Linux **kernel session keyring** (`keyctl`),
+  session-only and never written to disk. Only when neither is available
+  (headless with no keyutils) do they fall back to the `0600` config file, and
+  the app warns; treat that file like `.netrc` — same-user-readable, not
+  encrypted at rest — and keep it out of backups/syncs.
   `KOLIMI_DESKTOP_CONFIG` overrides the path. The tray shows the E2EE state
   ("Encryption: N root(s), unlocked/locked").
 - **CLI** (`kolimi-sync`): one-shot sync; run it from a timer or
