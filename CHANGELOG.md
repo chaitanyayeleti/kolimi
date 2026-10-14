@@ -6,6 +6,56 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-10-14
+
+Correctness/security hardening across the whole workspace, from an
+independent review (#17–#25).
+
+### Security
+- **CSRF is bound to the session**: the session stores a hash of its CSRF
+  token (migration 0016) and the check compares against it, not just the
+  double-submit cookie.
+- **Passkey sign counter fails closed**: if the counter cannot be persisted,
+  login is refused (no session with a stale counter).
+- **Passkey challenge store** evicts the single oldest entry instead of
+  wiping every in-flight challenge.
+- **E2EE**: reject low-order/non-contributory X25519 recipient keys (RFC 7748);
+  validate published identity keys; cap Argon2 `m_cost`/work so a tampered
+  keyring can't force a huge allocation; reject an empty passphrase in the FFI.
+- **Plugins**: refuse components that import `wasi:sockets` at load, keeping
+  the network surface unused.
+- **Crypto**: decrypted plaintext and KDF buffers are zeroized; the
+  deterministic (fixed-nonce) wrap helpers are `#[doc(hidden)]`.
+- **Scripts**: `install.sh` passes the admin password via stdin (never in the
+  process list); `litmus.sh` verifies pinned sha256 for its downloaded sources.
+
+### Fixed
+- **Sync**: reject server-controlled `..`/absolute paths before writing outside
+  the root; never follow symlinks when collecting files; add connect/request
+  timeouts; verify each chunk against the manifest; never re-push local-only
+  `.conflict-*` copies (nested paths included); skip a single bad file instead
+  of aborting the whole pass; roll back a just-created node/share when their key
+  upload fails; redact secrets in `Debug`.
+- **DB**: `record_change` writes the change row and its audit entry in one
+  transaction; atomic first-admin election and device registration (unique
+  key + upsert); transactions for `clear_totp`/`delete_group`/`remove_group_member`;
+  added missing indexes (migration 0015). `users.credentials_version`
+  (migration 0017) invalidates the credential cache after an out-of-process
+  password reset.
+- **Server**: share of a deleted node returns `410 Gone`; listing users returns
+  `has_more` and rejects cursors on non-id sorts; preview scratch files are
+  removed on panic; `is_encrypted` fails safe to `true`; `write_chunk` checks
+  quota before writing; a scrub audit failure no longer aborts the pass.
+- **UI**: a 401 (and a periodic check) returns to the login view; a request
+  sequence guards the loading state; the upload tray stores per-item signals
+  (O(1) rows, pruned on completion, `File` handles released); toast timers only
+  clear their own message; bulk trash/move surface failures.
+- **Desktop**: settings accesses recover from mutex poisoning; the settings and
+  autostart files are written atomically.
+
+### Added
+- **`wasm` UI tests** (`wasm-bindgen-test`) for the pure helpers, run in CI.
+
 ## [0.1.15] - 2026-10-13
 
 ### Added
