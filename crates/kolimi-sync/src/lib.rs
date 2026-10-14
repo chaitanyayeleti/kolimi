@@ -17,7 +17,7 @@
 //! directions. This is the core the Tauri/mobile shells will wrap; it is
 //! intentionally one-shot (call it from a timer or file watcher).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use std::io::Write;
 
-use kolimi_chunk::{ChunkRef, Manifest, chunker};
+use kolimi_chunk::{ChunkRef, Hash, Manifest, chunker};
 use kolimi_crypto::{
     Argon2Params, FileKey, Identity, Keyring, MasterKey, generate_recovery_code, hex_decode,
     hex_encode, recovery_code_parse,
@@ -355,8 +355,9 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
             SyncError::Locked("passkey (PRF) does not unlock the keyring".to_string())
         })?
     } else if let Some(device) = load_device_file(&config.local_dir)? {
-        // Enrolled device: unlock the master key from the local device file.
-        let secret = hex_decode(&device.device_secret)?;
+        // Enrolled device: unlock the master key from the device key, whether
+        // it lives in the OS keystore or (fallback) the local device file.
+        let secret = resolve_device_secret(&config.local_dir, &device)?;
         let secret: [u8; 32] = secret
             .try_into()
             .map_err(|_| SyncError::E2ee("device key must be 32 bytes".to_string()))?;
@@ -717,7 +718,9 @@ pub async fn upload_keyring(config: &SyncConfig, keyring: &Keyring) -> Result<()
 pub struct DeviceFile {
     /// Label of this device.
     pub name: String,
-    /// X25519 private key (hex).
+    /// X25519 private key (hex). Empty when the key is held in the OS
+    /// keystore; present only for the file fallback.
+    #[serde(default)]
     pub device_secret: String,
     /// Master key wrapped for this device (base64).
     pub wrapped_master_key: String,
@@ -763,6 +766,91 @@ fn write_device_file(local: &Path, file: &DeviceFile) -> Result<(), SyncError> {
     }
     std::fs::rename(&tmp, device_file_path(local))?;
     Ok(())
+}
+
+/// Keychain service name for the CLI device key.
+#[cfg(feature = "keystore")]
+const KEYSTORE_SERVICE: &str = "kolimi-sync-device";
+
+/// Stores `secret` for `account` in the OS keystore (Secret Service /
+/// Keychain / Credential Manager). Returns whether it was stored; on any
+/// failure — no Secret Service, a headless server, or a build without the
+/// `keystore` feature — the caller keeps the secret in the `0600` file.
+fn keystore_store(account: &str, secret: &str) -> bool {
+    #[cfg(feature = "keystore")]
+    {
+        keyring::Entry::new(KEYSTORE_SERVICE, account)
+            .and_then(|entry| entry.set_password(secret))
+            .is_ok()
+    }
+    #[cfg(not(feature = "keystore"))]
+    {
+        let _ = (account, secret);
+        false
+    }
+}
+
+/// Reads the device secret for `account` back from the OS keystore.
+fn keystore_get(account: &str) -> Option<String> {
+    #[cfg(feature = "keystore")]
+    {
+        keyring::Entry::new(KEYSTORE_SERVICE, account)
+            .ok()
+            .and_then(|entry| entry.get_password().ok())
+    }
+    #[cfg(not(feature = "keystore"))]
+    {
+        let _ = account;
+        None
+    }
+}
+
+/// Removes a device secret from the OS keystore (best effort).
+fn keystore_forget(account: &str) {
+    #[cfg(feature = "keystore")]
+    if let Ok(entry) = keyring::Entry::new(KEYSTORE_SERVICE, account) {
+        let _ = entry.delete_credential();
+    }
+    #[cfg(not(feature = "keystore"))]
+    let _ = account;
+}
+
+/// Forgets this device locally: removes the OS-keystore entry (when the key
+/// lives there) and the `.kolimi/device.json` file. Returns whether a device
+/// record existed.
+pub fn forget_device(local: &Path) -> Result<bool, SyncError> {
+    let Some(file) = load_device_file(local)? else {
+        return Ok(false);
+    };
+    keystore_forget(&file.device_public_key);
+    match std::fs::remove_file(device_file_path(local)) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Resolves the device private key: from the OS keystore when the file omits
+/// it, otherwise from the file. A legacy plaintext file is migrated to the
+/// keystore on first use (and then rewritten without the secret).
+fn resolve_device_secret(local: &Path, file: &DeviceFile) -> Result<Vec<u8>, SyncError> {
+    if !file.device_secret.is_empty() {
+        if keystore_store(&file.device_public_key, &file.device_secret) {
+            let mut migrated = file.clone();
+            migrated.device_secret.clear();
+            if let Err(error) = write_device_file(local, &migrated) {
+                eprintln!("kolimi-sync: could not rewrite device file after migration: {error}");
+            }
+        }
+        return Ok(hex_decode(&file.device_secret)?);
+    }
+    match keystore_get(&file.device_public_key) {
+        Some(secret) => Ok(hex_decode(&secret)?),
+        None => Err(SyncError::E2ee(
+            "this device's key is missing from the OS keystore; re-enroll with --e2ee-enroll"
+                .to_string(),
+        )),
+    }
 }
 
 /// Enrolls this device (RFC 0008): creates an enrollment, waits for an
@@ -820,13 +908,18 @@ pub async fn enroll_device(config: &SyncConfig, device_name: &str) -> Result<i64
         kolimi_crypto::unwrap_secret(&device.private_bytes(), &wrapped)?,
     );
 
+    let public_key = STANDARD.encode(device.public_key());
+    let secret = hex_encode(&device.private_bytes());
+    // Prefer the OS keystore; keep the secret in the `0600` file only when no
+    // keystore is available (headless server, or a build without the feature).
+    let in_keystore = keystore_store(&public_key, &secret);
     write_device_file(
         &config.local_dir,
         &DeviceFile {
             name: device_name.to_string(),
-            device_secret: hex_encode(&device.private_bytes()),
+            device_secret: if in_keystore { String::new() } else { secret },
             wrapped_master_key: STANDARD.encode(&wrapped),
-            device_public_key: STANDARD.encode(device.public_key()),
+            device_public_key: public_key,
         },
     )?;
     Ok(id)
@@ -947,6 +1040,39 @@ impl Http {
             .send()
             .await?;
         Ok(response.status().as_u16())
+    }
+
+    /// Asks the server which of `hashes` it does not already hold, so a push
+    /// uploads only new chunks. Returns `None` when the server predates the
+    /// endpoint, in which case the caller uploads everything.
+    async fn chunks_missing(&self, hashes: &[Hash]) -> Result<Option<HashSet<Hash>>, SyncError> {
+        if hashes.is_empty() {
+            return Ok(Some(HashSet::new()));
+        }
+        let body = serde_json::json!({
+            "hashes": hashes.iter().map(|hash| hash.to_hex()).collect::<Vec<_>>(),
+        });
+        let (status, value) = self.post_json("/api/chunks/exist", &body).await?;
+        if status == 404 || status == 405 {
+            return Ok(None);
+        }
+        if status != 200 {
+            return Err(SyncError::Server {
+                status,
+                path: "/api/chunks/exist".to_string(),
+            });
+        }
+        let missing = value["missing"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .filter_map(|hex| hex.parse::<Hash>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Some(missing))
     }
 
     async fn post_json(&self, path: &str, value: &Value) -> Result<(u16, Value), SyncError> {
@@ -1480,44 +1606,74 @@ async fn push(
         }
         let data = std::fs::read(&local_path)?;
         let mut pending_key: Option<Vec<u8>> = None;
+        let mut file_key: Option<FileKey> = None;
         let manifest = if let Some(e2ee) = e2ee.filter(|e2ee| e2ee.options.covers(&rel)) {
             // Encrypt-then-chunk (RFC 0007): chunk boundaries follow the
             // plaintext so edits stay delta-friendly; the manifest hashes
             // ciphertext chunks.
-            let (file_key, pending) = fetch_or_create_file_key(http, state, e2ee, &rel).await?;
+            let (key, pending) = fetch_or_create_file_key(http, state, e2ee, &rel).await?;
             pending_key = pending;
             let mut chunks = Vec::new();
             let mut total = 0u64;
             for chunk in chunker::split(&data) {
-                let ciphertext = file_key.encrypt_chunk(chunk.data)?;
-                let hash = kolimi_chunk::Hash::of(&ciphertext);
-                let path = format!("/api/chunks/{}", hash.to_hex());
-                let status = http.put_bytes(&path, &ciphertext).await?;
-                if status != 201 && status != 204 {
-                    return Err(SyncError::Server { status, path });
-                }
+                let ciphertext = key.encrypt_chunk(chunk.data)?;
                 total += ciphertext.len() as u64;
                 chunks.push(ChunkRef {
-                    hash,
+                    hash: Hash::of(&ciphertext),
                     len: ciphertext.len() as u32,
                 });
             }
+            file_key = Some(key);
             Manifest {
                 version: Manifest::VERSION,
                 size: total,
                 chunks,
             }
         } else {
-            let manifest = Manifest::for_data(&data);
+            Manifest::for_data(&data)
+        };
+
+        // Ask the server which chunks it is missing before uploading, so an
+        // edit only sends the chunks that actually changed. When the server
+        // predates the endpoint (`missing` is `None`), upload every chunk.
+        let missing = http
+            .chunks_missing(
+                &manifest
+                    .chunks
+                    .iter()
+                    .map(|chunk| chunk.hash)
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        let needs_upload = |hash: &Hash| match &missing {
+            Some(set) => set.contains(hash),
+            None => true,
+        };
+
+        if let Some(key) = &file_key {
             for chunk in chunker::split(&data) {
+                let ciphertext = key.encrypt_chunk(chunk.data)?;
+                if !needs_upload(&Hash::of(&ciphertext)) {
+                    continue;
+                }
+                let path = format!("/api/chunks/{}", Hash::of(&ciphertext).to_hex());
+                let status = http.put_bytes(&path, &ciphertext).await?;
+                if status != 201 && status != 204 {
+                    return Err(SyncError::Server { status, path });
+                }
+            }
+        } else {
+            for chunk in chunker::split(&data) {
+                if !needs_upload(&chunk.hash) {
+                    continue;
+                }
                 let path = format!("/api/chunks/{}", chunk.hash.to_hex());
                 let status = http.put_bytes(&path, chunk.data).await?;
                 if status != 201 && status != 204 {
                     return Err(SyncError::Server { status, path });
                 }
             }
-            manifest
-        };
+        }
         let content_id = manifest.content_id().to_hex();
         let remote_path = format!("{root}/{rel}");
         let mut path = format!("/api/files?path={}", encode(&remote_path));

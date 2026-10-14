@@ -11,6 +11,7 @@
 //! shares on the node itself, and the strongest matching share wins.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use kolimi_chunk::{Hash, Manifest};
 use kolimi_db::ReceivedShare;
@@ -135,6 +136,15 @@ impl Vfs {
     /// by share id. Multiple shares on the same node merge (strongest
     /// permission wins); identical names get ` (2)`, ` (3)`, … suffixes.
     pub async fn received_mounts(&self, caller_id: i64) -> Result<Vec<Mount>, VfsError> {
+        // Serve a cached result only while the database reports no
+        // mount-affecting change since it was built.
+        let epoch = self.db.shares_epoch();
+        if let Ok(cache) = self.mounts_cache.lock()
+            && cache.epoch == epoch
+            && let Some(mounts) = cache.by_caller.get(&caller_id)
+        {
+            return Ok((**mounts).clone());
+        }
         let rows = self.db.received_shares(caller_id).await?;
         let mut mounts: Vec<Mount> = Vec::new();
         let mut by_node: HashMap<(i64, i64), usize> = HashMap::new();
@@ -161,6 +171,13 @@ impl Vfs {
                 name = format!("{base} ({suffix})");
             }
             mount.name = name;
+        }
+        if let Ok(mut cache) = self.mounts_cache.lock() {
+            if cache.epoch != epoch {
+                cache.by_caller.clear();
+                cache.epoch = epoch;
+            }
+            cache.by_caller.insert(caller_id, Arc::new(mounts.clone()));
         }
         Ok(mounts)
     }
@@ -762,6 +779,31 @@ mod tests {
             vfs.read_access(bob, "/Shared with me/f.txt").await,
             Err(VfsError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn mount_cache_tracks_node_changes() {
+        let (_dir, vfs, alice, bob) = setup().await;
+        vfs.mkdir(alice, "/docs").await.unwrap();
+        let docs = vfs.resolve(alice, "/docs").await.unwrap();
+        share(&vfs, alice, docs.id, "user", Some(bob), None, "read").await;
+
+        // Prime the mounts cache, then change the node it depends on.
+        assert_eq!(vfs.received_mounts(bob).await.unwrap().len(), 1);
+        vfs.db
+            .trash_node(alice, docs.id, "/docs", 1_000)
+            .await
+            .unwrap();
+        assert!(
+            vfs.received_mounts(bob).await.unwrap().is_empty(),
+            "a trashed shared node must drop its mount"
+        );
+        vfs.db.restore_node(alice, docs.id).await.unwrap();
+        assert_eq!(
+            vfs.received_mounts(bob).await.unwrap().len(),
+            1,
+            "a restored node must return its mount"
+        );
     }
 
     #[tokio::test]

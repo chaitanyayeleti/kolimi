@@ -72,6 +72,11 @@ struct Cli {
     #[arg(long = "e2ee-approve", value_name = "ENROLLMENT_ID")]
     e2ee_approve: Option<i64>,
 
+    /// Forget this device's local key material (the OS-keystore entry and
+    /// `.kolimi/device.json`), so it must be enrolled again.
+    #[arg(long = "e2ee-forget-device")]
+    e2ee_forget_device: bool,
+
     /// Share a path (relative to --local) with a user, wrapping E2EE keys.
     #[arg(long)]
     share: Option<String>,
@@ -129,7 +134,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some(name) = cli.e2ee_enroll.clone() {
         let id = kolimi_sync::enroll_device(&config, &name).await?;
         println!(
-            "enrolled this device as “{name}” (enrollment {id}); key saved to .kolimi/device.json"
+            "enrolled this device as “{name}” (enrollment {id}); device key saved to the OS keystore (or .kolimi/device.json)"
         );
         return Ok(());
     }
@@ -137,6 +142,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some(id) = cli.e2ee_approve {
         let name = kolimi_sync::approve_device(&config, id).await?;
         println!("approved device “{name}” (enrollment {id})");
+        return Ok(());
+    }
+
+    if cli.e2ee_forget_device {
+        if kolimi_sync::forget_device(&config.local_dir)? {
+            println!("forgot this device's local key material");
+        } else {
+            println!("this device had no local key material");
+        }
         return Ok(());
     }
 

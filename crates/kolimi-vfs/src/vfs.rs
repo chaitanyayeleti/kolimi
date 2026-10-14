@@ -1,11 +1,16 @@
-use std::{collections::HashSet, fmt::Display, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use futures_util::Stream;
 use kolimi_chunk::Hash;
 use kolimi_db::{Db, Node as DbNode};
 use kolimi_store::{BlobStore, SweepStats};
 
-use crate::{Access, Perm, error::VfsError, path};
+use crate::{Access, Mount, Perm, error::VfsError, path};
 
 /// Whether a node is a directory or a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,11 +84,21 @@ impl Node {
     }
 }
 
+/// Cached received-share mounts, keyed by caller. The whole map is discarded
+/// whenever the database's [`Db::shares_epoch`] advances, so a share, group,
+/// or shared-node change is visible on the next call without a wall-clock TTL.
+#[derive(Debug, Default)]
+pub(crate) struct MountsCache {
+    pub(crate) epoch: u64,
+    pub(crate) by_caller: HashMap<i64, Arc<Vec<Mount>>>,
+}
+
 /// The virtual filesystem: a per-user tree over the database and blob store.
 #[derive(Debug)]
 pub struct Vfs {
     pub(crate) db: Db,
     pub(crate) store: BlobStore,
+    pub(crate) mounts_cache: Arc<Mutex<MountsCache>>,
 }
 
 impl Clone for Vfs {
@@ -91,6 +106,7 @@ impl Clone for Vfs {
         Self {
             db: self.db.clone(),
             store: self.store.clone(),
+            mounts_cache: self.mounts_cache.clone(),
         }
     }
 }
@@ -98,7 +114,11 @@ impl Clone for Vfs {
 impl Vfs {
     /// Creates a filesystem over the given database and blob store.
     pub fn new(db: Db, store: BlobStore) -> Self {
-        Self { db, store }
+        Self {
+            db,
+            store,
+            mounts_cache: Arc::new(Mutex::new(MountsCache::default())),
+        }
     }
 
     /// The underlying database handle.
@@ -474,6 +494,12 @@ impl Vfs {
     /// Reads a chunk by hash (for delta download).
     pub async fn read_chunk(&self, user_id: i64, hash: &Hash) -> Result<Vec<u8>, VfsError> {
         Ok(self.store.get_chunk(user_id, hash).await?)
+    }
+
+    /// Whether a chunk is already stored for a user. Used by clients to skip
+    /// re-uploading chunks the server already has (delta push).
+    pub async fn has_chunk(&self, user_id: i64, hash: &Hash) -> Result<bool, VfsError> {
+        Ok(self.store.has_chunk(user_id, hash).await?)
     }
 
     /// Stores a chunk uploaded via the sync API.

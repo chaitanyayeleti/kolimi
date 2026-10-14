@@ -217,6 +217,45 @@ async fn chunk_upload_rejects_hash_mismatch() {
 }
 
 #[tokio::test]
+async fn chunk_existence_reports_only_missing() {
+    let server = setup().await;
+    let present = b"present chunk".to_vec();
+    let present_hash = Hash::of(&present);
+    let (status, _, _) = send(
+        &server.app,
+        request(
+            "PUT",
+            &format!("/api/chunks/{}", present_hash.to_hex()),
+            Some(&present),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let absent_hash = Hash::of(b"absent chunk");
+    let body = serde_json::to_vec(&serde_json::json!({
+        "hashes": [present_hash.to_hex(), absent_hash.to_hex()],
+    }))
+    .unwrap();
+    let (status, _, body) = send(
+        &server.app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/chunks/exist")
+            .header(header::AUTHORIZATION, auth())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json(&body)["missing"],
+        serde_json::json!([absent_hash.to_hex()])
+    );
+}
+
+#[tokio::test]
 async fn change_feed_reports_lifecycle() {
     let server = setup().await;
     send(&server.app, request("PUT", "/dav/a.txt", Some(b"one"))).await;

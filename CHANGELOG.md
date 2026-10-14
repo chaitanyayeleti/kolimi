@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Delta push**: `POST /api/chunks/exist` reports which chunk hashes the
+  server already holds, and `kolimi-sync` now consults it before uploading —
+  a one-chunk edit no longer re-uploads the whole file (#17).
+- **CLI device key in the OS keystore**: `kolimi-sync`'s `keystore` feature
+  stores the device key via `keyring` (Secret Service / Keychain / Credential
+  Manager), keeping only non-secret fields in `.kolimi/device.json`. The
+  `0600` file remains the fallback (headless, static/musl) and legacy files
+  migrate on first use (#16).
+
+### Changed
+- **Received-share mounts are cached** and invalidated by a database
+  `shares_epoch`, so `/Shared with me` resolution no longer re-reads every
+  share on each call (#25).
+- **Plugins link a sockets-free WASI surface**: the linker now omits
+  `wasi:sockets/*` entirely, so a component that imports it cannot
+  instantiate — not merely rejected at load (#25).
+
 ## [0.1.17] - 2026-10-14
 
 ### Fixed

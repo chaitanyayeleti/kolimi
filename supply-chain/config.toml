@@ -16,6 +16,10 @@ criteria = "safe-to-deploy"
 version = "0.5.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.aes]]
+version = "0.9.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.aho-corasick]]
 version = "1.1.5"
 criteria = "safe-to-deploy"
@@ -58,6 +62,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.anyhow]]
 version = "1.0.104"
+criteria = "safe-to-deploy"
+
+[[exemptions.apple-native-keyring-store]]
+version = "1.0.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.arbitrary]]
@@ -104,8 +112,24 @@ criteria = "safe-to-deploy"
 version = "0.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.async-broadcast]]
+version = "0.7.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.async-channel]]
+version = "2.5.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.async-compat]]
 version = "0.2.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.async-executor]]
+version = "1.14.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.async-io]]
+version = "2.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.async-lock]]
@@ -116,6 +140,18 @@ criteria = "safe-to-deploy"
 version = "0.5.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.async-process]]
+version = "2.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.async-recursion]]
+version = "1.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.async-signal]]
+version = "0.2.14"
+criteria = "safe-to-deploy"
+
 [[exemptions.async-stream]]
 version = "0.3.6"
 criteria = "safe-to-run"
@@ -123,6 +159,10 @@ criteria = "safe-to-run"
 [[exemptions.async-stream-impl]]
 version = "0.3.6"
 criteria = "safe-to-run"
+
+[[exemptions.async-task]]
+version = "4.7.1"
+criteria = "safe-to-deploy"
 
 [[exemptions.async-trait]]
 version = "0.1.92"
@@ -224,6 +264,14 @@ criteria = "safe-to-deploy"
 version = "0.12.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.block-padding]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.blocking]]
+version = "1.7.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.bon]]
 version = "3.10.2"
 criteria = "safe-to-deploy"
@@ -272,6 +320,10 @@ criteria = "safe-to-deploy"
 version = "0.3.0"
 criteria = "safe-to-run"
 
+[[exemptions.cbc]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.cc]]
 version = "1.7.0"
 criteria = "safe-to-deploy"
@@ -310,6 +362,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cipher]]
 version = "0.4.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.cipher]]
+version = "0.5.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap]]
@@ -358,6 +414,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.combine]]
 version = "4.6.8"
+criteria = "safe-to-deploy"
+
+[[exemptions.concurrent-queue]]
+version = "2.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.config]]
@@ -418,6 +478,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cpp_demangle]]
 version = "0.5.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.cpubits]]
+version = "0.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.cpufeatures]]
@@ -628,6 +692,10 @@ criteria = "safe-to-deploy"
 version = "0.8.42"
 criteria = "safe-to-deploy"
 
+[[exemptions.endi]]
+version = "1.1.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.enumflags2]]
 version = "0.7.12"
 criteria = "safe-to-deploy"
@@ -760,6 +828,10 @@ criteria = "safe-to-deploy"
 version = "0.3.34"
 criteria = "safe-to-deploy"
 
+[[exemptions.futures-lite]]
+version = "2.6.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.futures-macro]]
 version = "0.3.34"
 criteria = "safe-to-deploy"
@@ -854,6 +926,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.heck]]
 version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.hermit-abi]]
+version = "0.5.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.hex]]
@@ -996,6 +1072,10 @@ criteria = "safe-to-deploy"
 version = "0.1.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.inout]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.interpolator]]
 version = "0.5.0"
 criteria = "safe-to-deploy"
@@ -1066,6 +1146,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
 version = "0.3.106"
+criteria = "safe-to-deploy"
+
+[[exemptions.keyring]]
+version = "4.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.keyring-core]]
+version = "1.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.konst]]
@@ -1208,6 +1296,10 @@ criteria = "safe-to-deploy"
 version = "0.9.11"
 criteria = "safe-to-deploy"
 
+[[exemptions.memoffset]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.mime]]
 version = "0.3.17"
 criteria = "safe-to-deploy"
@@ -1268,8 +1360,16 @@ criteria = "safe-to-deploy"
 version = "0.50.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.num]]
+version = "0.4.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.num-bigint]]
 version = "0.4.8"
+criteria = "safe-to-deploy"
+
+[[exemptions.num-complex]]
+version = "0.4.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.num-conv]]
@@ -1282,6 +1382,14 @@ criteria = "safe-to-run"
 
 [[exemptions.num-integer]]
 version = "0.1.47"
+criteria = "safe-to-deploy"
+
+[[exemptions.num-iter]]
+version = "0.1.46"
+criteria = "safe-to-deploy"
+
+[[exemptions.num-rational]]
+version = "0.4.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.num-traits]]
@@ -1364,6 +1472,10 @@ criteria = "safe-to-deploy"
 version = "5.4.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.ordered-stream]]
+version = "0.2.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.ownedbytes]]
 version = "0.9.0"
 criteria = "safe-to-deploy"
@@ -1420,6 +1532,10 @@ criteria = "safe-to-deploy"
 version = "0.2.17"
 criteria = "safe-to-deploy"
 
+[[exemptions.piper]]
+version = "0.2.5"
+criteria = "safe-to-deploy"
+
 [[exemptions.pkg-config]]
 version = "0.3.34"
 criteria = "safe-to-deploy"
@@ -1430,6 +1546,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.png]]
 version = "0.18.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.polling]]
+version = "3.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.poly1305]]
@@ -1458,6 +1578,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.prettyplease]]
 version = "0.3.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.proc-macro-crate]]
+version = "3.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.proc-macro-utils]]
@@ -1736,6 +1860,10 @@ criteria = "safe-to-deploy"
 version = "0.5.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.secret-service]]
+version = "5.2.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.security-framework]]
 version = "3.7.0"
 criteria = "safe-to-deploy"
@@ -1782,6 +1910,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serde_qs]]
 version = "0.15.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_repr]]
+version = "0.1.21"
 criteria = "safe-to-deploy"
 
 [[exemptions.serde_spanned]]
@@ -2068,6 +2200,10 @@ criteria = "safe-to-deploy"
 version = "1.1.2+spec-1.1.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.toml_edit]]
+version = "0.25.17+spec-1.1.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.toml_parser]]
 version = "1.1.5+spec-1.1.0"
 criteria = "safe-to-deploy"
@@ -2158,6 +2294,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.typetag-impl]]
 version = "0.2.23"
+criteria = "safe-to-deploy"
+
+[[exemptions.uds_windows]]
+version = "1.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.unicase]]
@@ -2512,6 +2652,10 @@ criteria = "safe-to-deploy"
 version = "0.2.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.windows-native-keyring-store]]
+version = "1.1.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.windows-result]]
 version = "0.4.1"
 criteria = "safe-to-deploy"
@@ -2652,6 +2796,26 @@ criteria = "safe-to-deploy"
 version = "0.8.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.zbus]]
+version = "5.19.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.zbus-secret-service-keyring-store]]
+version = "1.0.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.zbus_macros]]
+version = "5.19.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.zbus_names]]
+version = "4.3.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.zcheapstr]]
+version = "1.1.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.zerocopy]]
 version = "0.8.62"
 criteria = "safe-to-deploy"
@@ -2714,4 +2878,16 @@ criteria = "safe-to-deploy"
 
 [[exemptions.zune-jpeg]]
 version = "0.5.15"
+criteria = "safe-to-deploy"
+
+[[exemptions.zvariant]]
+version = "5.15.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.zvariant_derive]]
+version = "5.15.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.zvariant_utils]]
+version = "4.2.0"
 criteria = "safe-to-deploy"

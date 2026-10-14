@@ -21,7 +21,9 @@ build() {
     # but Arch's hardened CFLAGS force -O2 afterwards, tripping a compile-time
     # #error. Disable the jitterentropy fallback so the OS RNG is used instead.
     export AWS_LC_SYS_NO_JITTER_ENTROPY=1
-    cargo build --release --locked -p kolimi-server -p kolimi-sync
+    # glibc build: enable the CLI OS-keystore backend (falls back to the
+    # `0600` device file when no Secret Service is running).
+    cargo build --release --locked -p kolimi-server -p kolimi-sync --features kolimi-sync/keystore
 }
 
 check() {

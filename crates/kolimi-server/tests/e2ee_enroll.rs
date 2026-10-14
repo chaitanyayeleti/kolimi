@@ -133,4 +133,8 @@ async fn device_enrollment_transfers_the_master_key() {
     );
     let report = kolimi_sync::sync_once(&unlocked).await.unwrap();
     assert_eq!(report.pushed, 0);
+
+    // Clean up the local enrollment and its OS-keystore entry, if the
+    // `keystore` feature stored the key there.
+    assert!(kolimi_sync::forget_device(device_b.path()).unwrap());
 }

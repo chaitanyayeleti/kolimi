@@ -1,6 +1,11 @@
 //! SQLite persistence for Kolimi: users, sessions, and the file tree.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::Path,
+    sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use serde::Serialize;
 use sqlx::{
@@ -247,6 +252,10 @@ pub enum DeadPropOp {
 pub struct Db {
     pool: SqlitePool,
     audit_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Bumped on any change that can add, remove, or rename a received
+    /// share mount, so dependant caches (e.g. `Vfs::received_mounts`) can
+    /// invalidate without a wall-clock TTL.
+    shares_epoch: Arc<AtomicU64>,
 }
 
 fn map_sqlx(e: sqlx::Error, what: &str) -> DbError {
@@ -290,7 +299,21 @@ impl Db {
         Ok(Self {
             pool,
             audit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            shares_epoch: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// Monotonic counter for mount-affecting changes; see the `shares_epoch`
+    /// field. Caches derived from `received_shares` compare it to detect
+    /// staleness.
+    pub fn shares_epoch(&self) -> u64 {
+        self.shares_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Invalidates [`Db::shares_epoch`] watchers after a share, group, or
+    /// shared-node change.
+    pub fn bump_shares_epoch(&self) {
+        self.shares_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Raw pool access for tests and low-level helpers.
@@ -705,6 +728,8 @@ impl Db {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        // Shares the user owned are gone, as are their group memberships.
+        self.bump_shares_epoch();
         Ok(())
     }
 
@@ -1176,6 +1201,8 @@ impl Db {
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("node {node_id}")));
         }
+        // Trashed nodes are hidden from `received_shares`, so mounts change.
+        self.bump_shares_epoch();
         Ok(())
     }
 
@@ -1204,6 +1231,8 @@ impl Db {
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("trashed node {node_id}")));
         }
+        // A restored node can reappear as a received mount.
+        self.bump_shares_epoch();
         Ok(())
     }
 
@@ -1444,6 +1473,8 @@ impl Db {
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("node {node_id}")));
         }
+        // A rename/reparent can change a shared mount's name or location.
+        self.bump_shares_epoch();
         Ok(())
     }
 
@@ -1454,6 +1485,8 @@ impl Db {
             .bind(node_id)
             .execute(&self.pool)
             .await?;
+        // Shares on the node (and its subtree) cascade away with it.
+        self.bump_shares_epoch();
         Ok(())
     }
 

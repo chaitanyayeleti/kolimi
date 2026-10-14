@@ -248,6 +248,7 @@ pub fn build_app(state: AppState) -> Router {
             get(plugins::handle_path).post(plugins::handle_path),
         )
         .route("/api/files", axum::routing::put(api_sync::commit_file))
+        .route("/api/chunks/exist", post(api_sync::chunks_exist))
         .route(
             "/api/chunks/{hash}",
             get(api_sync::get_chunk).put(api_sync::put_chunk),

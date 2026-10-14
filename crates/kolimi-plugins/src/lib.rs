@@ -161,6 +161,43 @@ impl kolimi::plugin::host::Host for StoreData {
     }
 }
 
+/// Links the WASI interfaces a plugin needs, **excluding the sockets
+/// surface** entirely (defense in depth). `wasmtime_wasi`'s built-in
+/// `add_to_linker_sync` links every interface including `wasi:sockets/*`;
+/// the `wasi:cli/command` world a plugin is built against needs none of it,
+/// so a component that imports sockets fails to instantiate rather than
+/// merely being rejected at load.
+fn add_wasi_without_sockets<T: WasiView>(linker: &mut Linker<T>) -> wasmtime::Result<()> {
+    use wasmtime_wasi::cli::{WasiCli, WasiCliView as _};
+    use wasmtime_wasi::filesystem::{WasiFilesystem, WasiFilesystemView as _};
+    use wasmtime_wasi::p2::bindings::sync::filesystem as sync_filesystem;
+    use wasmtime_wasi::p2::bindings::{cli, filesystem, random};
+    use wasmtime_wasi::random::{WasiRandom, WasiRandomView as _};
+
+    // The `wasi:http/proxy` set — io (error/poll/streams), clocks, random,
+    // and cli stdio — is exactly what the guest's std needs minus networking.
+    wasmtime_wasi::p2::add_to_linker_proxy_interfaces_sync(linker)?;
+
+    // Filesystem (types + preopens). The context has no preopened
+    // directories, so the guest can only touch handles it is handed.
+    sync_filesystem::types::add_to_linker::<T, WasiFilesystem>(linker, T::filesystem)?;
+    filesystem::preopens::add_to_linker::<T, WasiFilesystem>(linker, T::filesystem)?;
+
+    // cli interfaces the proxy set omits.
+    cli::exit::add_to_linker::<T, WasiCli>(linker, T::cli)?;
+    cli::environment::add_to_linker::<T, WasiCli>(linker, T::cli)?;
+    cli::terminal_input::add_to_linker::<T, WasiCli>(linker, T::cli)?;
+    cli::terminal_output::add_to_linker::<T, WasiCli>(linker, T::cli)?;
+    cli::terminal_stdin::add_to_linker::<T, WasiCli>(linker, T::cli)?;
+    cli::terminal_stdout::add_to_linker::<T, WasiCli>(linker, T::cli)?;
+    cli::terminal_stderr::add_to_linker::<T, WasiCli>(linker, T::cli)?;
+
+    // Random: the proxy set adds `random` but not the insecure variants.
+    random::insecure::add_to_linker::<T, WasiRandom>(linker, T::random)?;
+    random::insecure_seed::add_to_linker::<T, WasiRandom>(linker, T::random)?;
+    Ok(())
+}
+
 /// The plugin host: one engine, all loaded components.
 pub struct PluginHost {
     engine: Engine,
@@ -260,7 +297,7 @@ impl PluginHost {
             data
         })
         .map_err(|error| PluginError::Internal(error.to_string()))?;
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+        add_wasi_without_sockets(&mut linker)
             .map_err(|error| PluginError::Internal(error.to_string()))?;
         Ok(Self {
             engine,

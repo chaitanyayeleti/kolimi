@@ -18,9 +18,17 @@ path = "src/lib.rs"
 name = "kolimi-sync"
 path = "src/main.rs"
 
+[features]
+# Store the CLI device key in the OS keystore (Secret Service / Keychain /
+# Credential Manager) instead of the plaintext `.kolimi/device.json`. Off by
+# default so the static/musl release builds are unaffected; when the feature
+# is on but no keystore is reachable, the key falls back to the file.
+keystore = ["dep:keyring"]
+
 [dependencies]
 base64.workspace = true
 clap.workspace = true
+keyring = { version = "4", optional = true }
 rpassword.workspace = true
 kolimi-chunk.workspace = true
 kolimi-crypto.workspace = true

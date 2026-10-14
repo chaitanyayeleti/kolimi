@@ -153,12 +153,15 @@ impl Db {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        if result.rows_affected() > 0 {
+            self.bump_shares_epoch();
+        }
         Ok(result.rows_affected() > 0)
     }
 
     /// Adds a member to a group. Idempotent.
     pub async fn add_group_member(&self, group_id: i64, user_id: i64) -> Result<(), DbError> {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT OR IGNORE INTO group_members (group_id, user_id, created_at) VALUES (?, ?, ?)",
         )
         .bind(group_id)
@@ -166,6 +169,9 @@ impl Db {
         .bind(now_millis())
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() > 0 {
+            self.bump_shares_epoch();
+        }
         Ok(())
     }
 
@@ -195,6 +201,9 @@ impl Db {
             .await?;
         }
         tx.commit().await?;
+        if result.rows_affected() > 0 {
+            self.bump_shares_epoch();
+        }
         Ok(result.rows_affected() > 0)
     }
 
@@ -238,7 +247,7 @@ impl Db {
         password_hash: Option<&str>,
         expires_at: Option<i64>,
     ) -> Result<ShareRow, DbError> {
-        sqlx::query_as::<_, ShareRow>(
+        let share = sqlx::query_as::<_, ShareRow>(
             "INSERT INTO shares (owner_id, node_id, kind, recipient_user_id, recipient_group_id,
                                  permission, token, password_hash, expires_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
@@ -255,7 +264,9 @@ impl Db {
         .bind(now_millis())
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| map_sqlx(e, "this item is already shared with that recipient"))
+        .map_err(|e| map_sqlx(e, "this item is already shared with that recipient"))?;
+        self.bump_shares_epoch();
+        Ok(share)
     }
 
     /// Fetches a share by id.
@@ -362,6 +373,9 @@ impl Db {
             .bind(share_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() > 0 {
+            self.bump_shares_epoch();
+        }
         Ok(result.rows_affected() > 0)
     }
 
@@ -390,6 +404,9 @@ impl Db {
             .bind(share_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() > 0 {
+            self.bump_shares_epoch();
+        }
         Ok(result.rows_affected() > 0)
     }
 
@@ -399,6 +416,9 @@ impl Db {
             .bind(share_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() > 0 {
+            self.bump_shares_epoch();
+        }
         Ok(result.rows_affected() > 0)
     }
 

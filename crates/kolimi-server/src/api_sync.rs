@@ -403,6 +403,43 @@ pub async fn put_chunk(
     }
 }
 
+/// Body of `POST /api/chunks/exist`.
+#[derive(Deserialize)]
+pub struct ChunkExistRequest {
+    hashes: Vec<String>,
+}
+
+/// Upper bound on one existence query, to bound work per request.
+const MAX_CHUNK_QUERY: usize = 100_000;
+
+/// `POST /api/chunks/exist` — given chunk hashes, returns the subset the
+/// caller does **not** already have, so a client uploads only new chunks
+/// (delta push) instead of re-sending every chunk each sync pass.
+pub async fn chunks_exist(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(request): Json<ChunkExistRequest>,
+) -> Response {
+    if request.hashes.len() > MAX_CHUNK_QUERY {
+        return bad_request("too many chunk hashes");
+    }
+    let mut missing: Vec<String> = Vec::new();
+    for raw in request.hashes {
+        // An unparseable hash cannot be present: hand it back so the upload
+        // surfaces the error, rather than silently claiming it exists.
+        let Ok(hash) = raw.parse::<Hash>() else {
+            missing.push(raw);
+            continue;
+        };
+        match state.vfs.has_chunk(user.user_id, &hash).await {
+            Ok(true) => {}
+            Ok(false) => missing.push(raw),
+            Err(e) => return vfs_error_response(e),
+        }
+    }
+    Json(json!({ "missing": missing })).into_response()
+}
+
 /// `path=` and optional `if_content_id=` for manifest commits.
 #[derive(Deserialize)]
 pub struct CommitQuery {

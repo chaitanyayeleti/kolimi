@@ -26,15 +26,20 @@ jobs:
             runs-on: ubuntu-latest
             deps: cmake libssl-dev
             deb: true
+            # glibc builds get the CLI OS-keystore backend; the static musl
+            # build does not (it uses the `0600` device-file fallback).
+            sync_features: --features kolimi-sync/keystore
           - target: x86_64-unknown-linux-musl
             runs-on: ubuntu-latest
             deps: cmake musl-tools
             cc: musl-gcc
             deb: false
+            sync_features: ""
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-24.04-arm
             deps: cmake libssl-dev
             deb: false
+            sync_features: --features kolimi-sync/keystore
     steps:
       - uses: actions/checkout@v5
         with:
@@ -56,7 +61,7 @@ jobs:
         env:
           # musl statically links OpenSSL (vendored); tell the C toolchain.
           CC_x86_64_unknown_linux_musl: ${{ matrix.cc }}
-        run: cargo build --release --locked --target ${{ matrix.target }} -p kolimi-server -p kolimi-sync
+        run: cargo build --release --locked --target ${{ matrix.target }} -p kolimi-server -p kolimi-sync ${{ matrix.sync_features }}
       - name: Package
         run: |
           NAME="kolimi-${{ matrix.target }}"

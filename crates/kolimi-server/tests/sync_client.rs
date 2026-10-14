@@ -4,7 +4,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use axum::extract::{Request, State};
+use axum::http::Method;
+use axum::middleware::Next;
+use axum::response::Response;
 use kolimi_auth::password::hash_password;
 use kolimi_server::{AppState, build_app};
 use kolimi_sync::{SyncConfig, sync_once};
@@ -16,6 +22,21 @@ struct Server {
     url: String,
     _dir: tempfile::TempDir,
     handle: tokio::task::JoinHandle<()>,
+    /// Number of `PUT /api/chunks/*` requests seen (delta-push assertions).
+    chunk_puts: Arc<AtomicUsize>,
+}
+
+/// Counts chunk uploads so a test can prove a delta push skips chunks the
+/// server already holds.
+async fn count_chunk_puts(
+    State(counter): State<Arc<AtomicUsize>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() == Method::PUT && request.uri().path().starts_with("/api/chunks/") {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+    next.run(request).await
 }
 
 async fn start_server() -> Server {
@@ -26,7 +47,11 @@ async fn start_server() -> Server {
         .create_user("alice", &hash_password(PASS).unwrap())
         .await
         .unwrap();
-    let app = build_app(state);
+    let chunk_puts = Arc::new(AtomicUsize::new(0));
+    let app = build_app(state).layer(axum::middleware::from_fn_with_state(
+        chunk_puts.clone(),
+        count_chunk_puts,
+    ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -36,6 +61,7 @@ async fn start_server() -> Server {
         url: format!("http://{addr}"),
         _dir: dir,
         handle,
+        chunk_puts,
     }
 }
 
@@ -189,6 +215,34 @@ async fn pulls_delta_chunks_from_the_cache() {
         }
     }
     assert!(cached > 2, "expected cached chunks, found {cached}");
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn push_uploads_only_new_chunks() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let local = root.path().join("seed");
+    std::fs::create_dir_all(&local).unwrap();
+
+    // A multi-chunk file: the first push uploads every chunk.
+    let mut data = pseudorandom(6 * 1024 * 1024, 11);
+    std::fs::write(local.join("big.bin"), &data).unwrap();
+    sync_once(&config(&server.url, &local)).await.unwrap();
+    let first = server.chunk_puts.load(Ordering::SeqCst);
+    assert!(first > 2, "expected several chunk uploads, got {first}");
+
+    // A one-byte change at the very front only rewrites the first chunk; the
+    // rest are already on the server and must not be re-uploaded.
+    data[0] ^= 0xff;
+    std::fs::write(local.join("big.bin"), &data).unwrap();
+    sync_once(&config(&server.url, &local)).await.unwrap();
+    let second = server.chunk_puts.load(Ordering::SeqCst) - first;
+    assert!(
+        second < first,
+        "delta push re-uploaded too many chunks ({second} of {first})"
+    );
 
     server.handle.abort();
 }
