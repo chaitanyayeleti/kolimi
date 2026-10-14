@@ -268,6 +268,10 @@ criteria = "safe-to-deploy"
 version = "0.23.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.cast]]
+version = "0.3.0"
+criteria = "safe-to-run"
+
 [[exemptions.cc]]
 version = "1.7.0"
 criteria = "safe-to-deploy"
@@ -1212,6 +1216,10 @@ criteria = "safe-to-deploy"
 version = "2.0.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.minicov]]
+version = "0.3.8"
+criteria = "safe-to-run"
+
 [[exemptions.minimal-lexical]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
@@ -1303,6 +1311,10 @@ criteria = "safe-to-deploy"
 [[exemptions.oneshot]]
 version = "0.1.13"
 criteria = "safe-to-deploy"
+
+[[exemptions.oorandom]]
+version = "11.1.5"
+criteria = "safe-to-run"
 
 [[exemptions.opaque-debug]]
 version = "0.3.1"
@@ -2287,6 +2299,18 @@ criteria = "safe-to-deploy"
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.129"
 criteria = "safe-to-deploy"
+
+[[exemptions.wasm-bindgen-test]]
+version = "0.3.79"
+criteria = "safe-to-run"
+
+[[exemptions.wasm-bindgen-test-macro]]
+version = "0.3.79"
+criteria = "safe-to-run"
+
+[[exemptions.wasm-bindgen-test-shared]]
+version = "0.2.129"
+criteria = "safe-to-run"
 
 [[exemptions.wasm-compose]]
 version = "0.258.3"

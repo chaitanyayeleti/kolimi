@@ -3308,6 +3308,7 @@ mod wasm_tests {
         let out = sanitize_svg("<svg><script>alert(1)</script><rect onload='x'/></svg>");
         assert!(!out.contains("<script"));
         assert!(!out.contains("</script>"));
-        assert!(!out.contains("onload="));
+        // onload= is rewritten to data-onload= so it is inert.
+        assert!(out.contains("data-onload="));
     }
 }
