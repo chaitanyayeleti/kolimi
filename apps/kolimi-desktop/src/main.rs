@@ -173,6 +173,7 @@ fn pair_sync_config(
         server: account.server.clone(),
         username: account.username.clone(),
         password: secrets.password.clone(),
+        token: None,
         local_dir: PathBuf::from(&pair.local_dir),
         e2ee: (!pair.encrypted_roots.is_empty()).then(|| kolimi_sync::E2eeOptions {
             passphrase: secrets.e2ee_passphrase.clone(),

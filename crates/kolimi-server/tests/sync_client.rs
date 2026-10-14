@@ -70,6 +70,7 @@ fn config(server: &str, local: &Path) -> SyncConfig {
         server: server.to_string(),
         username: "alice".to_string(),
         password: PASS.to_string(),
+        token: None,
         local_dir: local.to_path_buf(),
         e2ee: None,
     }
@@ -243,6 +244,45 @@ async fn push_uploads_only_new_chunks() {
         second < first,
         "delta push re-uploaded too many chunks ({second} of {first})"
     );
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn bearer_token_authenticates_sync() {
+    let server = start_server().await;
+
+    // Log in over HTTP to obtain a session token (the mobile flow: password +
+    // TOTP once, then sync with the token).
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/session", server.url))
+        .json(&serde_json::json!({ "username": "alice", "password": PASS }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "login failed");
+    let token = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|cookie| {
+            cookie
+                .strip_prefix("kolimi_session=")
+                .map(|rest| rest.split(';').next().unwrap_or_default().to_string())
+        })
+        .expect("session cookie");
+
+    let root = tempfile::tempdir().unwrap();
+    let local = root.path().join("seed");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("a.txt"), b"token sync").unwrap();
+
+    let mut cfg = config(&server.url, &local);
+    cfg.password = String::new();
+    cfg.token = Some(token);
+    let report = sync_once(&cfg).await.unwrap();
+    assert_eq!(report.pushed, 1);
 
     server.handle.abort();
 }

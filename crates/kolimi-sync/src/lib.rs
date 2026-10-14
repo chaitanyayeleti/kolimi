@@ -41,10 +41,14 @@ pub const SHARED_MOUNT: &str = "Shared with me";
 pub struct SyncConfig {
     /// Base URL, e.g. `https://cloud.example.com`.
     pub server: String,
-    /// Username for HTTP Basic authentication.
+    /// Username (HTTP Basic, and the account identity for shares).
     pub username: String,
-    /// Password for HTTP Basic authentication.
+    /// Password for HTTP Basic authentication (empty when `token` is set).
     pub password: String,
+    /// Bearer token (mobile session/API token). When set, requests use
+    /// `Authorization: Bearer <token>` instead of HTTP Basic — so the app can
+    /// authenticate without retaining the password (and honors TOTP).
+    pub token: Option<String>,
     /// Local directory to mirror.
     pub local_dir: PathBuf,
     /// End-to-end encryption settings (RFC 0007); `None` syncs plaintext.
@@ -53,11 +57,12 @@ pub struct SyncConfig {
 
 impl std::fmt::Debug for SyncConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never print the basic-auth password.
+        // Never print the basic-auth password or bearer token.
         f.debug_struct("SyncConfig")
             .field("server", &self.server)
             .field("username", &self.username)
             .field("password", &"[redacted]")
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
             .field("local_dir", &self.local_dir)
             .field("e2ee", &self.e2ee)
             .finish()
@@ -977,6 +982,7 @@ struct Http {
     base: String,
     username: String,
     password: String,
+    token: Option<String>,
 }
 
 impl Http {
@@ -993,6 +999,7 @@ impl Http {
             base: config.server.trim_end_matches('/').to_string(),
             username: config.username.clone(),
             password: config.password.clone(),
+            token: config.token.clone(),
         })
     }
 
@@ -1000,13 +1007,17 @@ impl Http {
         format!("{}{}", self.base, path)
     }
 
+    /// Applies the configured credentials: a bearer token when present,
+    /// otherwise HTTP Basic.
+    fn auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.token {
+            Some(token) => request.bearer_auth(token),
+            None => request.basic_auth(&self.username, Some(&self.password)),
+        }
+    }
+
     async fn get(&self, path: &str) -> Result<(u16, Vec<u8>), SyncError> {
-        let response = self
-            .client
-            .get(self.url(path))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await?;
+        let response = self.auth(self.client.get(self.url(path))).send().await?;
         let status = response.status().as_u16();
         Ok((status, response.bytes().await?.to_vec()))
     }
@@ -1022,20 +1033,13 @@ impl Http {
     }
 
     async fn delete(&self, path: &str) -> Result<u16, SyncError> {
-        let response = self
-            .client
-            .delete(self.url(path))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await?;
+        let response = self.auth(self.client.delete(self.url(path))).send().await?;
         Ok(response.status().as_u16())
     }
 
     async fn put_bytes(&self, path: &str, body: &[u8]) -> Result<u16, SyncError> {
         let response = self
-            .client
-            .put(self.url(path))
-            .basic_auth(&self.username, Some(&self.password))
+            .auth(self.client.put(self.url(path)))
             .body(body.to_vec())
             .send()
             .await?;
@@ -1077,9 +1081,7 @@ impl Http {
 
     async fn post_json(&self, path: &str, value: &Value) -> Result<(u16, Value), SyncError> {
         let response = self
-            .client
-            .post(self.url(path))
-            .basic_auth(&self.username, Some(&self.password))
+            .auth(self.client.post(self.url(path)))
             .json(value)
             .send()
             .await?;
@@ -1095,9 +1097,7 @@ impl Http {
 
     async fn put_json(&self, path: &str, value: &Value) -> Result<(u16, Value), SyncError> {
         let response = self
-            .client
-            .put(self.url(path))
-            .basic_auth(&self.username, Some(&self.password))
+            .auth(self.client.put(self.url(path)))
             .json(value)
             .send()
             .await?;
@@ -1755,9 +1755,7 @@ async fn mkcol(http: &Http, dir: &str) -> Result<(), SyncError> {
         path: format!("{path} ({error})"),
     })?;
     let response = http
-        .client
-        .request(method, http.url(&path))
-        .basic_auth(&http.username, Some(&http.password))
+        .auth(http.client.request(method, http.url(&path)))
         .send()
         .await?;
     let status = response.status().as_u16();

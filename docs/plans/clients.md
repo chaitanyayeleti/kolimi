@@ -52,8 +52,9 @@ tags. Phase 2 (mobile) is next.
 
 ## Phase 2 — Mobile (Android first → F-Droid), weeks 7+
 
-Same as the Android plan, now explicitly after desktop. Kotlin/Compose
-shell over the UniFFI core; `WorkManager` background sync.
+Design detail: **[android.md](android.md)**. Same as the Android plan, now
+explicitly after desktop. Kotlin/Compose shell over the UniFFI core;
+`WorkManager` background sync.
 
 | Week | Deliverable | Exit criteria |
 | --- | --- | --- |

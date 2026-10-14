@@ -21,8 +21,12 @@ pub struct FfiSyncConfig {
     /// Username (HTTP Basic).
     pub username: String,
     /// Password (HTTP Basic); platform code should fetch it from the
-    /// OS keychain rather than hardcoding it.
+    /// OS keychain rather than hardcoding it. Ignored when `token` is set.
     pub password: String,
+    /// Bearer session/API token. When set, requests authenticate with it
+    /// instead of `password` — the mobile flow logs in once (password + TOTP)
+    /// and syncs with the token, without retaining the password.
+    pub token: Option<String>,
     /// Absolute path of the local directory to mirror.
     pub local_dir: String,
     /// Relative paths whose files are encrypted end-to-end.
@@ -78,6 +82,13 @@ pub enum FfiError {
         /// Human-readable description.
         message: String,
     },
+    /// E2EE needs unlocking (passphrase, recovery code, or an enrolled
+    /// device) before this sync can run.
+    #[error("locked: {message}")]
+    Locked {
+        /// Human-readable description.
+        message: String,
+    },
 }
 
 /// A sync client for one root.
@@ -106,6 +117,7 @@ impl KolimiSync {
                 server: config.server,
                 username: config.username,
                 password: config.password,
+                token: config.token,
                 local_dir: config.local_dir.into(),
                 e2ee,
             },
@@ -119,9 +131,32 @@ impl KolimiSync {
         kolimi_sync::sync_once(&self.config)
             .await
             .map(FfiSyncReport::from)
-            .map_err(|error| FfiError::Sync {
+            .map_err(|error| match error {
+                // A locked keyring is a first-class state, not a failure
+                // (RFC 0011): the shell prompts for unlock instead of erroring.
+                kolimi_sync::SyncError::Locked(message) => FfiError::Locked { message },
+                other => FfiError::Sync {
+                    message: other.to_string(),
+                },
+            })
+    }
+
+    /// Enrolls this device (RFC 0008): creates an enrollment and waits for an
+    /// already-unlocked device to approve it. Returns the enrollment id.
+    pub async fn enroll_device(&self, device_name: String) -> Result<i64, FfiError> {
+        kolimi_sync::enroll_device(&self.config, &device_name)
+            .await
+            .map_err(|error| FfiError::E2ee {
                 message: error.to_string(),
             })
+    }
+
+    /// Forgets this device's local key material (the OS-keystore entry and
+    /// the device file). Returns whether anything was removed.
+    pub fn forget_device(&self) -> Result<bool, FfiError> {
+        kolimi_sync::forget_device(&self.config.local_dir).map_err(|error| FfiError::E2ee {
+            message: error.to_string(),
+        })
     }
 
     /// Creates and uploads an E2EE keyring; returns the recovery code

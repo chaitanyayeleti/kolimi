@@ -114,6 +114,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         server: cli.server,
         username: cli.user,
         password: cli.password,
+        token: None,
         local_dir: cli.local,
         e2ee: if cli.e2ee_roots.is_empty() && cli.e2ee_approve.is_none() {
             None

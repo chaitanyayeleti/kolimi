@@ -68,6 +68,7 @@ fn config(server: &str, username: &str, local: &Path) -> SyncConfig {
         server: server.to_string(),
         username: username.to_string(),
         password: PASS.to_string(),
+        token: None,
         local_dir: local.to_path_buf(),
         e2ee: Some(E2eeOptions {
             passphrase: Some(E2EE_PASS.to_string()),

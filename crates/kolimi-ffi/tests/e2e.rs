@@ -38,6 +38,7 @@ fn config(
         server: server.to_string(),
         username: "alice".to_string(),
         password: PASS.to_string(),
+        token: None,
         local_dir: local.to_string_lossy().to_string(),
         encrypted_roots: vec!["Private".to_string()],
         e2ee_passphrase: passphrase.map(str::to_string),
