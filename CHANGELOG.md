@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-10-14
+
+### Fixed
+- **Sessions survive the CSRF hardening (regression in 0.1.16).** After
+  upgrading a server, session cookies issued before the upgrade had no bound
+  CSRF hash, and the session-bound check rejected them — so every
+  cookie-authenticated mutation (upload, delete, trash purge) returned **403**,
+  which the UI surfaced as *"Delete failed"*. A session without a bound hash
+  now accepts its double-submit token and is bound to it on first use; a wrong
+  or missing token is still rejected.
+
 ## [0.1.16] - 2026-10-14
 
 Correctness/security hardening across the whole workspace, from an
