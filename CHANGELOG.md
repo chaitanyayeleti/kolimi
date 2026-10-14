@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-10-14
+
 ### Added
 - **Delta push**: `POST /api/chunks/exist` reports which chunk hashes the
   server already holds, and `kolimi-sync` now consults it before uploading —
