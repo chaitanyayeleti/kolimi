@@ -84,6 +84,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen@0.2.129
+      - name: Unit tests (wasm)
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test -p kolimi-ui --target wasm32-unknown-unknown
       - run: chmod +x scripts/build-ui.sh && scripts/build-ui.sh
       - run: cargo build --release -p kolimi-server
       - name: Smoke test embedded assets

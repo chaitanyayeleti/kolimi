@@ -64,13 +64,16 @@ enum UploadStatus {
 }
 
 /// One file in the upload tray.
-#[derive(Clone, PartialEq)]
+///
+/// Progress and status are their own signals so a row reads them in O(1)
+/// instead of scanning the whole tray on every update.
+#[derive(Clone)]
 struct UploadItem {
     id: u32,
     name: String,
     dir: String,
-    progress: u8,
-    status: UploadStatus,
+    progress: RwSignal<u8>,
+    status: RwSignal<UploadStatus>,
     file: web_sys::File,
 }
 
@@ -593,10 +596,17 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
 
     Effect::new(move |_| load("/".to_string()));
 
-    // Toasts fade themselves out.
+    // Toasts fade themselves out. A timer only clears the toast if it still
+    // shows the message it was scheduled for, so a stale timer cannot wipe a
+    // newer one.
     Effect::new(move |_| {
-        if !error.get().is_empty() {
-            let clear = Closure::once_into_js(move || error.set(String::new()));
+        let current = error.get();
+        if !current.is_empty() {
+            let clear = Closure::once_into_js(move || {
+                if error.get_untracked() == current {
+                    error.set(String::new());
+                }
+            });
             if let Some(window) = web_sys::window() {
                 let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
                     clear.unchecked_ref::<js_sys::Function>(),
@@ -606,8 +616,13 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         }
     });
     Effect::new(move |_| {
-        if !notice.get().is_empty() {
-            let clear = Closure::once_into_js(move || notice.set(String::new()));
+        let current = notice.get();
+        if !current.is_empty() {
+            let clear = Closure::once_into_js(move || {
+                if notice.get_untracked() == current {
+                    notice.set(String::new());
+                }
+            });
             if let Some(window) = web_sys::window() {
                 let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
                     clear.unchecked_ref::<js_sys::Function>(),
@@ -630,23 +645,21 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         }
     };
 
-    // Uploads one file, tracking it in the tray.
-    let start_upload = move |file: web_sys::File, dir: String, id: u32| {
+    // Uploads one file, tracking it in the tray via its own signals.
+    let start_upload = move |file: web_sys::File,
+                             dir: String,
+                             progress: RwSignal<u8>,
+                             status: RwSignal<UploadStatus>| {
         let url = format!(
             "/dav{}",
             encode_path(&format!("{}/{}", dir.trim_end_matches('/'), file.name()))
         );
-        let progress_signal = uploads;
-        let done_signal = uploads;
+        let tray = uploads;
         spawn_local(async move {
             let bytes = match api::read_file(&file).await {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    progress_signal.update(|list| {
-                        if let Some(item) = list.iter_mut().find(|item| item.id == id) {
-                            item.status = UploadStatus::Failed;
-                        }
-                    });
+                    status.set(UploadStatus::Failed);
                     error.set(e);
                     return;
                 }
@@ -654,43 +667,33 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             api::upload(
                 &url,
                 bytes,
-                move |pct| {
-                    progress_signal.update(|list| {
-                        if let Some(item) = list.iter_mut().find(|item| item.id == id) {
-                            item.progress = pct;
-                        }
-                    });
-                },
+                move |pct| progress.set(pct),
                 move |result| {
                     let (ok, warning) = match result {
-                        Ok((status, warning)) => (matches!(status, 201 | 204), warning),
+                        Ok((code, warning)) => (matches!(code, 201 | 204), warning),
                         Err(_) => (false, None),
                     };
                     if let Some(percent) = warning {
                         quota_warn.set(Some(percent));
                     }
-                    done_signal.update(|list| {
-                        if let Some(item) = list.iter_mut().find(|item| item.id == id) {
-                            item.status = if ok {
-                                UploadStatus::Done
-                            } else {
-                                UploadStatus::Failed
-                            };
-                        }
+                    status.set(if ok {
+                        UploadStatus::Done
+                    } else {
+                        UploadStatus::Failed
                     });
-                    if !done_signal
+                    if !tray
                         .get_untracked()
                         .iter()
-                        .any(|item| item.status == UploadStatus::Uploading)
+                        .any(|item| item.status.get_untracked() == UploadStatus::Uploading)
                     {
-                        let snapshot = done_signal.get_untracked();
+                        let snapshot = tray.get_untracked();
                         let done = snapshot
                             .iter()
-                            .filter(|item| item.status == UploadStatus::Done)
+                            .filter(|item| item.status.get_untracked() == UploadStatus::Done)
                             .count();
                         let failed = snapshot
                             .iter()
-                            .filter(|item| item.status == UploadStatus::Failed)
+                            .filter(|item| item.status.get_untracked() == UploadStatus::Failed)
                             .count();
                         if failed == 0 {
                             notice.set(format!(
@@ -700,6 +703,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         } else {
                             error.set(format!("Uploaded {done}, {failed} failed"));
                         }
+                        // Drop completed rows to release their file handles;
+                        // failures stay so they can be retried.
+                        tray.update(|list| {
+                            list.retain(|item| item.status.get_untracked() != UploadStatus::Done);
+                        });
                         load(path.get_untracked());
                     }
                 },
@@ -715,17 +723,19 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         for file in files {
             let id = upload_seq.get_untracked() + 1;
             upload_seq.set(id);
+            let progress = RwSignal::new(0u8);
+            let status = RwSignal::new(UploadStatus::Uploading);
             uploads.update(|list| {
                 list.push(UploadItem {
                     id,
                     name: file.name(),
                     dir: dir.clone(),
-                    progress: 0,
-                    status: UploadStatus::Uploading,
+                    progress,
+                    status,
                     file: file.clone(),
                 });
             });
-            start_upload(file, dir.clone(), id);
+            start_upload(file, dir.clone(), progress, status);
         }
     };
 
@@ -1969,63 +1979,46 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                             each=move || uploads.get()
                             key=|item| item.id
                             children=move |item| {
-                                let id = item.id;
                                 let name = item.name.clone();
-                                let retry_file = item.file.clone();
-                                let retry_dir = item.dir.clone();
-                                // A keyed <For> keeps the row's DOM while the id is
-                                // unchanged, so read live from the signal instead
-                                // of capturing progress/status once at creation.
-                                let progress = move || {
-                                    uploads
-                                        .get()
-                                        .iter()
-                                        .find(|it| it.id == id)
-                                        .map(|it| it.progress)
-                                        .unwrap_or(0)
-                                };
-                                let status = move || {
-                                    uploads
-                                        .get()
-                                        .iter()
-                                        .find(|it| it.id == id)
-                                        .map(|it| it.status)
-                                        .unwrap_or(UploadStatus::Uploading)
-                                };
+                                let dir = item.dir.clone();
+                                let file = item.file.clone();
+                                // Per-item signals: O(1) reads, no tray scan.
+                                let progress = item.progress;
+                                let status = item.status;
                                 view! {
                                     <li class="upload-item">
                                         <span class="upload-name">{name}</span>
                                         <span class="upload-bar">
                                             <span
                                                 class="upload-bar-fill"
-                                                style=move || format!("width:{}%", progress())
+                                                style=move || format!("width:{}%", progress.get())
                                             ></span>
                                         </span>
                                         <span class="upload-status">
-                                            {move || match status() {
+                                            {move || match status.get() {
                                                 UploadStatus::Uploading => {
-                                                    view! { <span class="muted">{format!("{}%", progress())}</span> }
+                                                    view! { <span class="muted">{format!("{}%", progress.get())}</span> }
                                                         .into_any()
                                                 }
                                                 UploadStatus::Done => {
                                                     view! { <span class="ok">"done"</span> }.into_any()
                                                 }
                                                 UploadStatus::Failed => {
-                                                    let retry_file = retry_file.clone();
-                                                    let retry_dir = retry_dir.clone();
+                                                    let file = file.clone();
+                                                    let dir = dir.clone();
                                                     view! {
                                                         <button
                                                             class="icon-btn"
                                                             title="Retry"
                                                             on:click=move |_| {
-                                                                uploads
-                                                                    .update(|list| {
-                                                                        if let Some(it) = list.iter_mut().find(|i| i.id == id) {
-                                                                            it.status = UploadStatus::Uploading;
-                                                                            it.progress = 0;
-                                                                        }
-                                                                    });
-                                                                start_upload(retry_file.clone(), retry_dir.clone(), id);
+                                                                progress.set(0);
+                                                                status.set(UploadStatus::Uploading);
+                                                                start_upload(
+                                                                    file.clone(),
+                                                                    dir.clone(),
+                                                                    progress,
+                                                                    status,
+                                                                );
                                                             }
                                                         >
                                                             <Icon name="refresh"/>
@@ -3286,4 +3279,35 @@ fn full_url(path: &str) -> String {
         .and_then(|window| window.location().origin().ok())
         .unwrap_or_default();
     format!("{origin}{path}")
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn human_size_formats_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_path_escapes_each_segment() {
+        assert_eq!(encode_path("a/b c"), "a/b%20c");
+        // The unreserved set is not exempted, so '.' is escaped too.
+        assert_eq!(encode_path("a.txt"), "a%2Etxt");
+        assert_eq!(encode_path(""), "");
+    }
+
+    #[wasm_bindgen_test]
+    fn sanitize_svg_strips_scripts() {
+        let out = sanitize_svg("<svg><script>alert(1)</script><rect onload='x'/></svg>");
+        assert!(!out.contains("<script"));
+        assert!(!out.contains("</script>"));
+        assert!(!out.contains("onload="));
+    }
 }

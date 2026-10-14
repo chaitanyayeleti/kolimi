@@ -217,6 +217,17 @@ impl PluginHost {
                         continue;
                     }
                 };
+                // The guest std needs the WASI filesystem/clock/io imports, but
+                // nothing needs the network: refuse any component that imports
+                // wasi:sockets, so the linked sockets surface stays unused.
+                let wants_network = component
+                    .component_type()
+                    .imports(&engine)
+                    .any(|(import, _)| import.to_string().contains("sockets"));
+                if wants_network {
+                    tracing::warn!(plugin = %stem, "plugin imports wasi:sockets; skipped");
+                    continue;
+                }
                 let kv_path = dir.join(format!("{stem}.kv.json"));
                 let kv = std::fs::read(&kv_path).ok().and_then(|bytes| {
                     serde_json::from_slice::<BTreeMap<String, Vec<u8>>>(&bytes).ok()
