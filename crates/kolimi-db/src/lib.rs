@@ -791,6 +791,21 @@ impl Db {
         )
     }
 
+    /// Binds a CSRF token hash to an existing session (used to upgrade a
+    /// session created before CSRF binding existed).
+    pub async fn set_session_csrf_hash(
+        &self,
+        token_hash: &[u8],
+        csrf_hash: &[u8],
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE sessions SET csrf_hash = ? WHERE token_hash = ?")
+            .bind(csrf_hash)
+            .bind(token_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Looks up a session by token hash.
     pub async fn find_session(&self, token_hash: &[u8]) -> Result<Option<Session>, DbError> {
         Ok(

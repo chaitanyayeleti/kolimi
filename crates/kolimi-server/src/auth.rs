@@ -247,7 +247,17 @@ async fn csrf_ok(state: &AppState, headers: &HeaderMap, session_hash: Option<&[u
     };
     match state.db.session_csrf_hash(session_hash).await {
         Ok(Some(expected)) => token::hash_token(&token).as_slice() == expected.as_slice(),
-        _ => false,
+        // Session created before CSRF was bound (e.g. just after a server
+        // upgrade): accept the double-submit token and bind it now, so the
+        // session is strictly bound from this request on.
+        Ok(None) => {
+            let _ = state
+                .db
+                .set_session_csrf_hash(session_hash, &token::hash_token(&token))
+                .await;
+            true
+        }
+        Err(_) => false,
     }
 }
 

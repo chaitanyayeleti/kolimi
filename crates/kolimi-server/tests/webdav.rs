@@ -897,6 +897,52 @@ async fn cookie_mutations_require_csrf_token() {
 }
 
 #[tokio::test]
+async fn legacy_session_without_bound_csrf_is_upgraded() {
+    let server = setup().await;
+    let login = request_with_body(
+        "POST",
+        "/api/session",
+        "",
+        "application/json",
+        format!(r#"{{"username":"{USER}","password":"{PASS}"}}"#).as_bytes(),
+    );
+    let (status, headers, _) = send(&server.app, login).await;
+    assert_eq!(status, StatusCode::OK);
+    let session_cookie = cookie_pair(&headers, "kolimi_session").unwrap();
+    let csrf = cookie_value(&headers, "kolimi_csrf").unwrap();
+
+    // Simulate a session created before CSRF binding existed (server upgrade).
+    sqlx::query("UPDATE sessions SET csrf_hash = NULL")
+        .execute(server.state.db.pool())
+        .await
+        .unwrap();
+
+    // A double-submit mutating request is accepted and re-binds the session
+    // (a wrong or missing token would still be rejected).
+    let purge = Request::builder()
+        .method("DELETE")
+        .uri("/api/trash/999999")
+        .header(
+            header::COOKIE,
+            format!("{session_cookie}; kolimi_csrf={csrf}"),
+        )
+        .header("x-csrf-token", &csrf)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, purge).await;
+    assert_ne!(status, StatusCode::FORBIDDEN);
+
+    let bound: Option<Vec<u8>> = sqlx::query_scalar("SELECT csrf_hash FROM sessions LIMIT 1")
+        .fetch_optional(server.state.db.pool())
+        .await
+        .unwrap();
+    assert!(
+        bound.is_some(),
+        "the legacy session should be bound after use"
+    );
+}
+
+#[tokio::test]
 async fn bearer_tokens_authenticate_api_requests() {
     let server = setup().await;
     let login = request_with_body(

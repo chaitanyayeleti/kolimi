@@ -59,6 +59,7 @@ http-body-util.workspace = true
 image.workspace = true
 kolimi-crypto.workspace = true
 kolimi-sync.workspace = true
+sqlx.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "rustls-native-certs"] }
 tempfile.workspace = true
 tower.workspace = true
