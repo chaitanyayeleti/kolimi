@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-10-17
+
+### Fixed
+- **Desktop: the encryption passphrase box is now always shown**, not only for
+  accounts with encrypted sync folders. Approving a device needs the master
+  key, so an account with no encrypted folders had no way to unlock and every
+  approve failed with a "locked" error. The *Devices & keys* section now also
+  prompts you to unlock first, and the locked error for approve reads
+  *"approving a device needs your encryption passphrase — unlock encryption
+  first"*.
+
 ## [0.1.21] - 2026-10-17
 
 ### Added
