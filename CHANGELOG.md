@@ -6,7 +6,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-10-17
+
 ### Added
+- **Bearer-token auth for mobile clients.** `SyncConfig` gains an optional
+  `token`; the HTTP client sends `Authorization: Bearer` when it is set (else
+  HTTP Basic), so a client can log in once (password + TOTP) and sync with the
+  session token without retaining the password. The FFI exposes
+  `FfiSyncConfig.token` and a dedicated `Locked` error class.
 - **E2EE hardening: three server-trust gaps closed.**
   - **Device enrollment approval code** (RFC 0008). The new device and the
     approving device each derive a short code that commits to the device's
