@@ -1187,11 +1187,16 @@ pub async fn approve_device(
     expected_code: &str,
 ) -> Result<String, SyncError> {
     let http = Http::new(config)?;
-    let e2ee = unlock_e2ee(&http, config).await?.ok_or_else(|| {
-        SyncError::E2ee(
-            "approving needs an unlock secret (passphrase, recovery code or PRF)".into(),
-        )
-    })?;
+    let e2ee = match unlock_e2ee(&http, config).await {
+        Ok(Some(e2ee)) => e2ee,
+        Ok(None) | Err(SyncError::Locked(_)) => {
+            return Err(SyncError::Locked(
+                "approving a device needs your encryption passphrase — unlock encryption first"
+                    .to_string(),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
 
     let (name, public) = fetch_pending(&http, id).await?;
     let code = enrollment_code(&public, id);

@@ -213,7 +213,7 @@
     }
     card.append(pairs);
 
-    if (account.has_e2ee) {
+    {
       const pass = el("input", { type: "password", placeholder: "Encryption passphrase", autocomplete: "off" });
       const actions = [
         el("button", { onclick: async () => {
@@ -241,8 +241,8 @@
               account.e2ee_unlocked ? "unlocked" : "locked")),
           el("p", { class: "muted", style: "margin:8px 0" },
             account.e2ee_unlocked
-              ? "Your encrypted folders are unlocked for syncing."
-              : "Encrypted folders are locked. Enter your encryption passphrase to sync them."),
+              ? "Encryption is unlocked — encrypted folders sync, and you can approve new devices."
+              : "Encryption is locked. Enter your passphrase to sync encrypted folders and to approve new devices."),
           el("label", {}, account.e2ee_unlocked ? "Change passphrase" : "Encryption passphrase"),
           pass,
           el("div", { class: "row", style: "margin-top:8px" }, ...actions)
@@ -300,6 +300,10 @@
         el("p", { class: "muted", style: "margin:8px 0" },
           "Enroll this machine so it can sync encrypted folders without the passphrase, " +
           "and review the keys pinned for the people you share with."),
+        ...(account.e2ee_unlocked
+          ? []
+          : [el("p", { class: "error" },
+              "Unlock encryption above first — approving a device needs your master key.")]),
         el("label", {}, "Device name"),
         deviceName,
         el("div", { class: "row", style: "margin-top:8px" },
