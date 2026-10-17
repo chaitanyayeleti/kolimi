@@ -5,7 +5,7 @@
 
 use crate::app::encode;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use kolimi_crypto::{FileKey, Keyring, MasterKey};
+use kolimi_crypto::{CryptoError, FileKey, Keyring, MasterKey};
 use serde_json::Value;
 use wasm_bindgen::JsCast;
 
@@ -47,19 +47,79 @@ pub fn save_bytes(name: &str, bytes: &[u8]) {
 /// Unlocks the account's master key with a passphrase.
 pub async fn unlock(passphrase: &str) -> Result<MasterKey, String> {
     let keyring = load_keyring().await?;
-    keyring
+    check_keyring(&keyring)?;
+    let master = keyring
         .unlock_with_passphrase(passphrase)
-        .map_err(|_| "Wrong passphrase".to_string())
+        .map_err(|error| unlock_error(error, "Wrong passphrase"))?;
+    record_epoch(&keyring);
+    Ok(master)
 }
 
 /// Unlocks the account's master key with the recovery code.
 pub async fn unlock_recovery(code: &str) -> Result<MasterKey, String> {
     let keyring = load_keyring().await?;
+    check_keyring(&keyring)?;
     let parsed = kolimi_crypto::recovery_code_parse(code)
         .map_err(|_| "Malformed recovery code".to_string())?;
-    keyring
+    let master = keyring
         .unlock_with_recovery(&parsed)
-        .map_err(|_| "Wrong recovery code".to_string())
+        .map_err(|error| unlock_error(error, "Wrong recovery code"))?;
+    record_epoch(&keyring);
+    Ok(master)
+}
+
+/// Maps a keyring unlock failure: an integrity failure means tampering, not a
+/// wrong secret, so it must not be reported as one.
+fn unlock_error(error: CryptoError, wrong: &str) -> String {
+    match error {
+        CryptoError::Keyring(_) => {
+            "Keyring integrity check failed — refusing to unlock (tampered or spliced keyring)"
+                .to_string()
+        }
+        _ => wrong.to_string(),
+    }
+}
+
+/// localStorage key holding the highest keyring epoch this browser accepted.
+const EPOCH_KEY: &str = "kolimi.keyring.epoch";
+
+fn stored_epoch() -> u64 {
+    web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(EPOCH_KEY).ok().flatten())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Refuses a keyring the server downgraded (integrity tag stripped) or rolled
+/// back (older than one this browser has already accepted).
+fn check_keyring(keyring: &Keyring) -> Result<(), String> {
+    let seen = stored_epoch();
+    if seen > 0 && keyring.mac.is_none() {
+        return Err(
+            "Keyring downgrade detected — the server offered a keyring without its integrity tag"
+                .to_string(),
+        );
+    }
+    if keyring.epoch < seen {
+        return Err(format!(
+            "Keyring rollback detected (server offered epoch {}, this browser has seen {seen})",
+            keyring.epoch
+        ));
+    }
+    Ok(())
+}
+
+/// Remembers the accepted epoch, after a successful unlock.
+fn record_epoch(keyring: &Keyring) {
+    if keyring.epoch <= stored_epoch() {
+        return;
+    }
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    {
+        let _ = storage.set_item(EPOCH_KEY, &keyring.epoch.to_string());
+    }
 }
 
 /// Loads the account's keyring from the server.
@@ -218,17 +278,25 @@ pub async fn revoke_device(id: i64) -> Result<(), String> {
 }
 
 /// Approves a pending enrollment by wrapping the master key for its device.
+///
+/// `expected_code` must be the code shown on the new device: it commits to the
+/// device's public key, so a server that substituted the key produces a
+/// mismatch here and the approval is refused.
 pub async fn approve_enrollment(
     id: i64,
     device_public_key_b64: &str,
+    expected_code: &str,
     master: &MasterKey,
 ) -> Result<(), String> {
-    let public = STANDARD
-        .decode(device_public_key_b64)
-        .map_err(|_| "malformed device key".to_string())?;
-    let public: [u8; 32] = public
-        .try_into()
-        .map_err(|_| "device key must be 32 bytes".to_string())?;
+    let public = decode_public(device_public_key_b64)?;
+    let code = kolimi_crypto::enrollment_code(&public, id);
+    if kolimi_crypto::normalize_code(&code) != kolimi_crypto::normalize_code(expected_code) {
+        return Err(format!(
+            "Code mismatch: the server offered key {}, which does not match the code shown on the \
+             new device. Refusing to approve.",
+            kolimi_crypto::fingerprint(&public)
+        ));
+    }
     let wrapped = kolimi_crypto::wrap_secret_for(&public, master.as_bytes())
         .map_err(|_| "could not wrap the master key".to_string())?;
     let response = api::send_json(
@@ -248,17 +316,18 @@ pub async fn approve_enrollment(
 }
 
 /// Starts enrolling this browser as a new device: generates a device key,
-/// creates the enrollment, and returns its id plus the device secret to
-/// poll with (kept in memory only).
-pub async fn start_enrollment(name: &str) -> Result<(i64, [u8; 32]), String> {
+/// creates the enrollment, and returns its id, the device secret to poll with
+/// (kept in memory only), and the approval code to show for comparison.
+pub async fn start_enrollment(name: &str) -> Result<(i64, [u8; 32], String), String> {
     let device = kolimi_crypto::Identity::generate()
         .map_err(|_| "could not generate a device key".to_string())?;
+    let public = device.public_key();
     let response = api::send_json(
         "POST",
         "/api/e2ee/enrollments",
         &serde_json::json!({
             "device_name": name,
-            "device_public_key": STANDARD.encode(device.public_key()),
+            "device_public_key": STANDARD.encode(public),
         }),
     )
     .await?;
@@ -271,7 +340,33 @@ pub async fn start_enrollment(name: &str) -> Result<(i64, [u8; 32]), String> {
     let id = response.body["id"]
         .as_i64()
         .ok_or("malformed enrollment response")?;
-    Ok((id, device.private_bytes()))
+    Ok((
+        id,
+        device.private_bytes(),
+        kolimi_crypto::enrollment_code(&public, id),
+    ))
+}
+
+/// The approval code for a pending enrollment (shown on both devices).
+pub fn device_code(device_public_key_b64: &str, id: i64) -> String {
+    decode_public(device_public_key_b64)
+        .map(|key| kolimi_crypto::enrollment_code(&key, id))
+        .unwrap_or_default()
+}
+
+/// The fingerprint of a device or recipient public key.
+pub fn key_fingerprint(public_key_b64: &str) -> String {
+    decode_public(public_key_b64)
+        .map(|key| kolimi_crypto::fingerprint(&key))
+        .unwrap_or_default()
+}
+
+fn decode_public(public_key_b64: &str) -> Result<[u8; 32], String> {
+    STANDARD
+        .decode(public_key_b64)
+        .map_err(|_| "malformed device key".to_string())?
+        .try_into()
+        .map_err(|_| "device key must be 32 bytes".to_string())
 }
 
 /// Polls an enrollment once; returns the unlocked master key once approved.

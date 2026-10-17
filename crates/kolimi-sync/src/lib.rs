@@ -1120,6 +1120,37 @@ pub async fn pending_enrollment(config: &SyncConfig, id: i64) -> Result<Enrollme
     })
 }
 
+/// Lists the account's pending device enrollments (RFC 0008), each with the
+/// code and fingerprint an approving device shows before approving.
+pub async fn list_enrollments(config: &SyncConfig) -> Result<Vec<Enrollment>, SyncError> {
+    let http = Http::new(config)?;
+    let path = "/api/e2ee/enrollments".to_string();
+    let (status, body) = http.get_json(&path).await?;
+    if status != 200 {
+        return Err(SyncError::Server { status, path });
+    }
+    let mut out = Vec::new();
+    for item in body["enrollments"].as_array().cloned().unwrap_or_default() {
+        let id = item["id"]
+            .as_i64()
+            .ok_or_else(|| SyncError::E2ee("malformed enrollment response".to_string()))?;
+        let name = item["device_name"].as_str().unwrap_or_default().to_string();
+        let public = STANDARD
+            .decode(item["device_public_key"].as_str().unwrap_or_default())
+            .map_err(|error| SyncError::E2ee(format!("device public key: {error}")))?;
+        let public: [u8; 32] = public
+            .try_into()
+            .map_err(|_| SyncError::E2ee("device public key must be 32 bytes".to_string()))?;
+        out.push(Enrollment {
+            id,
+            name,
+            code: enrollment_code(&public, id),
+            fingerprint: fingerprint(&public),
+        });
+    }
+    Ok(out)
+}
+
 /// Fetches a pending enrollment's device name and public key.
 async fn fetch_pending(http: &Http, id: i64) -> Result<(String, [u8; 32]), SyncError> {
     let path = format!("/api/e2ee/enrollments/{id}");

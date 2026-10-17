@@ -29,9 +29,9 @@
 //! It syncs every five minutes and on demand, with a tray icon that reflects
 //! idle/syncing/error and a desktop notification on failures and conflicts.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -243,10 +243,10 @@ fn store_secrets(key: &str, secrets: &Secrets) -> SecretStorage {
 }
 
 fn delete_secrets(key: &str) {
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, key) {
-        if let Err(error) = entry.delete_credential() {
-            eprintln!("kolimi-desktop: failed to delete keychain entry for {key}: {error}");
-        }
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, key)
+        && let Err(error) = entry.delete_credential()
+    {
+        eprintln!("kolimi-desktop: failed to delete keychain entry for {key}: {error}");
     }
     keyctl::session_delete(&session_description(key));
 }
@@ -1192,6 +1192,197 @@ fn open_account(app: AppHandle, server: String) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// E2EE device enrollment (RFC 0008) and pinned recipient keys
+// ---------------------------------------------------------------------------
+
+/// A device enrollment shown in the UI (id, name, approval code, fingerprint).
+#[derive(Serialize)]
+struct EnrollmentView {
+    id: i64,
+    name: String,
+    code: String,
+    fingerprint: String,
+}
+
+impl From<kolimi_sync::Enrollment> for EnrollmentView {
+    fn from(enrollment: kolimi_sync::Enrollment) -> Self {
+        Self {
+            id: enrollment.id,
+            name: enrollment.name,
+            code: enrollment.code,
+            fingerprint: enrollment.fingerprint,
+        }
+    }
+}
+
+/// A pinned recipient key (trust on first use).
+#[derive(Serialize)]
+struct RecipientView {
+    member: String,
+    fingerprint: String,
+}
+
+/// An enrollment started by `enroll_device`, awaiting approval and `finish`.
+static PENDING_ENROLLMENT: LazyLock<Mutex<Option<kolimi_sync::PendingDevice>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Looks up an account and its stored secrets.
+fn find_account(
+    app: &AppHandle,
+    server: &str,
+    username: &str,
+) -> Result<(Account, Secrets), String> {
+    let settings = app
+        .state::<DesktopState>()
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let account = settings
+        .accounts
+        .into_iter()
+        .find(|account| account.server == server && account.username == username)
+        .ok_or_else(|| "unknown account".to_string())?;
+    let secrets =
+        keyring_get(&account_key(server, username)).ok_or_else(|| "sign in first".to_string())?;
+    Ok((account, secrets))
+}
+
+/// The first sync folder of an account (the local dir used for enrollment).
+fn first_pair_dir(account: &Account) -> Result<PathBuf, String> {
+    account
+        .pairs
+        .first()
+        .map(|pair| PathBuf::from(&pair.local_dir))
+        .ok_or_else(|| "Add a sync folder for this account first".to_string())
+}
+
+/// A config for account-level E2EE operations (no encrypted roots).
+fn account_config(
+    account: &Account,
+    secrets: &Secrets,
+    local_dir: PathBuf,
+) -> kolimi_sync::SyncConfig {
+    kolimi_sync::SyncConfig {
+        server: account.server.clone(),
+        username: account.username.clone(),
+        password: secrets.password.clone(),
+        token: None,
+        local_dir,
+        e2ee: Some(kolimi_sync::E2eeOptions {
+            passphrase: secrets.e2ee_passphrase.clone(),
+            recovery_code: None,
+            prf_secret: None,
+            encrypted_roots: Vec::new(),
+        }),
+    }
+}
+
+/// Starts enrolling this machine as a device; returns the code to compare.
+#[tauri::command]
+async fn enroll_device(
+    app: AppHandle,
+    server: String,
+    username: String,
+    name: String,
+) -> Result<EnrollmentView, String> {
+    let (account, secrets) = find_account(&app, &server, &username)?;
+    let config = account_config(&account, &secrets, first_pair_dir(&account)?);
+    let pending = kolimi_sync::start_enrollment(&config, &name)
+        .await
+        .map_err(|error| error.to_string())?;
+    let view = EnrollmentView {
+        id: pending.details.id,
+        name: pending.details.name.clone(),
+        code: pending.details.code.clone(),
+        fingerprint: pending.details.fingerprint.clone(),
+    };
+    *PENDING_ENROLLMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
+    Ok(view)
+}
+
+/// Waits for the in-progress enrollment to be approved and saves the device key.
+#[tauri::command]
+async fn finish_enrollment(
+    app: AppHandle,
+    server: String,
+    username: String,
+) -> Result<i64, String> {
+    let (account, secrets) = find_account(&app, &server, &username)?;
+    let config = account_config(&account, &secrets, first_pair_dir(&account)?);
+    let pending = PENDING_ENROLLMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .ok_or_else(|| "no enrollment in progress".to_string())?;
+    kolimi_sync::finish_enrollment(&config, &pending)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Pending device enrollments awaiting approval.
+#[tauri::command]
+async fn list_enrollments(
+    app: AppHandle,
+    server: String,
+    username: String,
+) -> Result<Vec<EnrollmentView>, String> {
+    let (account, secrets) = find_account(&app, &server, &username)?;
+    let local = account
+        .pairs
+        .first()
+        .map(|pair| PathBuf::from(&pair.local_dir))
+        .unwrap_or_else(std::env::temp_dir);
+    let config = account_config(&account, &secrets, local);
+    kolimi_sync::list_enrollments(&config)
+        .await
+        .map(|list| list.into_iter().map(EnrollmentView::from).collect())
+        .map_err(|error| error.to_string())
+}
+
+/// Approves a pending enrollment; `code` must match the new device's code.
+#[tauri::command]
+async fn approve_device(
+    app: AppHandle,
+    server: String,
+    username: String,
+    id: i64,
+    code: String,
+) -> Result<String, String> {
+    let (account, secrets) = find_account(&app, &server, &username)?;
+    let config = account_config(&account, &secrets, first_pair_dir(&account)?);
+    kolimi_sync::approve_device(&config, id, &code)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The recipient keys pinned on this machine (member -> fingerprint).
+#[tauri::command]
+fn recipient_fingerprints(
+    app: AppHandle,
+    server: String,
+    username: String,
+) -> Result<Vec<RecipientView>, String> {
+    let (account, _secrets) = find_account(&app, &server, &username)?;
+    let mut out: Vec<RecipientView> = Vec::new();
+    for pair in &account.pairs {
+        if let Ok(keys) = kolimi_sync::known_recipient_keys(Path::new(&pair.local_dir)) {
+            for (member, fingerprint) in keys {
+                if !out.iter().any(|entry| entry.member == member) {
+                    out.push(RecipientView {
+                        member,
+                        fingerprint,
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -1224,7 +1415,12 @@ fn main() {
             set_e2ee_passphrase,
             set_autostart_enabled,
             sync_now,
-            open_account
+            open_account,
+            enroll_device,
+            finish_enrollment,
+            list_enrollments,
+            approve_device,
+            recipient_fingerprints
         ])
         .setup(|app| {
             let mut settings = match load_settings_file() {

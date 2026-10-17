@@ -2479,7 +2479,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let enrollments = RwSignal::new(Vec::<Value>::new());
     let devices = RwSignal::new(Vec::<Value>::new());
     let device_name = RwSignal::new(String::new());
-    let enrolling = RwSignal::new(Option::<(i64, [u8; 32])>::None);
+    let enrolling = RwSignal::new(Option::<(i64, [u8; 32], String)>::None);
     let use_recovery = RwSignal::new(false);
     let close = move |_| on_close.run(());
 
@@ -2526,12 +2526,16 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
         });
     };
 
-    let approve = move |id: i64, key: String| {
+    let approve = move |id: i64, key: String, code: String| {
+        if code.trim().is_empty() {
+            error.set("Type the code shown on the new device".to_string());
+            return;
+        }
         let Some(unlocked) = master.get_untracked() else {
             return;
         };
         spawn_local(async move {
-            match crate::e2ee::approve_enrollment(id, &key, &unlocked).await {
+            match crate::e2ee::approve_enrollment(id, &key, &code, &unlocked).await {
                 Ok(()) => {
                     error.set(String::new());
                     notice.set("Device approved".to_string());
@@ -2563,13 +2567,12 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
         }
         spawn_local(async move {
             match crate::e2ee::start_enrollment(&name).await {
-                Ok((id, secret)) => {
+                Ok((id, secret, code)) => {
                     error.set(String::new());
-                    notice.set(
-                        "Scan or note the code, then approve it from another unlocked device."
-                            .to_string(),
-                    );
-                    enrolling.set(Some((id, secret)));
+                    notice.set(format!(
+                        "Compare code {code} on the approving device, then approve it there."
+                    ));
+                    enrolling.set(Some((id, secret, code)));
                 }
                 Err(e) => error.set(e),
             }
@@ -2577,7 +2580,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     };
 
     let finish_enroll = move |_| {
-        let Some((id, secret)) = enrolling.get_untracked() else {
+        let Some((id, secret, _)) = enrolling.get_untracked() else {
             return;
         };
         spawn_local(async move {
@@ -2669,6 +2672,9 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                                     .as_str()
                                     .unwrap_or_default()
                                     .to_string();
+                                let code = crate::e2ee::device_code(&key, id);
+                                let fingerprint = crate::e2ee::key_fingerprint(&key);
+                                let entered = RwSignal::new(String::new());
                                 let k = key.clone();
                                 view! {
                                     <li class="file">
@@ -2676,12 +2682,21 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                                             <span class="file-name">{name}</span>
                                             <span class="file-meta">
                                                 <span class="muted">"enrollment " {id}</span>
+                                                <span class="muted">"code " {code}</span>
+                                                <span class="muted">"key " {fingerprint}</span>
                                             </span>
+                                            <input
+                                                type="text"
+                                                autocomplete="off"
+                                                placeholder="Type the code shown on the new device"
+                                                prop:value=move || entered.get()
+                                                on:input=move |ev| entered.set(event_target_value(&ev))
+                                            />
                                         </span>
                                         <span class="file-actions">
-                                            <button on:click=move |_| approve(id, k.clone())>
-                                                "Approve"
-                                            </button>
+                                            <button on:click=move |_| {
+                                                approve(id, k.clone(), entered.get_untracked())
+                                            }>"Approve"</button>
                                         </span>
                                     </li>
                                 }
@@ -2743,16 +2758,17 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                     {move || {
                         enrolling
                             .get()
-                            .map(|(id, _)| {
+                            .map(|(id, _, code)| {
                                 view! {
                                     <div class="enroll-qr">
                                         <div
                                             class="qr"
                                             inner_html=crate::e2ee::qr_svg(
-                                                &format!("kolimi-enroll:{id}"),
+                                                &format!("kolimi-enroll:{id}:{code}"),
                                             )
                                         ></div>
                                         <p class="muted">"Enrollment " {id}</p>
+                                        <p class="muted">"Code " {code}</p>
                                     </div>
                                 }
                             })

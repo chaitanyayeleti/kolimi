@@ -250,6 +250,90 @@
       );
     }
 
+    // Device enrollment (RFC 0008) and pinned recipient keys.
+    const deviceName = el("input", { placeholder: "e.g. this laptop", style: "margin-top:6px" });
+    const enrollOut = el("div", { class: "muted", style: "margin-top:8px" });
+    const pendingList = el("ul", { class: "pairs" });
+    const pinsList = el("ul", { class: "pairs" });
+    const refreshDevices = async () => {
+      try {
+        const list = await invoke("list_enrollments", { server: account.server, username: account.username });
+        if (!list.length) {
+          pendingList.replaceChildren(el("li", {}, el("span", { class: "empty" }, "No pending enrollments")));
+        } else {
+          pendingList.replaceChildren(...list.map((enrollment) => {
+            const codeInput = el("input", { placeholder: "Type the code shown on the new device", style: "margin-top:6px" });
+            return el("li", {},
+              el("span", { class: "path" },
+                enrollment.name, " ",
+                el("span", { class: "remote" }, "enrollment " + enrollment.id),
+                el("div", { class: "muted" }, "code " + enrollment.code + " · key " + enrollment.fingerprint)),
+              codeInput,
+              el("div", { class: "row", style: "margin-top:6px" },
+                el("button", { onclick: async () => {
+                  try {
+                    const name = await invoke("approve_device", {
+                      server: account.server, username: account.username, id: enrollment.id, code: codeInput.value
+                    });
+                    setMsg("Approved " + name, "ok");
+                    refreshDevices();
+                  } catch (e) { setMsg(String(e), "err"); }
+                } }, "Approve")));
+          }));
+        }
+      } catch (e) { /* listing needs a signed-in account */ }
+      try {
+        const pins = await invoke("recipient_fingerprints", { server: account.server, username: account.username });
+        if (!pins.length) {
+          pinsList.replaceChildren(el("li", {}, el("span", { class: "empty" }, "No recipient keys pinned yet")));
+        } else {
+          pinsList.replaceChildren(...pins.map((pin) =>
+            el("li", {}, el("span", { class: "path" }, pin.member, " ",
+              el("span", { class: "remote" }, pin.fingerprint)))));
+        }
+      } catch (e) { /* ignore */ }
+    };
+
+    card.append(
+      el("details", { class: "e2ee", style: "margin-top:12px" },
+        el("summary", {}, "Devices & keys"),
+        el("p", { class: "muted", style: "margin:8px 0" },
+          "Enroll this machine so it can sync encrypted folders without the passphrase, " +
+          "and review the keys pinned for the people you share with."),
+        el("label", {}, "Device name"),
+        deviceName,
+        el("div", { class: "row", style: "margin-top:8px" },
+          el("button", { onclick: async () => {
+            try {
+              const view = await invoke("enroll_device", {
+                server: account.server, username: account.username, name: deviceName.value
+              });
+              enrollOut.textContent = "";
+              enrollOut.append(
+                el("div", {}, "Enrollment " + view.id + " — compare this code on an approving device:"),
+                el("div", { class: "path" }, view.code, " ",
+                  el("span", { class: "remote" }, "key " + view.fingerprint)),
+                el("div", { class: "row", style: "margin-top:6px" },
+                  el("button", { onclick: async () => {
+                    try {
+                      await invoke("finish_enrollment", { server: account.server, username: account.username });
+                      setMsg("This machine is enrolled", "ok");
+                      enrollOut.textContent = "";
+                      refresh();
+                    } catch (e) { setMsg(String(e), "err"); }
+                  } }, "Finish (wait for approval)")));
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "Start enrollment"),
+          el("button", { class: "ghost", onclick: refreshDevices }, "Refresh")),
+        enrollOut,
+        el("div", { class: "muted", style: "margin-top:12px" }, "Pending enrollments"),
+        pendingList,
+        el("div", { class: "muted", style: "margin-top:12px" }, "Pinned recipient keys"),
+        pinsList
+      )
+    );
+    refreshDevices();
+
     const dirInput = el("input", { placeholder: "~/Kolimi", style: "margin-top:6px" });
     const remoteInput = el("input", { placeholder: "/", style: "margin-top:6px" });
     card.append(
