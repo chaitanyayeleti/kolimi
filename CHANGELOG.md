@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-10-17
+
+### Added
+- **Enrollment approval code in the desktop and web UIs.** The web's *Add this
+  browser as a device* flow now shows the key-committing code (also encoded in
+  the QR), and *Approve* requires the operator to type the code shown on the
+  new device, refusing a mismatch. The desktop's **Accounts & Sync** gains a
+  *Devices & keys* section: enroll this machine (code + fingerprint, then wait
+  for approval), approve pending enrollments (code required), and review the
+  **pinned recipient keys**.
+
+### Fixed
+- **Web: a keyring integrity failure no longer reads as "Wrong passphrase"** —
+  a tampered or spliced keyring is reported as such.
+- **Web: keyring anti-rollback.** The browser remembers the highest keyring
+  epoch it accepted (in `localStorage`) and refuses a replayed or downgraded
+  keyring, closing the gap noted for 0.1.19.
+- Desktop: a pre-existing `clippy::collapsible_if` in `delete_secrets`.
+
 ## [0.1.20] - 2026-10-17
 
 ### Fixed
