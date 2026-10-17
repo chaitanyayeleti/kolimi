@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-10-17
+
+### Fixed
+- **The desktop AUR package failed to build.** `apps/kolimi-desktop` is a
+  separate Cargo workspace with its own `Cargo.lock`, which was not updated for
+  0.1.19 (still 0.1.18 + rustls 0.23.45). The desktop PKGBUILD builds with
+  `cargo build --release --locked`, so `makepkg` aborted with *"cannot update
+  the lock file … because `--locked` was passed"*. The lockfile is synced, and
+  the CI desktop job and the desktop release now build with `--locked` (and
+  check the lockfile), so a stale lockfile cannot reach a release again.
+
 ## [0.1.19] - 2026-10-17
 
 ### Added
