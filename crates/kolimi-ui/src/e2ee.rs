@@ -122,6 +122,68 @@ fn record_epoch(keyring: &Keyring) {
     }
 }
 
+/// Whether the account has a keyring on the server yet (E2EE set up).
+pub async fn keyring_exists() -> Result<bool, String> {
+    let response = api::get("/api/e2ee/keyring").await?;
+    Ok(response.status == 200)
+}
+
+/// First-time E2EE setup: generates the master key and a recovery code,
+/// uploads the keyring, and publishes this user's identity. Returns the
+/// recovery code to show once.
+pub async fn setup(passphrase: &str) -> Result<String, String> {
+    if passphrase.is_empty() {
+        return Err("Enter a passphrase".to_string());
+    }
+    let master = MasterKey::generate().map_err(|_| "could not generate the key".to_string())?;
+    let recovery = kolimi_crypto::generate_recovery_code()
+        .map_err(|_| "could not generate the recovery code".to_string())?;
+    let keyring = Keyring::create(
+        &master,
+        passphrase,
+        &kolimi_crypto::Argon2Params::default(),
+        &recovery,
+    )
+    .map_err(|_| "could not create the keyring".to_string())?;
+    let json = keyring
+        .to_json()
+        .map_err(|_| "could not serialize the keyring".to_string())?;
+    let response = api::dav(
+        "PUT",
+        "/api/e2ee/keyring",
+        Some(json.into_bytes()),
+        &[("Content-Type", "application/json")],
+    )
+    .await?;
+    if response.status != 204 {
+        return Err(format!(
+            "could not upload the keyring (HTTP {})",
+            response.status
+        ));
+    }
+    let identity = kolimi_crypto::Identity::generate()
+        .map_err(|_| "could not generate the identity".to_string())?;
+    let wrapped = master
+        .wrap_identity(&identity)
+        .map_err(|_| "could not wrap the identity".to_string())?;
+    let response = api::send_json(
+        "PUT",
+        "/api/e2ee/identity",
+        &serde_json::json!({
+            "public_key": STANDARD.encode(identity.public_key()),
+            "wrapped_private": STANDARD.encode(&wrapped),
+        }),
+    )
+    .await?;
+    if response.status != 204 {
+        return Err(format!(
+            "could not publish the identity (HTTP {})",
+            response.status
+        ));
+    }
+    Ok(kolimi_crypto::recovery_code_display(&recovery))
+}
+
 /// Loads the account's keyring from the server.
 async fn load_keyring() -> Result<Keyring, String> {
     let response = api::get("/api/e2ee/keyring").await?;

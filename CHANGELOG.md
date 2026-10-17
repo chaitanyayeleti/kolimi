@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-10-17
+
+### Added
+- **E2EE can now be set up from the UI** (first slice of RFC 0009), in both the
+  web app and the desktop's *Accounts & Sync*: when an account has no keyring,
+  the Encryption section offers *Set up encryption* (choose a passphrase),
+  uploads the keyring, publishes your identity, and shows the recovery code
+  once.
+- **Desktop: encrypted folders are configurable from the UI.** The add/edit
+  folder forms take a comma-separated list of relative folders to encrypt, so
+  E2EE no longer requires hand-editing `desktop.json`.
+- **Desktop: E2EE status** (`none` / `locked` / `unlocked`) drives the
+  Encryption section, and *Devices & keys* says to set up encryption first when
+  there is none.
+
+### Changed
+- Desktop *Unlock* now **verifies** the passphrase against the keyring before
+  storing it, so "unlocked" is never a lie.
+- `kolimi-sync`: `setup_keyring`, `keyring_exists`, and `verify_unlock` helpers.
+
+### Notes
+- Encrypt-by-default, opt-out folders, and the WebDAV carve-out (the rest of
+  RFC 0009) remain deferred per decision 0001.
+
 ## [0.1.22] - 2026-10-17
 
 ### Fixed

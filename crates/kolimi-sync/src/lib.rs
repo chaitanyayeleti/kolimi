@@ -464,6 +464,31 @@ pub fn create_keyring_with_params(
     Ok((keyring, recovery))
 }
 
+/// First-time E2EE setup: creates a keyring with `passphrase`, uploads it, and
+/// publishes this user's identity. Returns the recovery code to show once.
+pub async fn setup_keyring(config: &SyncConfig, passphrase: &str) -> Result<String, SyncError> {
+    if passphrase.trim().is_empty() {
+        return Err(SyncError::E2ee(
+            "the passphrase must not be empty".to_string(),
+        ));
+    }
+    let (keyring, recovery) = create_keyring(passphrase)?;
+    upload_keyring(config, &keyring).await?;
+    let mut identity_config = config.clone();
+    identity_config.e2ee = Some(E2eeOptions {
+        passphrase: Some(passphrase.to_string()),
+        recovery_code: None,
+        prf_secret: None,
+        encrypted_roots: config
+            .e2ee
+            .as_ref()
+            .map(|options| options.encrypted_roots.clone())
+            .unwrap_or_default(),
+    });
+    publish_identity(&identity_config).await?;
+    Ok(kolimi_crypto::recovery_code_display(&recovery))
+}
+
 /// Who a share targets.
 #[derive(Debug, Clone)]
 pub enum ShareTarget {
@@ -742,6 +767,23 @@ pub async fn upload_keyring(config: &SyncConfig, keyring: &Keyring) -> Result<()
         });
     }
     Ok(())
+}
+
+/// Whether the account has a keyring on the server yet (E2EE set up).
+pub async fn keyring_exists(config: &SyncConfig) -> Result<bool, SyncError> {
+    let http = Http::new(config)?;
+    let (status, _) = http.get_json("/api/e2ee/keyring").await?;
+    Ok(status == 200)
+}
+
+/// Verifies that the configured unlock material actually opens the keyring.
+/// Shells use it to reject a wrong passphrase before storing it.
+pub async fn verify_unlock(config: &SyncConfig) -> Result<(), SyncError> {
+    let http = Http::new(config)?;
+    match unlock_e2ee(&http, config).await? {
+        Some(_) => Ok(()),
+        None => Err(SyncError::E2ee("no e2ee options configured".to_string())),
+    }
 }
 
 /// Device-enrollment file stored under `.kolimi/device.json` (RFC 0008).

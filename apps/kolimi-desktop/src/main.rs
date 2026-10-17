@@ -458,6 +458,16 @@ fn normalize_remote(remote: &str) -> String {
     }
 }
 
+/// Normalizes a list of encrypted-root paths (relative, no leading/trailing
+/// slashes, no empties).
+fn normalize_roots(roots: Vec<String>) -> Vec<String> {
+    roots
+        .into_iter()
+        .map(|root| root.trim().trim_matches('/').to_string())
+        .filter(|root| !root.is_empty())
+        .collect()
+}
+
 fn short_dir(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
@@ -1033,6 +1043,7 @@ fn add_pair(
     username: String,
     dir: String,
     remote: String,
+    encrypted_roots: Vec<String>,
 ) -> Result<(), String> {
     let local = expand_home(&dir);
     if local.is_empty() {
@@ -1056,7 +1067,7 @@ fn add_pair(
         account.pairs.push(SyncPair {
             local_dir: local,
             remote: normalize_remote(&remote),
-            encrypted_roots: Vec::new(),
+            encrypted_roots: normalize_roots(encrypted_roots),
         });
         settings.clone()
     };
@@ -1102,6 +1113,7 @@ fn update_pair(
     dir: String,
     new_dir: String,
     remote: String,
+    encrypted_roots: Vec<String>,
 ) -> Result<(), String> {
     let local = expand_home(&new_dir);
     if local.is_empty() {
@@ -1133,6 +1145,7 @@ fn update_pair(
             .ok_or_else(|| "directory not found".to_string())?;
         pair.local_dir = local;
         pair.remote = normalize_remote(&remote);
+        pair.encrypted_roots = normalize_roots(encrypted_roots);
         settings.clone()
     };
     save_settings_file(&settings)?;
@@ -1141,9 +1154,10 @@ fn update_pair(
 }
 
 /// Set (or clear, when empty) the E2EE passphrase stored for an account, then
-/// sync so encrypted folders unlock immediately.
+/// sync so encrypted folders unlock immediately. A non-empty passphrase is
+/// verified against the keyring first, so "unlocked" is never a lie.
 #[tauri::command]
-fn set_e2ee_passphrase(
+async fn set_e2ee_passphrase(
     app: AppHandle,
     server: String,
     username: String,
@@ -1152,6 +1166,24 @@ fn set_e2ee_passphrase(
     let key = account_key(&server, &username);
     let mut secrets =
         keyring_get(&key).ok_or_else(|| "sign in to this account first".to_string())?;
+    if !passphrase.trim().is_empty() {
+        let (account, _) = find_account(&app, &server, &username)?;
+        let local = account
+            .pairs
+            .first()
+            .map(|pair| PathBuf::from(&pair.local_dir))
+            .unwrap_or_else(std::env::temp_dir);
+        let mut config = account_config(&account, &secrets, local);
+        config.e2ee = Some(kolimi_sync::E2eeOptions {
+            passphrase: Some(passphrase.clone()),
+            recovery_code: None,
+            prf_secret: None,
+            encrypted_roots: Vec::new(),
+        });
+        kolimi_sync::verify_unlock(&config)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     secrets.e2ee_passphrase = if passphrase.is_empty() {
         None
     } else {
@@ -1160,6 +1192,77 @@ fn set_e2ee_passphrase(
     store_secrets(&key, &secrets);
     run_sync(app);
     Ok(())
+}
+
+/// Whether E2EE is set up for the account: `none`, `locked`, `unlocked`, or
+/// `signed_out` (no password to reach the server).
+#[tauri::command]
+async fn e2ee_status(app: AppHandle, server: String, username: String) -> Result<String, String> {
+    let settings = app
+        .state::<DesktopState>()
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(account) = settings
+        .accounts
+        .into_iter()
+        .find(|account| account.server == server && account.username == username)
+    else {
+        return Ok("signed_out".to_string());
+    };
+    let Some(secrets) = keyring_get(&account_key(&server, &username)) else {
+        return Ok("signed_out".to_string());
+    };
+    if secrets.password.is_empty() {
+        return Ok("signed_out".to_string());
+    }
+    let local = account
+        .pairs
+        .first()
+        .map(|pair| PathBuf::from(&pair.local_dir))
+        .unwrap_or_else(std::env::temp_dir);
+    let config = account_config(&account, &secrets, local);
+    match kolimi_sync::keyring_exists(&config).await {
+        Ok(true) => Ok(if secrets.e2ee_passphrase.is_some() {
+            "unlocked"
+        } else {
+            "locked"
+        }
+        .to_string()),
+        Ok(false) => Ok("none".to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// First-time E2EE setup: creates and uploads a keyring, publishes the
+/// identity, and stores the passphrase. Returns the recovery code to show once.
+#[tauri::command]
+async fn setup_e2ee(
+    app: AppHandle,
+    server: String,
+    username: String,
+    passphrase: String,
+) -> Result<String, String> {
+    if passphrase.trim().is_empty() {
+        return Err("Enter a passphrase".to_string());
+    }
+    let (account, mut secrets) = find_account(&app, &server, &username)?;
+    let local = first_pair_dir(&account)?;
+    let config = account_config(&account, &secrets, local);
+    if kolimi_sync::keyring_exists(&config)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Err("Encryption is already set up for this account".to_string());
+    }
+    let recovery = kolimi_sync::setup_keyring(&config, &passphrase)
+        .await
+        .map_err(|error| error.to_string())?;
+    secrets.e2ee_passphrase = Some(passphrase);
+    store_secrets(&account_key(&server, &username), &secrets);
+    run_sync(app);
+    Ok(recovery)
 }
 
 /// Toggle the "start on login" autostart entry.
@@ -1413,6 +1516,8 @@ fn main() {
             remove_pair,
             update_pair,
             set_e2ee_passphrase,
+            e2ee_status,
+            setup_e2ee,
             set_autostart_enabled,
             sync_now,
             open_account,

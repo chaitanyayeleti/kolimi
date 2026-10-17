@@ -2,8 +2,8 @@ apiVersion: v2
 name: kolimi
 description: Pure-Rust, single-binary self-hosted cloud (files, WebDAV, CalDAV/CardDAV, sync)
 type: application
-version: 0.1.22
-appVersion: "0.1.22"
+version: 0.1.23
+appVersion: "0.1.23"
 home: https://github.com/chaitanyayeleti/kolimi
 sources:
   - https://github.com/chaitanyayeleti/kolimi

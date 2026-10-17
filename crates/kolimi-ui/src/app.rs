@@ -2481,6 +2481,10 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let device_name = RwSignal::new(String::new());
     let enrolling = RwSignal::new(Option::<(i64, [u8; 32], String)>::None);
     let use_recovery = RwSignal::new(false);
+    let has_keyring = RwSignal::new(Option::<bool>::None);
+    let setup_pass = RwSignal::new(String::new());
+    let setup_confirm = RwSignal::new(String::new());
+    let recovery = RwSignal::new(Option::<String>::None);
     let close = move |_| on_close.run(());
 
     let load_devices = Callback::new(move |_: ()| {
@@ -2497,6 +2501,13 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
         if master.get().is_some() {
             load_devices.run(());
         }
+    });
+    Effect::new(move |_| {
+        spawn_local(async move {
+            if let Ok(exists) = crate::e2ee::keyring_exists().await {
+                has_keyring.set(Some(exists));
+            }
+        });
     });
 
     let unlock = move |_| {
@@ -2516,6 +2527,36 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
             match result {
                 Ok(key) => {
                     master.set(Some(key));
+                    busy.set(false);
+                }
+                Err(e) => {
+                    busy.set(false);
+                    error.set(e);
+                }
+            }
+        });
+    };
+
+    let setup = move |_| {
+        let passphrase = setup_pass.get_untracked();
+        if passphrase.is_empty() {
+            error.set("Enter a passphrase".to_string());
+            return;
+        }
+        if passphrase != setup_confirm.get_untracked() {
+            error.set("Passphrases do not match".to_string());
+            return;
+        }
+        busy.set(true);
+        spawn_local(async move {
+            match crate::e2ee::setup(&passphrase).await {
+                Ok(code) => {
+                    match crate::e2ee::unlock(&passphrase).await {
+                        Ok(key) => master.set(Some(key)),
+                        Err(e) => error.set(e),
+                    }
+                    has_keyring.set(Some(true));
+                    recovery.set(Some(code));
                     busy.set(false);
                 }
                 Err(e) => {
@@ -2609,39 +2650,85 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                 <p class="muted">
                     "Your passphrase is used locally and is never sent to the server."
                 </p>
-                <Show when=move || master.get().is_none()>
-                    <label>
-                        {move || {
-                            if use_recovery.get() { "Recovery code" } else { "Passphrase" }
-                        }}
-                        <input
-                            type="password"
-                            autocomplete="off"
-                            prop:value=move || passphrase.get()
-                            on:input=move |ev| passphrase.set(event_target_value(&ev))
-                        />
-                    </label>
+                <Show when=move || recovery.get().is_some()>
+                    <p class="notice">
+                        "Save this recovery code now — it is shown once and is the only other way to unlock."
+                    </p>
+                    <code class="recovery">{move || recovery.get().unwrap_or_default()}</code>
                     <div class="row-actions">
-                        <button class="primary" disabled=move || busy.get() on:click=unlock>
-                            <Icon name="lock"/>
-                            {move || if busy.get() { "Unlocking…" } else { "Unlock" }}
-                        </button>
-                        <button
-                            class="ghost"
-                            on:click=move |_| {
-                                use_recovery.set(!use_recovery.get_untracked());
-                                error.set(String::new());
-                            }
-                        >
-                            {move || {
-                                if use_recovery.get() {
-                                    "Use passphrase"
-                                } else {
-                                    "Use recovery code"
-                                }
-                            }}
-                        </button>
+                        <button on:click=move |_| {
+                            let code = recovery.get_untracked().unwrap_or_default();
+                            spawn_local(async move { crate::api::copy_to_clipboard(&code).await });
+                        }>"Copy"</button>
+                        <button class="primary" on:click=move |_| recovery.set(None)>"I saved it"</button>
                     </div>
+                </Show>
+                <Show when=move || master.get().is_none() && recovery.get().is_none()>
+                    <Show when=move || has_keyring.get() == Some(false)>
+                        <p class="muted">
+                            "Encryption is not set up for this account yet. Choose a passphrase — it never leaves this browser."
+                        </p>
+                        <label>
+                            "New passphrase"
+                            <input
+                                type="password"
+                                autocomplete="new-password"
+                                prop:value=move || setup_pass.get()
+                                on:input=move |ev| setup_pass.set(event_target_value(&ev))
+                            />
+                        </label>
+                        <label>
+                            "Repeat passphrase"
+                            <input
+                                type="password"
+                                autocomplete="new-password"
+                                prop:value=move || setup_confirm.get()
+                                on:input=move |ev| setup_confirm.set(event_target_value(&ev))
+                            />
+                        </label>
+                        <div class="row-actions">
+                            <button class="primary" disabled=move || busy.get() on:click=setup>
+                                <Icon name="lock"/>
+                                {move || {
+                                    if busy.get() { "Setting up…" } else { "Set up encryption" }
+                                }}
+                            </button>
+                        </div>
+                    </Show>
+                    <Show when=move || has_keyring.get() != Some(false)>
+                        <label>
+                            {move || {
+                                if use_recovery.get() { "Recovery code" } else { "Passphrase" }
+                            }}
+                            <input
+                                type="password"
+                                autocomplete="off"
+                                prop:value=move || passphrase.get()
+                                on:input=move |ev| passphrase.set(event_target_value(&ev))
+                            />
+                        </label>
+                        <div class="row-actions">
+                            <button class="primary" disabled=move || busy.get() on:click=unlock>
+                                <Icon name="lock"/>
+                                {move || if busy.get() { "Unlocking…" } else { "Unlock" }}
+                            </button>
+                            <button
+                                class="ghost"
+                                on:click=move |_| {
+                                    use_recovery.set(!use_recovery.get_untracked());
+                                    error.set(String::new());
+                                }
+                            >
+                                {move || {
+                                    if use_recovery.get() {
+                                        "Use passphrase"
+                                    } else {
+                                        "Use recovery code"
+                                    }
+                                }}
+                            </button>
+                        </div>
+                    </Show>
                 </Show>
                 <Show when=move || master.get().is_some()>
                     <p class="notice">"Keyring unlocked for this browser."</p>

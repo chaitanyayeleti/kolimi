@@ -106,6 +106,24 @@ async fn put_keyring(server: &str, username: &str, keyring: &str) {
 }
 
 #[tokio::test]
+async fn setup_keyring_creates_a_usable_keyring() {
+    let server = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("alice");
+    std::fs::create_dir_all(&local).unwrap();
+    let alice = config(&server.url, "alice", &local);
+
+    assert!(!kolimi_sync::keyring_exists(&alice).await.unwrap());
+    let recovery = kolimi_sync::setup_keyring(&alice, E2EE_PASS).await.unwrap();
+    assert!(!recovery.is_empty(), "a recovery code is returned");
+    assert!(kolimi_sync::keyring_exists(&alice).await.unwrap());
+    // The passphrase unlocks the fresh keyring and the identity is published.
+    kolimi_sync::verify_unlock(&alice).await.unwrap();
+
+    server.handle.abort();
+}
+
+#[tokio::test]
 async fn recipient_key_pinning_refuses_a_changed_key() {
     let server = start_server().await;
     let root = tempfile::tempdir().unwrap();

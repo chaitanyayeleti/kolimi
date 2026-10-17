@@ -119,10 +119,20 @@
   async function refresh() {
     const settings = await invoke("get_settings");
     document.getElementById("autostart").checked = settings.autostart;
-    accountsEl.replaceChildren(
-      ...settings.accounts.map(renderAccount),
-      settings.accounts.length ? null : el("div", { class: "card empty" }, "No accounts yet. Add one below.")
-    );
+    // E2EE status per account: none / locked / unlocked / signed_out.
+    const statuses = await Promise.all(settings.accounts.map(async (account) => {
+      if (!account.signed_in) return "signed_out";
+      try {
+        return await invoke("e2ee_status", { server: account.server, username: account.username });
+      } catch (e) {
+        return "unknown";
+      }
+    }));
+    const cards = settings.accounts.map((account, i) => renderAccount(account, statuses[i]));
+    if (!cards.length) {
+      cards.push(el("div", { class: "card empty" }, "No accounts yet. Add one below."));
+    }
+    accountsEl.replaceChildren(...cards);
   }
 
   function renderPair(account, pair) {
@@ -130,9 +140,15 @@
 
     const display = () => {
       li.classList.remove("editing");
-      li.replaceChildren(
+      const roots = pair.encrypted_roots || [];
+      const children = [
         el("span", { class: "path" },
-          pair.local_dir, " ", el("span", { class: "remote" }, "→ " + pair.remote)),
+          pair.local_dir, " ", el("span", { class: "remote" }, "→ " + pair.remote))
+      ];
+      if (roots.length) {
+        children.push(el("div", { class: "muted" }, "encrypted: " + roots.join(", ")));
+      }
+      children.push(
         el("div", { class: "row" },
           el("button", { class: "ghost", onclick: edit }, "Edit"),
           el("button", { class: "danger", onclick: async () => {
@@ -144,22 +160,26 @@
           } }, "Remove")
         )
       );
+      li.replaceChildren(...children);
     };
 
     const edit = () => {
       li.classList.add("editing");
       const dirInput = el("input", { value: pair.local_dir });
       const remoteInput = el("input", { value: pair.remote });
+      const rootsInput = el("input", { value: (pair.encrypted_roots || []).join(", "), placeholder: "e.g. Private, Photos (blank = no encryption)" });
       li.replaceChildren(
         el("div", { class: "field" },
           el("label", {}, "Local folder"), dirInput,
-          el("label", {}, "Remote folder"), remoteInput),
+          el("label", {}, "Remote folder"), remoteInput,
+          el("label", {}, "Encrypted folders (relative, comma-separated)"), rootsInput),
         el("div", { class: "row" },
           el("button", { onclick: async () => {
             try {
               await invoke("update_pair", {
                 server: account.server, username: account.username,
-                dir: pair.local_dir, newDir: dirInput.value, remote: remoteInput.value || "/"
+                dir: pair.local_dir, newDir: dirInput.value, remote: remoteInput.value || "/",
+                encryptedRoots: rootsInput.value.split(",").map(s => s.trim()).filter(Boolean)
               });
               setMsg("Updated " + dirInput.value, "ok");
               refresh();
@@ -174,7 +194,7 @@
     return li;
   }
 
-  function renderAccount(account) {
+  function renderAccount(account, status) {
     const card = el("div", { class: "card" });
 
     card.append(
@@ -214,42 +234,85 @@
     card.append(pairs);
 
     {
-      const pass = el("input", { type: "password", placeholder: "Encryption passphrase", autocomplete: "off" });
-      const actions = [
-        el("button", { onclick: async () => {
-          try {
-            await invoke("set_e2ee_passphrase", { server: account.server, username: account.username, passphrase: pass.value });
-            setMsg("Encryption unlocked", "ok");
-            refresh();
-          } catch (e) { setMsg(String(e), "err"); }
-        } }, "Unlock")
+      const label = {
+        none: "not set up",
+        locked: "locked",
+        unlocked: "unlocked",
+        signed_out: "signed out",
+        unknown: "unknown"
+      }[status] || status;
+      const children = [
+        el("summary", {},
+          "End-to-end encryption ",
+          el("span", { class: "badge " + (status === "unlocked" ? "on" : "off") }, label))
       ];
-      if (account.e2ee_unlocked) {
-        actions.push(el("button", { class: "ghost", onclick: async () => {
-          try {
-            await invoke("set_e2ee_passphrase", { server: account.server, username: account.username, passphrase: "" });
-            setMsg("Encryption passphrase forgotten", "ok");
-            refresh();
-          } catch (e) { setMsg(String(e), "err"); }
-        } }, "Forget"));
-      }
-      card.append(
-        el("details", { class: "e2ee", style: "margin-top:12px" },
-          el("summary", {},
-            "End-to-end encryption ",
-            el("span", { class: "badge " + (account.e2ee_unlocked ? "on" : "off") },
-              account.e2ee_unlocked ? "unlocked" : "locked")),
+
+      if (status === "none") {
+        const setupPass = el("input", { type: "password", placeholder: "New passphrase", autocomplete: "new-password", style: "margin-top:6px" });
+        const setupConfirm = el("input", { type: "password", placeholder: "Repeat passphrase", autocomplete: "new-password", style: "margin-top:6px" });
+        const recoveryOut = el("div", { class: "muted", style: "margin-top:8px" });
+        children.push(
           el("p", { class: "muted", style: "margin:8px 0" },
-            account.e2ee_unlocked
-              ? "Encryption is unlocked — encrypted folders sync, and you can approve new devices."
-              : "Encryption is locked. Enter your passphrase to sync encrypted folders and to approve new devices."),
-          el("label", {}, account.e2ee_unlocked ? "Change passphrase" : "Encryption passphrase"),
-          pass,
-          el("div", { class: "row", style: "margin-top:8px" }, ...actions)
-        )
-      );
+            "Encryption is not set up for this account yet. Choose a passphrase — it never leaves this computer."),
+          el("label", {}, "New passphrase"), setupPass,
+          el("label", {}, "Repeat passphrase"), setupConfirm,
+          el("div", { class: "row", style: "margin-top:8px" },
+            el("button", { class: "primary", onclick: async () => {
+              if (setupPass.value !== setupConfirm.value) { setMsg("Passphrases do not match", "err"); return; }
+              try {
+                const code = await invoke("setup_e2ee", {
+                  server: account.server, username: account.username, passphrase: setupPass.value
+                });
+                recoveryOut.replaceChildren(
+                  el("div", {}, "Recovery code — save it now, it is shown once:"),
+                  el("code", {}, code));
+                setMsg("Encryption set up", "ok");
+                refresh();
+              } catch (e) { setMsg(String(e), "err"); }
+            } }, "Set up encryption")),
+          recoveryOut
+        );
+      } else if (status === "locked") {
+        const pass = el("input", { type: "password", placeholder: "Encryption passphrase", autocomplete: "off", style: "margin-top:6px" });
+        children.push(
+          el("p", { class: "muted", style: "margin:8px 0" },
+            "Encryption is locked. Enter your passphrase to sync encrypted folders and to approve new devices."),
+          el("label", {}, "Encryption passphrase"), pass,
+          el("div", { class: "row", style: "margin-top:8px" },
+            el("button", { class: "primary", onclick: async () => {
+              try {
+                await invoke("set_e2ee_passphrase", { server: account.server, username: account.username, passphrase: pass.value });
+                setMsg("Encryption unlocked", "ok");
+                refresh();
+              } catch (e) { setMsg(String(e), "err"); }
+            } }, "Unlock")));
+      } else if (status === "unlocked") {
+        children.push(
+          el("p", { class: "muted", style: "margin:8px 0" },
+            "Encryption is unlocked — encrypted folders sync, and you can approve new devices."),
+          el("div", { class: "row", style: "margin-top:8px" },
+            el("button", { class: "ghost", onclick: async () => {
+              try {
+                await invoke("set_e2ee_passphrase", { server: account.server, username: account.username, passphrase: "" });
+                setMsg("Encryption passphrase forgotten", "ok");
+                refresh();
+              } catch (e) { setMsg(String(e), "err"); }
+            } }, "Forget passphrase")));
+      } else {
+        children.push(
+          el("p", { class: "muted", style: "margin:8px 0" }, "Sign in to manage encryption."));
+      }
+
+      card.append(el("details", { class: "e2ee", style: "margin-top:12px" }, ...children));
     }
 
+    if (status === "none") {
+      card.append(
+        el("details", { class: "e2ee", style: "margin-top:12px" },
+          el("summary", {}, "Devices & keys"),
+          el("p", { class: "muted", style: "margin:8px 0" },
+            "Set up encryption first (above) — device enrollment transfers your encryption key to another device.")));
+    } else {
     // Device enrollment (RFC 0008) and pinned recipient keys.
     const deviceName = el("input", { placeholder: "e.g. this laptop", style: "margin-top:6px" });
     const enrollOut = el("div", { class: "muted", style: "margin-top:8px" });
@@ -300,7 +363,7 @@
         el("p", { class: "muted", style: "margin:8px 0" },
           "Enroll this machine so it can sync encrypted folders without the passphrase, " +
           "and review the keys pinned for the people you share with."),
-        ...(account.e2ee_unlocked
+        ...(status === "unlocked"
           ? []
           : [el("p", { class: "error" },
               "Unlock encryption above first — approving a device needs your master key.")]),
@@ -337,21 +400,26 @@
       )
     );
     refreshDevices();
+    }
 
     const dirInput = el("input", { placeholder: "~/Kolimi", style: "margin-top:6px" });
     const remoteInput = el("input", { placeholder: "/", style: "margin-top:6px" });
+    const rootsInput = el("input", { placeholder: "e.g. Private, Photos (blank = no encryption)", style: "margin-top:6px" });
     card.append(
       el("div", { style: "margin-top:12px" },
         el("label", {}, "Add a local folder to sync"),
         dirInput,
         el("label", {}, "Remote folder (optional; default /)"),
         remoteInput,
+        el("label", {}, "Encrypted folders (relative, comma-separated)"),
+        rootsInput,
         el("div", { class: "row", style: "margin-top:8px" },
           el("button", { onclick: async () => {
             try {
               await invoke("add_pair", {
                 server: account.server, username: account.username,
-                dir: dirInput.value, remote: remoteInput.value || "/"
+                dir: dirInput.value, remote: remoteInput.value || "/",
+                encryptedRoots: rootsInput.value.split(",").map(s => s.trim()).filter(Boolean)
               });
               setMsg("Added " + dirInput.value, "ok");
               refresh();
