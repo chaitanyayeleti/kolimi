@@ -28,7 +28,7 @@ version = "0.1.18"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/chaitanyayeleti/kolimi"
-rust-version = "1.89"
+rust-version = "1.96"
 
 [workspace.dependencies]
 argon2 = "0.6"

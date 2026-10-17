@@ -37,6 +37,14 @@ follow [Semantic Versioning](https://semver.org/).
   `approve_device`), and the CLI gains `--e2ee-code` and
   `--e2ee-fingerprints`.
 
+### Security
+- **Dependency advisories cleared.** Bumped `rustls` 0.23.45 → 0.23.46 and the
+  `wasmtime` family 49.0.2 → 49.0.3, clearing 17 RUSTSEC advisories published
+  since 0.1.18 (four in rustls; thirteen in `wasmtime`/`wasmtime-wasi`, which
+  matter here because plugins run untrusted code inside wasmtime). This raises
+  the minimum supported Rust version to **1.96** (wasmtime 49.0.3's
+  requirement); `cargo-vet` exemptions are refreshed.
+
 ## [0.1.18] - 2026-10-14
 
 ### Added

@@ -5,7 +5,7 @@ version = "0.1.18"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/chaitanyayeleti/kolimi"
-rust-version = "1.89"
+rust-version = "1.96"
 
 # Deliberately its own workspace: the desktop client pulls the Tauri/webkit
 # stack, which the server workspace does not need to build or lint.
