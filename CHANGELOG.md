@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-10-17
+
+### Changed
+- **The web UI explains failures instead of dumping them.** A missing folder
+  (404) falls back to your files rather than a bare *"Could not list folder"*;
+  a denied folder (403), a server error, and a lost connection each say what
+  happened and are retryable. The sign-in screen now states that the **account
+  password** and the **encryption passphrase** are different things, shows
+  plain-language errors (*incorrect username or password*, *too many attempts —
+  wait a minute*), and tells you when a session expired instead of silently
+  showing the login form again.
+
 ## [0.1.23] - 2026-10-17
 
 ### Added

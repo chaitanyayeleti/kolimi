@@ -316,6 +316,15 @@ fn toggle_theme() {
     }
 }
 
+/// Marks that the session expired, so the login screen can explain why.
+fn mark_session_expired() {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+    {
+        let _ = storage.set_item("kolimi-session-expired", "1");
+    }
+}
+
 /// Formats a Unix-millisecond timestamp as a short relative time.
 fn relative_time(ms: i64) -> String {
     if ms <= 0 {
@@ -368,7 +377,23 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
     let code = RwSignal::new(String::new());
     let needs_code = RwSignal::new(false);
     let error = RwSignal::new(String::new());
+    let notice = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
+
+    // If we were sent here because a session expired, say so once.
+    Effect::new(move |_| {
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+            && storage
+                .get_item("kolimi-session-expired")
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            let _ = storage.remove_item("kolimi-session-expired");
+            notice.set("Your session expired — please sign in again.".to_string());
+        }
+    });
 
     let submit = move |ev: ev::SubmitEvent| {
         ev.prevent_default();
@@ -392,8 +417,23 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
                     needs_code.set(true);
                     error.set("Enter your two-factor code".to_string());
                 }
-                Ok(r) => error.set(r.error().unwrap_or("Sign-in failed").to_string()),
-                Err(e) => error.set(e),
+                Ok(r) if r.status == 401 => {
+                    error.set("Incorrect username or password.".to_string())
+                }
+                Ok(r) if r.status == 429 => {
+                    error.set("Too many attempts — wait a minute, then try again.".to_string())
+                }
+                Ok(r) if r.status == 403 => {
+                    error.set("Sign-in was blocked. Please try again.".to_string())
+                }
+                Ok(r) => error.set(
+                    r.error()
+                        .unwrap_or("Sign-in failed. Please try again.")
+                        .to_string(),
+                ),
+                Err(_) => {
+                    error.set("Couldn't reach the server. Check your connection.".to_string())
+                }
             }
         });
     };
@@ -430,6 +470,9 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
                 <h2>"Sign in to Kolimi"</h2>
                 <p class="muted">"Your self-hosted cloud."</p>
             </div>
+            <Show when=move || !notice.get().is_empty()>
+                <p class="muted">{move || notice.get()}</p>
+            </Show>
             <label>
                 "Username"
                 <input
@@ -448,6 +491,9 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
                     on:input=move |ev| password.set(event_target_value(&ev))
                 />
             </label>
+            <p class="muted">
+                "This is your account password. Your encryption passphrase is separate — you only need it inside the app, to unlock encrypted files."
+            </p>
             <Show when=move || needs_code.get()>
                 <label>
                     "Two-factor or recovery code"
@@ -545,13 +591,18 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         check.forget();
     }
 
+    // Navigation is a signal: setting `nav` loads it, so a missing folder can
+    // fall back to the root without recursive closures.
+    let nav = RwSignal::new("/".to_string());
+    let load = move |next: String| nav.set(next);
     let load_seq = RwSignal::new(0u32);
-    let load = move |target: String| {
+    Effect::new(move |_| {
+        let requested = nav.get();
         loading.set(true);
         let seq = load_seq.get_untracked().wrapping_add(1);
         load_seq.set(seq);
         spawn_local(async move {
-            let url = format!("/api/browse?path={}", encode(&target));
+            let url = format!("/api/browse?path={}", encode(&requested));
             let result = api::get(&url).await;
             // A newer navigation supersedes this response: don't apply it or
             // clear the loading state.
@@ -571,18 +622,35 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         r.body
                             .get("path")
                             .and_then(Value::as_str)
-                            .unwrap_or(&target)
+                            .unwrap_or(&requested)
                             .to_string(),
                     );
                     error.set(String::new());
                 }
-                Ok(r) if r.status == 401 => view.set(View::Login),
-                Ok(r) => error.set(r.error().unwrap_or("Could not list folder").to_string()),
-                Err(e) => error.set(e),
+                Ok(r) if r.status == 401 => {
+                    mark_session_expired();
+                    view.set(View::Login);
+                }
+                Ok(r) if r.status == 404 && requested != "/" => {
+                    // Renamed or removed: show the files instead of an error
+                    // the user cannot act on.
+                    error.set("That folder no longer exists — showing your files.".to_string());
+                    nav.set("/".to_string());
+                }
+                Ok(r) if r.status == 403 => {
+                    error.set("You don't have access to that folder.".to_string());
+                }
+                Ok(r) => error.set(format!(
+                    "Couldn't load this folder (HTTP {}). Please try again.",
+                    r.status
+                )),
+                Err(_) => error.set(
+                    "Couldn't reach the server. Check your connection and try again.".to_string(),
+                ),
             }
             loading.set(false);
         });
-    };
+    });
 
     let load_trash = move || {
         spawn_local(async move {
@@ -593,8 +661,6 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             }
         });
     };
-
-    Effect::new(move |_| load("/".to_string()));
 
     // Toasts fade themselves out. A timer only clears the toast if it still
     // shows the message it was scheduled for, so a stale timer cannot wipe a
