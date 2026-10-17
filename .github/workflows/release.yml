@@ -198,6 +198,15 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
       - uses: azure/setup-helm@v4
+      - name: Set the chart version from the release tag
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then tag="${GITHUB_REF_NAME}"; fi
+          version="${tag#v}"
+          sed -i "s/^version:.*/version: ${version}/" packaging/helm/kolimi/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${version}\"/" packaging/helm/kolimi/Chart.yaml
+          grep -q "^version: ${version}$" packaging/helm/kolimi/Chart.yaml
+          grep -q "^appVersion: \"${version}\"$" packaging/helm/kolimi/Chart.yaml
       - run: |
           mkdir -p dist
           helm package packaging/helm/kolimi --destination dist
