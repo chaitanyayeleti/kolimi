@@ -124,6 +124,46 @@ pub fn is_valid_public_key(key: &[u8; KEY_LEN]) -> bool {
     ensure_contributory(shared.as_bytes()).is_ok()
 }
 
+/// A short, human-comparable code that commits to a device's public key and
+/// an enrollment id (RFC 0008).
+///
+/// Both devices derive it independently — the new device from its own public
+/// key, the approving device from the public key the server returned. A server
+/// that substitutes the device's key therefore yields two different codes, and
+/// the approving device refuses to approve.
+pub fn enrollment_code(device_public: &[u8; KEY_LEN], enrollment_id: i64) -> String {
+    let mut material = Vec::with_capacity(KEY_LEN + 8);
+    material.extend_from_slice(device_public);
+    material.extend_from_slice(&enrollment_id.to_be_bytes());
+    let digest = blake3::derive_key("kolimi-enroll-code-v1", &material);
+    group_hex(&crate::keyring::hex_encode(&digest[..6]), 4)
+}
+
+/// A stable fingerprint of a public key, for out-of-band comparison.
+pub fn fingerprint(public: &[u8; KEY_LEN]) -> String {
+    let digest = blake3::derive_key("kolimi-fingerprint-v1", public);
+    group_hex(&crate::keyring::hex_encode(&digest[..8]), 4)
+}
+
+/// Normalizes a user-entered code or fingerprint: strips separators and
+/// uppercases, so `abcd-ef01` and `ABCD EF01` compare equal.
+pub fn normalize_code(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '-' | ' ' | '\t' | ':'))
+        .flat_map(|c| c.to_uppercase())
+        .collect()
+}
+
+/// Formats lowercase hex into dash-separated uppercase groups.
+fn group_hex(hex: &str, size: usize) -> String {
+    hex.to_uppercase()
+        .as_bytes()
+        .chunks(size)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 /// Deterministic wrap used by the committed test vectors.
 pub fn wrap_with_ephemeral(
     ephemeral_secret: &[u8; KEY_LEN],
@@ -294,6 +334,38 @@ mod tests {
         // The all-zero point is low order: DH yields an all-zero secret.
         assert!(alice.wrap_file_key_for(&[0u8; KEY_LEN], &file_key).is_err());
         assert!(wrap_secret_for(&[0u8; KEY_LEN], &random::<KEY_LEN>().unwrap()).is_err());
+    }
+
+    #[test]
+    fn enrollment_code_binds_key_and_id() {
+        let alice = Identity::generate().unwrap();
+        let mallory = Identity::generate().unwrap();
+        let code = enrollment_code(&alice.public_key(), 7);
+        // Stable for the same key and id.
+        assert_eq!(code, enrollment_code(&alice.public_key(), 7));
+        // A substituted key (the server's attack) changes the code.
+        assert_ne!(code, enrollment_code(&mallory.public_key(), 7));
+        // A different enrollment id changes the code too.
+        assert_ne!(code, enrollment_code(&alice.public_key(), 8));
+        assert_eq!(
+            normalize_code(&code),
+            normalize_code(&code.replace('-', "").to_lowercase())
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_distinct() {
+        let alice = Identity::generate().unwrap();
+        let mallory = Identity::generate().unwrap();
+        assert_eq!(
+            fingerprint(&alice.public_key()),
+            fingerprint(&alice.public_key())
+        );
+        assert_ne!(
+            fingerprint(&alice.public_key()),
+            fingerprint(&mallory.public_key())
+        );
+        assert_eq!(fingerprint(&alice.public_key()).len(), 19); // 4 groups of 4 + dashes
     }
 
     #[test]

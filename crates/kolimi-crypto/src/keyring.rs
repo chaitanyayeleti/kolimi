@@ -13,14 +13,16 @@ pub use crate::keys::Argon2Params;
 use crate::{
     CryptoError,
     keys::{
-        KEY_LEN, RECOVERY_CODE_LEN, kek_from_passphrase, kek_from_prf, kek_from_recovery_code,
-        random, unwrap, wrap,
+        KEY_LEN, RECOVERY_CODE_LEN, hkdf32, kek_from_passphrase, kek_from_prf,
+        kek_from_recovery_code, random, unwrap, wrap,
     },
 };
 
 const PASSPHRASE_AAD: &[u8] = b"kolimi-keyring-v1:passphrase";
 const RECOVERY_AAD: &[u8] = b"kolimi-keyring-v1:recovery";
 const PRF_AAD: &[u8] = b"kolimi-keyring-v1:prf";
+/// Domain separator for the keyring integrity tag.
+const KEYRING_MAC_INFO: &[u8] = b"kolimi-keyring-mac-v1";
 
 /// One wrapped copy of the master key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,8 +72,27 @@ impl Wrap {
 pub struct Keyring {
     /// Keyring format version.
     pub version: u8,
+    /// Monotonic epoch, incremented on every wrap change. A client that has
+    /// seen a higher epoch refuses a lower one, so the server cannot replay
+    /// an older keyring to resurrect a rotated-away secret.
+    #[serde(default)]
+    pub epoch: u64,
     /// Wrapped copies, one per unlock method.
     pub wraps: Vec<Wrap>,
+    /// Integrity tag over `(version, epoch, wraps)`, keyed by a UMK-derived
+    /// key. It stops the server splicing wraps from different keyrings or
+    /// forging a higher epoch. Absent on keyrings created before this field
+    /// existed (verified as legacy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+}
+
+/// The part of the keyring the integrity tag commits to.
+#[derive(Serialize)]
+struct KeyringMacInput<'a> {
+    version: u8,
+    epoch: u64,
+    wraps: &'a [Wrap],
 }
 
 impl Keyring {
@@ -87,11 +108,50 @@ impl Keyring {
     ) -> Result<Self, CryptoError> {
         let mut keyring = Self {
             version: Self::VERSION,
+            epoch: 0,
             wraps: Vec::new(),
+            mac: None,
         };
         keyring.add_passphrase(master_key, passphrase, params)?;
         keyring.add_recovery(master_key, recovery_code)?;
         Ok(keyring)
+    }
+
+    /// Recomputes the integrity tag over the current wraps and epoch.
+    fn seal(&mut self, master_key: &MasterKey) -> Result<(), CryptoError> {
+        let key = hkdf32(master_key.as_bytes(), None, KEYRING_MAC_INFO)?;
+        let input = self.mac_input()?;
+        self.mac = Some(hex_encode(blake3::keyed_hash(&key, &input).as_bytes()));
+        Ok(())
+    }
+
+    /// Bumps the epoch and re-seals after a wrap change.
+    fn bump_and_seal(&mut self, master_key: &MasterKey) -> Result<(), CryptoError> {
+        self.epoch = self.epoch.saturating_add(1);
+        self.seal(master_key)
+    }
+
+    /// Verifies the integrity tag. A no-op for legacy keyrings without one
+    /// (the caller enforces "once a tag has been seen, it must stay").
+    pub fn verify(&self, master_key: &MasterKey) -> Result<(), CryptoError> {
+        let Some(expected) = &self.mac else {
+            return Ok(());
+        };
+        let key = hkdf32(master_key.as_bytes(), None, KEYRING_MAC_INFO)?;
+        let input = self.mac_input()?;
+        if hex_encode(blake3::keyed_hash(&key, &input).as_bytes()) != *expected {
+            return Err(CryptoError::Keyring("integrity check failed".to_string()));
+        }
+        Ok(())
+    }
+
+    fn mac_input(&self) -> Result<Vec<u8>, CryptoError> {
+        serde_json::to_vec(&KeyringMacInput {
+            version: self.version,
+            epoch: self.epoch,
+            wraps: &self.wraps,
+        })
+        .map_err(|error| CryptoError::Keyring(error.to_string()))
     }
 
     /// Adds (or replaces) the passphrase wrap.
@@ -113,7 +173,7 @@ impl Keyring {
             p_cost: params.p_cost,
             wrapped,
         });
-        Ok(())
+        self.bump_and_seal(master_key)
     }
 
     /// Adds (or replaces) the recovery-code wrap.
@@ -126,7 +186,7 @@ impl Keyring {
         let wrapped = wrap(&kek, master_key.as_bytes(), RECOVERY_AAD)?;
         self.wraps.retain(|wrap| wrap.method() != "recovery");
         self.wraps.push(Wrap::Recovery { wrapped });
-        Ok(())
+        self.bump_and_seal(master_key)
     }
 
     /// Adds (or replaces) the passkey-PRF wrap.
@@ -139,7 +199,7 @@ impl Keyring {
         let wrapped = wrap(&kek, master_key.as_bytes(), PRF_AAD)?;
         self.wraps.retain(|wrap| wrap.method() != "prf");
         self.wraps.push(Wrap::Prf { wrapped });
-        Ok(())
+        self.bump_and_seal(master_key)
     }
 
     /// Unlocks the master key with a passphrase.
@@ -163,7 +223,9 @@ impl Keyring {
             kek_from_passphrase(passphrase, salt, &params).map_err(|_| CryptoError::Unlock)?,
         );
         let bytes = unwrap(&kek, wrapped, PASSPHRASE_AAD).map_err(|_| CryptoError::Unlock)?;
-        Ok(MasterKey::from_bytes(bytes))
+        let master = MasterKey::from_bytes(bytes);
+        self.verify(&master)?;
+        Ok(master)
     }
 
     /// Unlocks the master key with the recovery code.
@@ -179,7 +241,9 @@ impl Keyring {
         let kek =
             Zeroizing::new(kek_from_recovery_code(recovery_code).map_err(|_| CryptoError::Unlock)?);
         let bytes = unwrap(&kek, wrapped, RECOVERY_AAD).map_err(|_| CryptoError::Unlock)?;
-        Ok(MasterKey::from_bytes(bytes))
+        let master = MasterKey::from_bytes(bytes);
+        self.verify(&master)?;
+        Ok(master)
     }
 
     /// Unlocks the master key with a passkey PRF output.
@@ -190,7 +254,9 @@ impl Keyring {
         };
         let kek = Zeroizing::new(kek_from_prf(prf_output).map_err(|_| CryptoError::Unlock)?);
         let bytes = unwrap(&kek, wrapped, PRF_AAD).map_err(|_| CryptoError::Unlock)?;
-        Ok(MasterKey::from_bytes(bytes))
+        let master = MasterKey::from_bytes(bytes);
+        self.verify(&master)?;
+        Ok(master)
     }
 
     /// Which unlock methods are available.
@@ -369,6 +435,53 @@ mod tests {
             code
         );
         assert!(recovery_code_parse("nope").is_err());
+    }
+
+    #[test]
+    fn integrity_tag_detects_splice_and_epoch_forgery() {
+        let master = MasterKey::generate().unwrap();
+        let recovery = generate_recovery_code().unwrap();
+        let keyring = Keyring::create(&master, "correct horse", &fast_params(), &recovery).unwrap();
+        assert!(keyring.mac.is_some(), "new keyrings are tagged");
+        assert_eq!(keyring.epoch, 2, "passphrase + recovery wraps");
+        assert!(keyring.verify(&master).is_ok());
+
+        // Splice: the server mixes in a wrap from another keyring.
+        let other = Keyring::create(&master, "other horse", &fast_params(), &recovery).unwrap();
+        let mut spliced = keyring.clone();
+        spliced.wraps.push(other.wraps[0].clone());
+        assert!(spliced.verify(&master).is_err());
+
+        // Epoch forgery: the server claims a higher epoch to defeat a
+        // client-side rollback check.
+        let mut forged = keyring.clone();
+        forged.epoch += 10;
+        assert!(forged.verify(&master).is_err());
+
+        // The tag is keyed by the master key.
+        let other_master = MasterKey::generate().unwrap();
+        assert!(keyring.verify(&other_master).is_err());
+
+        // Legacy keyrings (no tag) verify as a no-op.
+        let mut legacy = keyring.clone();
+        legacy.mac = None;
+        assert!(legacy.verify(&master).is_ok());
+    }
+
+    #[test]
+    fn wrap_changes_bump_the_epoch_and_reseal() {
+        let master = MasterKey::generate().unwrap();
+        let recovery = generate_recovery_code().unwrap();
+        let mut keyring =
+            Keyring::create(&master, "correct horse", &fast_params(), &recovery).unwrap();
+        let epoch = keyring.epoch;
+        keyring.add_prf(&master, &[7u8; 32]).unwrap();
+        assert_eq!(keyring.epoch, epoch + 1);
+        assert!(keyring.verify(&master).is_ok());
+        assert_eq!(
+            keyring.unlock_with_prf(&[7u8; 32]).unwrap().as_bytes(),
+            master.as_bytes()
+        );
     }
 
     #[test]

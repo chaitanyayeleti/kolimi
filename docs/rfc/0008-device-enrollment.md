@@ -51,6 +51,24 @@ new device D:
 domain-separated from share wrapping, so a share ciphertext can never be
 replayed as an enrollment.
 
+### Approval code
+
+Approval is only meaningful if the approving device can tell that the
+public key it is wrapping the UMK for really belongs to the new device
+and not to the server. Both devices therefore derive a short code that
+commits to the key and the enrollment id:
+
+```text
+code = BLAKE3("kolimi-enroll-code-v1" ‖ device_public_key ‖ id)  (6 bytes → 12 hex)
+```
+
+The new device computes it from its own key; the approving device
+computes it from the key the server returned. A substituted key yields a
+different code, so the operator sees a mismatch and the approving device
+refuses. The code is a commitment, not a secret: the server can relay it,
+but producing two different keys with the same code requires a BLAKE3
+collision.
+
 ## Data model
 
 ```sql
@@ -71,13 +89,14 @@ janitor. `wrapped_master_key` stays NULL until approved.
 
 1. **New device D** (authenticated by password/passkey, *not* E2EE-unlocked)
    `POST /api/e2ee/enrollments {device_name, device_public_key}` →
-   `{id, expires_at}`. D shows a short **code** (derived from `id` + a
-   random suffix) and polls `GET /api/e2ee/enrollments/{id}`.
-2. **Approving device A** (unlocked, holds the UMK) lists
-   `GET /api/e2ee/enrollments`, sees D's name + public key, and confirms
-   the code matches D. A computes `wrapped = wrap_secret_for(D.public, UMK)`
-   and `POST /api/e2ee/enrollments/{id}/approve {wrapped_master_key}`.
-   The server registers D in `e2ee_devices`.
+   `{id, expires_at}`. D derives the approval **code** from its own key and
+   the id (above) and polls `GET /api/e2ee/enrollments/{id}`.
+2. **Approving device A** (unlocked, holds the UMK) fetches the pending
+   enrollment, sees D's name, key fingerprint, and the **code derived from
+   the key the server returned**, and the operator confirms it matches D's.
+   A computes `wrapped = wrap_secret_for(D.public, UMK)` and
+   `POST /api/e2ee/enrollments/{id}/approve {wrapped_master_key}`. The
+   server registers D in `e2ee_devices`.
 3. **D** fetches `GET /api/e2ee/enrollments/{id}` → `{wrapped_master_key}`,
    runs `unwrap_secret(device_secret, wrapped)` → UMK, and stores it in the
    OS keystore (or re-wraps it under a local passkey/PRF). Enrollment is
@@ -96,8 +115,9 @@ janitor. `wrapped_master_key` stays NULL until approved.
 
 - **No UMK rotation on revocation** (that is MLS / v2.1). A stolen device
   that already synced the UMK keeps decrypting data it had access to.
-- Code UX: short numeric code vs QR payload; the CLI prints the code, a
-  future UI shows a QR.
+- Code UX: the 12-hex code is implemented (the CLI prints it; the approving
+  device shows the name, fingerprint, and code). A QR payload for camera
+  comparison remains a UI nicety.
 - Whether an approved device should also add a passphrase/PRF wrap of its
   own to the server keyring (nice for device-independent unlock) or keep
   the UMK device-local only. Leaning: device-local by default.

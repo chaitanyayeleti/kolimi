@@ -31,8 +31,9 @@ mod keys;
 pub use error::CryptoError;
 pub use file::FileKey;
 pub use identity::{
-    DEVICE_KEY_LEN, Identity, SHARE_KEY_LEN, is_valid_public_key, unwrap_secret, wrap_secret_for,
-    wrap_secret_with_ephemeral_nonce, wrap_with_ephemeral, wrap_with_ephemeral_nonce,
+    DEVICE_KEY_LEN, Identity, SHARE_KEY_LEN, enrollment_code, fingerprint, is_valid_public_key,
+    normalize_code, unwrap_secret, wrap_secret_for, wrap_secret_with_ephemeral_nonce,
+    wrap_with_ephemeral, wrap_with_ephemeral_nonce,
 };
 pub use keyring::{
     Keyring, Wrap, generate_recovery_code, hex_decode, hex_encode, recovery_code_display,

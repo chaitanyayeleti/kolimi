@@ -6,6 +6,37 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **E2EE hardening: three server-trust gaps closed.**
+  - **Device enrollment approval code** (RFC 0008). The new device and the
+    approving device each derive a short code that commits to the device's
+    public key and the enrollment id
+    (`BLAKE3("kolimi-enroll-code-v1" ‖ device_public_key ‖ id)`).
+    `--e2ee-enroll` prints it; `--e2ee-approve` shows the server's key
+    fingerprint and requires the operator to confirm the code, refusing a
+    mismatch. Previously the approving device wrapped the master key for
+    whatever public key the server returned, so a malicious server could
+    substitute its own key and receive the user master key.
+  - **Recipient-key pinning (trust on first use).** `share_path` pins each
+    recipient's published X25519 key in `.kolimi/known_keys.json` and refuses
+    to wrap file keys for a key that changed, printing both fingerprints
+    (`--e2ee-fingerprints` lists the pins). This stops a server substituting a
+    recipient key to receive shared file keys.
+  - **Keyring integrity tag and anti-rollback.** Keyrings now carry a monotonic
+    `epoch` and an integrity tag keyed by a UMK-derived key, so the server
+    cannot splice wraps across keyrings or forge a higher epoch; a client that
+    has seen a tagged keyring refuses an untagged one and refuses an `epoch`
+    lower than the highest it has accepted, so a rotated-away passphrase or
+    recovery code cannot be resurrected.
+
+### Changed
+- **Device enrollment is two-phase** in `kolimi-sync`
+  (`start_enrollment` / `finish_enrollment`) so the code can be shown before
+  approval; `approve_device` now takes the confirmed code. The FFI mirrors it
+  (`start_enrollment`, `finish_enrollment`, `pending_enrollment`,
+  `approve_device`), and the CLI gains `--e2ee-code` and
+  `--e2ee-fingerprints`.
+
 ## [0.1.18] - 2026-10-14
 
 ### Added

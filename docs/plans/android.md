@@ -84,7 +84,7 @@ Today `kolimi-ffi` exposes only: build a client, `sync_once`, `e2ee_setup`
 | --- | --- | --- |
 | `SyncAuth` (password **or** bearer token) in `FfiSyncConfig` | mobile should authenticate with the session token, not a stored password (§6) | `kolimi-sync::Http`, `kolimi-ffi` |
 | `list_remote_tree()` / `remote_changed_since()` (optional) | if we want the sync *status* screen to show the server side without Kotlin HTTP | `kolimi-sync` |
-| `enroll_device()` / `forget_device()` | expose RFC 0008 enrollment to the app (functions already exist in `kolimi-sync`) | `kolimi-ffi` |
+| `start_enrollment()` / `finish_enrollment()` / `pending_enrollment()` / `approve_device(code)` | RFC 0008 enrollment, with the key-committing approval code | `kolimi-ffi` |
 | `is_locked()` / `Locked` error | distinguish "needs passphrase" from a hard failure (matches RFC 0011) | `kolimi-ffi` |
 
 Everything else (browse, preview, upload UI, trash, shares) stays in Kotlin's

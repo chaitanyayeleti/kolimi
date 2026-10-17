@@ -27,8 +27,8 @@ use std::io::Write;
 
 use kolimi_chunk::{ChunkRef, Hash, Manifest, chunker};
 use kolimi_crypto::{
-    Argon2Params, FileKey, Identity, Keyring, MasterKey, generate_recovery_code, hex_decode,
-    hex_encode, recovery_code_parse,
+    Argon2Params, CryptoError, FileKey, Identity, Keyring, MasterKey, enrollment_code, fingerprint,
+    generate_recovery_code, hex_decode, hex_encode, normalize_code, recovery_code_parse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -342,23 +342,33 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
         .as_str()
         .ok_or_else(|| SyncError::E2ee("malformed keyring response".to_string()))?;
     let keyring = Keyring::from_json(keyring_json)?;
+    // Anti-rollback: once this device has seen an integrity-tagged keyring, the
+    // server must not serve an untagged (legacy) one, nor an older epoch.
+    let seen_epoch = read_keyring_epoch(&config.local_dir)?;
+    if seen_epoch > 0 && keyring.mac.is_none() {
+        return Err(SyncError::E2ee(
+            "keyring downgrade detected: the server offered a keyring without its integrity tag; \
+             refusing to unlock"
+                .to_string(),
+        ));
+    }
     let master = if let Some(passphrase) = &options.passphrase {
         keyring
             .unlock_with_passphrase(passphrase)
-            .map_err(|_| SyncError::Locked("wrong encryption passphrase".to_string()))?
+            .map_err(|error| unlock_failure(error, "wrong encryption passphrase"))?
     } else if let Some(code) = &options.recovery_code {
         let code = recovery_code_parse(code)?;
         keyring
             .unlock_with_recovery(&code)
-            .map_err(|_| SyncError::Locked("wrong recovery code".to_string()))?
+            .map_err(|error| unlock_failure(error, "wrong recovery code"))?
     } else if let Some(prf) = &options.prf_secret {
         let prf: [u8; 32] = prf
             .as_slice()
             .try_into()
             .map_err(|_| SyncError::E2ee("PRF secret must be exactly 32 bytes".to_string()))?;
-        keyring.unlock_with_prf(&prf).map_err(|_| {
-            SyncError::Locked("passkey (PRF) does not unlock the keyring".to_string())
-        })?
+        keyring
+            .unlock_with_prf(&prf)
+            .map_err(|error| unlock_failure(error, "passkey (PRF) does not unlock the keyring"))?
     } else if let Some(device) = load_device_file(&config.local_dir)? {
         // Enrolled device: unlock the master key from the device key, whether
         // it lives in the OS keystore or (fallback) the local device file.
@@ -375,6 +385,24 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
             "enter your encryption passphrase to unlock these folders".to_string(),
         ));
     };
+    // Verify the integrity tag (this also covers the device-enrollment path,
+    // where the master key does not come from a wrap) and refuse a rolled-back
+    // keyring so a rotated-away secret cannot be resurrected.
+    keyring.verify(&master).map_err(|_| {
+        SyncError::E2ee(
+            "keyring integrity check failed (tampered or spliced); refusing to unlock".to_string(),
+        )
+    })?;
+    if keyring.epoch < seen_epoch {
+        return Err(SyncError::E2ee(format!(
+            "keyring rollback detected: the server offered epoch {}, we have seen {seen_epoch}; \
+             refusing to unlock",
+            keyring.epoch
+        )));
+    }
+    if keyring.epoch > seen_epoch {
+        write_keyring_epoch(&config.local_dir, keyring.epoch)?;
+    }
     let identity = ensure_identity(http, &master).await?;
     Ok(Some(E2ee {
         master,
@@ -542,6 +570,9 @@ pub async fn share_path(
                 .map_err(|error| SyncError::E2ee(format!("{member} key: {error}")))?
                 .try_into()
                 .map_err(|_| SyncError::E2ee(format!("{member} key must be 32 bytes")))?;
+        // Trust on first use: pin the recipient's key, and refuse a share if a
+        // pinned key changes (a possible server-side key substitution).
+        check_recipient_key(&config.local_dir, &member, &public_key)?;
         recipients.push((member, public_key));
     }
     if recipients.is_empty() {
@@ -858,18 +889,144 @@ fn resolve_device_secret(local: &Path, file: &DeviceFile) -> Result<Vec<u8>, Syn
     }
 }
 
-/// Enrolls this device (RFC 0008): creates an enrollment, waits for an
-/// unlocked device to approve it, unwraps the master key, and writes
-/// `.kolimi/device.json`. Returns the enrollment id.
-pub async fn enroll_device(config: &SyncConfig, device_name: &str) -> Result<i64, SyncError> {
+/// Path of the pinned recipient-key store (TOFU, RFC 0007 sharing).
+fn known_keys_path(local: &Path) -> PathBuf {
+    local.join(".kolimi").join("known_keys.json")
+}
+
+fn load_known_keys(local: &Path) -> Result<BTreeMap<String, String>, SyncError> {
+    match std::fs::read(known_keys_path(local)) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn save_known_keys(local: &Path, keys: &BTreeMap<String, String>) -> Result<(), SyncError> {
+    let dir = local.join(".kolimi");
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join("known_keys.json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(keys)?)?;
+    std::fs::rename(&tmp, known_keys_path(local))?;
+    Ok(())
+}
+
+/// Renders a stored pinned key (hex) as a fingerprint.
+fn pin_fingerprint(pinned_hex: &str) -> String {
+    hex_decode(pinned_hex)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+        .map(|key| fingerprint(&key))
+        .unwrap_or_else(|| pinned_hex.to_string())
+}
+
+/// Trust-on-first-use check for a recipient's published key: pin it on first
+/// use, and refuse a share when a pinned key changes (a possible server-side
+/// key substitution) until the user re-pins it.
+fn check_recipient_key(local: &Path, member: &str, public_key: &[u8; 32]) -> Result<(), SyncError> {
+    let mut keys = load_known_keys(local)?;
+    let hex = hex_encode(public_key);
+    match keys.get(member) {
+        Some(pinned) if pinned != &hex => Err(SyncError::E2ee(format!(
+            "{member}'s encryption key changed (pinned {}, server offered {}) — refusing to share. \
+             Verify the new fingerprint out of band, then delete {} to re-pin.",
+            pin_fingerprint(pinned),
+            fingerprint(public_key),
+            known_keys_path(local).display(),
+        ))),
+        Some(_) => Ok(()),
+        None => {
+            keys.insert(member.to_string(), hex);
+            save_known_keys(local, &keys)
+        }
+    }
+}
+
+/// The recipient keys pinned on this device (member -> fingerprint), for
+/// out-of-band verification.
+pub fn known_recipient_keys(local: &Path) -> Result<Vec<(String, String)>, SyncError> {
+    Ok(load_known_keys(local)?
+        .into_iter()
+        .map(|(member, hex)| (member, pin_fingerprint(&hex)))
+        .collect())
+}
+
+/// Path of the highest keyring epoch this device has accepted.
+fn keyring_epoch_path(local: &Path) -> PathBuf {
+    local.join(".kolimi").join("keyring.epoch")
+}
+
+fn read_keyring_epoch(local: &Path) -> Result<u64, SyncError> {
+    match std::fs::read_to_string(keyring_epoch_path(local)) {
+        Ok(text) => Ok(text.trim().parse().unwrap_or(0)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_keyring_epoch(local: &Path, epoch: u64) -> Result<(), SyncError> {
+    let dir = local.join(".kolimi");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(keyring_epoch_path(local), epoch.to_string())?;
+    Ok(())
+}
+
+/// Maps an unlock failure: an integrity-tag failure means tampering (not a
+/// wrong secret), so it must not be reported as the "locked" state.
+fn unlock_failure(error: CryptoError, locked: &str) -> SyncError {
+    match error {
+        CryptoError::Keyring(message) => {
+            SyncError::E2ee(format!("keyring integrity check failed: {message}"))
+        }
+        _ => SyncError::Locked(locked.to_string()),
+    }
+}
+
+/// Details of a device enrollment (RFC 0008), shown for comparison.
+#[derive(Debug, Clone)]
+pub struct Enrollment {
+    /// Server-side enrollment id.
+    pub id: i64,
+    /// Device label.
+    pub name: String,
+    /// Short code both devices must show. It commits to the device's public
+    /// key and the enrollment id, so a substituted key yields a different code.
+    pub code: String,
+    /// Fingerprint of the device's public key.
+    pub fingerprint: String,
+}
+
+/// A device enrollment this client started, holding its key material until the
+/// approving device approves it.
+pub struct PendingDevice {
+    /// Details to display (id, name, code, fingerprint).
+    pub details: Enrollment,
+    device: Identity,
+}
+
+impl PendingDevice {
+    /// The enrollment id.
+    pub fn id(&self) -> i64 {
+        self.details.id
+    }
+}
+
+/// Starts a device enrollment (RFC 0008): generates this device's key, creates
+/// the enrollment, and returns the code to compare on the approving device.
+/// Call [`finish_enrollment`] to wait for approval and persist the device key.
+pub async fn start_enrollment(
+    config: &SyncConfig,
+    device_name: &str,
+) -> Result<PendingDevice, SyncError> {
     let http = Http::new(config)?;
     let device = Identity::generate()?;
+    let public = device.public_key();
     let (status, body) = http
         .post_json(
             "/api/e2ee/enrollments",
             &serde_json::json!({
                 "device_name": device_name,
-                "device_public_key": STANDARD.encode(device.public_key()),
+                "device_public_key": STANDARD.encode(public),
             }),
         )
         .await?;
@@ -882,6 +1039,25 @@ pub async fn enroll_device(config: &SyncConfig, device_name: &str) -> Result<i64
     let id = body["id"]
         .as_i64()
         .ok_or_else(|| SyncError::E2ee("malformed enrollment response".to_string()))?;
+    Ok(PendingDevice {
+        details: Enrollment {
+            id,
+            name: device_name.to_string(),
+            code: enrollment_code(&public, id),
+            fingerprint: fingerprint(&public),
+        },
+        device,
+    })
+}
+
+/// Waits for an enrollment to be approved, unwraps the master key, and writes
+/// `.kolimi/device.json`. Returns the enrollment id.
+pub async fn finish_enrollment(
+    config: &SyncConfig,
+    pending: &PendingDevice,
+) -> Result<i64, SyncError> {
+    let http = Http::new(config)?;
+    let id = pending.details.id;
 
     // Wait for an unlocked device to approve (up to five minutes).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
@@ -907,21 +1083,21 @@ pub async fn enroll_device(config: &SyncConfig, device_name: &str) -> Result<i64
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     };
 
-    // Verify the wrap opens with our key before persisting anything; keep
-    // the unwrapped master key zeroized on drop.
+    // Verify the wrap opens with our key before persisting anything; keep the
+    // unwrapped master key zeroized on drop.
     let _master: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(
-        kolimi_crypto::unwrap_secret(&device.private_bytes(), &wrapped)?,
+        kolimi_crypto::unwrap_secret(&pending.device.private_bytes(), &wrapped)?,
     );
 
-    let public_key = STANDARD.encode(device.public_key());
-    let secret = hex_encode(&device.private_bytes());
+    let public_key = STANDARD.encode(pending.device.public_key());
+    let secret = hex_encode(&pending.device.private_bytes());
     // Prefer the OS keystore; keep the secret in the `0600` file only when no
     // keystore is available (headless server, or a build without the feature).
     let in_keystore = keystore_store(&public_key, &secret);
     write_device_file(
         &config.local_dir,
         &DeviceFile {
-            name: device_name.to_string(),
+            name: pending.details.name.clone(),
             device_secret: if in_keystore { String::new() } else { secret },
             wrapped_master_key: STANDARD.encode(&wrapped),
             device_public_key: public_key,
@@ -930,16 +1106,22 @@ pub async fn enroll_device(config: &SyncConfig, device_name: &str) -> Result<i64
     Ok(id)
 }
 
-/// Approves a pending enrollment by wrapping this (unlocked) device's master
-/// key for the new device. Returns the new device's name.
-pub async fn approve_device(config: &SyncConfig, id: i64) -> Result<String, SyncError> {
+/// Fetches a pending enrollment's details — name, key fingerprint, and the
+/// code to compare with the new device — so an approving device can verify
+/// them before approving.
+pub async fn pending_enrollment(config: &SyncConfig, id: i64) -> Result<Enrollment, SyncError> {
     let http = Http::new(config)?;
-    let e2ee = unlock_e2ee(&http, config).await?.ok_or_else(|| {
-        SyncError::E2ee(
-            "approving needs an unlock secret (passphrase, recovery code or PRF)".into(),
-        )
-    })?;
+    let (name, public) = fetch_pending(&http, id).await?;
+    Ok(Enrollment {
+        id,
+        name,
+        code: enrollment_code(&public, id),
+        fingerprint: fingerprint(&public),
+    })
+}
 
+/// Fetches a pending enrollment's device name and public key.
+async fn fetch_pending(http: &Http, id: i64) -> Result<(String, [u8; 32]), SyncError> {
     let path = format!("/api/e2ee/enrollments/{id}");
     let (status, body) = http.get_json(&path).await?;
     if status != 200 {
@@ -959,6 +1141,36 @@ pub async fn approve_device(config: &SyncConfig, id: i64) -> Result<String, Sync
     let public: [u8; 32] = public
         .try_into()
         .map_err(|_| SyncError::E2ee("device public key must be 32 bytes".to_string()))?;
+    Ok((name, public))
+}
+
+/// Approves a pending enrollment by wrapping this (unlocked) device's master
+/// key for the new device.
+///
+/// `expected_code` must be the code shown on the new device: it commits to the
+/// device's public key, so a server that substituted the key produces a
+/// mismatch here and the approval is refused. Returns the new device's name.
+pub async fn approve_device(
+    config: &SyncConfig,
+    id: i64,
+    expected_code: &str,
+) -> Result<String, SyncError> {
+    let http = Http::new(config)?;
+    let e2ee = unlock_e2ee(&http, config).await?.ok_or_else(|| {
+        SyncError::E2ee(
+            "approving needs an unlock secret (passphrase, recovery code or PRF)".into(),
+        )
+    })?;
+
+    let (name, public) = fetch_pending(&http, id).await?;
+    let code = enrollment_code(&public, id);
+    if normalize_code(&code) != normalize_code(expected_code) {
+        return Err(SyncError::E2ee(format!(
+            "enrollment code mismatch for “{name}”: the server offered key {} but you confirmed a \
+             different code. This may mean the server substituted the device key — refusing to approve.",
+            fingerprint(&public),
+        )));
+    }
     let wrapped = kolimi_crypto::wrap_secret_for(&public, e2ee.master.as_bytes())?;
 
     let approve = format!("/api/e2ee/enrollments/{id}/approve");

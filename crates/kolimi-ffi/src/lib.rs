@@ -9,7 +9,7 @@
 
 uniffi::setup_scaffolding!();
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use kolimi_sync::{E2eeOptions, SyncConfig, SyncReport};
 
@@ -66,6 +66,45 @@ impl From<SyncReport> for FfiSyncReport {
     }
 }
 
+/// A device enrollment (RFC 0008), shown for comparison.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiEnrollment {
+    /// Server-side enrollment id.
+    pub id: i64,
+    /// Device label.
+    pub name: String,
+    /// Short code both devices must show. It commits to the device's public
+    /// key, so a substituted key yields a different code.
+    pub code: String,
+    /// Fingerprint of the device's public key.
+    pub fingerprint: String,
+}
+
+impl From<&kolimi_sync::Enrollment> for FfiEnrollment {
+    fn from(enrollment: &kolimi_sync::Enrollment) -> Self {
+        Self {
+            id: enrollment.id,
+            name: enrollment.name.clone(),
+            code: enrollment.code.clone(),
+            fingerprint: enrollment.fingerprint.clone(),
+        }
+    }
+}
+
+/// Maps a core E2EE/sync failure across the FFI boundary.
+fn e2ee_error(error: kolimi_sync::SyncError) -> FfiError {
+    FfiError::E2ee {
+        message: error.to_string(),
+    }
+}
+
+/// The enrollment-state mutex was poisoned by a panic.
+fn lock_poisoned() -> FfiError {
+    FfiError::E2ee {
+        message: "enrollment state lock poisoned".to_string(),
+    }
+}
+
 /// Errors crossing the FFI boundary.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -95,6 +134,8 @@ pub enum FfiError {
 #[derive(uniffi::Object)]
 pub struct KolimiSync {
     config: SyncConfig,
+    /// A device enrollment started by `start_enrollment`, awaiting approval.
+    pending: Mutex<Option<kolimi_sync::PendingDevice>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -121,6 +162,7 @@ impl KolimiSync {
                 local_dir: config.local_dir.into(),
                 e2ee,
             },
+            pending: Mutex::new(None),
         })
     }
 
@@ -141,14 +183,48 @@ impl KolimiSync {
             })
     }
 
-    /// Enrolls this device (RFC 0008): creates an enrollment and waits for an
-    /// already-unlocked device to approve it. Returns the enrollment id.
-    pub async fn enroll_device(&self, device_name: String) -> Result<i64, FfiError> {
-        kolimi_sync::enroll_device(&self.config, &device_name)
+    /// Starts a device enrollment (RFC 0008): creates it and returns the code
+    /// to compare on an already-unlocked device. Call `finish_enrollment` to
+    /// wait for approval and persist the device key.
+    pub async fn start_enrollment(&self, device_name: String) -> Result<FfiEnrollment, FfiError> {
+        let pending = kolimi_sync::start_enrollment(&self.config, &device_name)
             .await
-            .map_err(|error| FfiError::E2ee {
-                message: error.to_string(),
-            })
+            .map_err(e2ee_error)?;
+        let details = FfiEnrollment::from(&pending.details);
+        *self.pending.lock().map_err(|_| lock_poisoned())? = Some(pending);
+        Ok(details)
+    }
+
+    /// Waits for the in-progress enrollment to be approved and persists the
+    /// device key. Returns the enrollment id.
+    pub async fn finish_enrollment(&self) -> Result<i64, FfiError> {
+        let pending = {
+            let mut guard = self.pending.lock().map_err(|_| lock_poisoned())?;
+            guard.take()
+        }
+        .ok_or_else(|| FfiError::E2ee {
+            message: "no enrollment in progress".to_string(),
+        })?;
+        kolimi_sync::finish_enrollment(&self.config, &pending)
+            .await
+            .map_err(e2ee_error)
+    }
+
+    /// Fetches a pending enrollment's details (name, fingerprint, code) so an
+    /// approving device can show them before approving.
+    pub async fn pending_enrollment(&self, id: i64) -> Result<FfiEnrollment, FfiError> {
+        kolimi_sync::pending_enrollment(&self.config, id)
+            .await
+            .map(|details| FfiEnrollment::from(&details))
+            .map_err(e2ee_error)
+    }
+
+    /// Approves a pending enrollment. `code` must be the code shown on the new
+    /// device; a mismatch (e.g. a substituted key) refuses the approval.
+    pub async fn approve_device(&self, id: i64, code: String) -> Result<String, FfiError> {
+        kolimi_sync::approve_device(&self.config, id, &code)
+            .await
+            .map_err(e2ee_error)
     }
 
     /// Forgets this device's local key material (the OS-keystore entry and

@@ -6,7 +6,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
-use std::time::Duration;
 
 use kolimi_auth::password::hash_password;
 use kolimi_crypto::Argon2Params;
@@ -72,16 +71,6 @@ fn passphrase_options() -> E2eeOptions {
     }
 }
 
-async fn pending_enrollments(server: &str) -> serde_json::Value {
-    let response = reqwest::Client::new()
-        .get(format!("{server}/api/e2ee/enrollments"))
-        .basic_auth("alice", Some(PASS))
-        .send()
-        .await
-        .unwrap();
-    response.json().await.unwrap_or(serde_json::Value::Null)
-}
-
 #[tokio::test]
 async fn device_enrollment_transfers_the_master_key() {
     let server = start_server().await;
@@ -96,28 +85,36 @@ async fn device_enrollment_transfers_the_master_key() {
         .await
         .unwrap();
 
-    // Device B enrolls (spawned; it polls until approved).
+    // Device B: start the enrollment and get the code to display.
     let enroll_config = config(&server.url, device_b.path(), None);
-    let enroll = tokio::spawn({
+    let pending = kolimi_sync::start_enrollment(&enroll_config, "laptop")
+        .await
+        .unwrap();
+    let id = pending.id();
+    let code = pending.details.code.clone();
+
+    // Device A: fetch the pending enrollment and compare the code.
+    let pending_a = kolimi_sync::pending_enrollment(&approve_config, id)
+        .await
+        .unwrap();
+    assert_eq!(pending_a.name, "laptop");
+    assert_eq!(pending_a.code, code, "both devices must show the same code");
+    assert_eq!(pending_a.fingerprint, pending.details.fingerprint);
+
+    // Device B waits for approval (spawned; it polls until approved).
+    let finish = tokio::spawn({
         let config = enroll_config.clone();
-        async move { kolimi_sync::enroll_device(&config, "laptop").await }
+        async move { kolimi_sync::finish_enrollment(&config, &pending).await }
     });
 
-    // Device A sees the pending enrollment and approves it.
-    let id = loop {
-        let body = pending_enrollments(&server.url).await;
-        if let Some(item) = body["enrollments"].as_array().and_then(|list| list.first()) {
-            break item["id"].as_i64().unwrap();
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    let name = kolimi_sync::approve_device(&approve_config, id)
+    // Device A approves only after confirming the code.
+    let name = kolimi_sync::approve_device(&approve_config, id, &code)
         .await
         .unwrap();
     assert_eq!(name, "laptop");
 
     // Device B finishes and persists its device file.
-    let enrolled_id = enroll.await.unwrap().unwrap();
+    let enrolled_id = finish.await.unwrap().unwrap();
     assert_eq!(enrolled_id, id);
     assert!(device_b.path().join(".kolimi").join("device.json").exists());
 
@@ -138,4 +135,39 @@ async fn device_enrollment_transfers_the_master_key() {
     // Clean up the local enrollment and its OS-keystore entry, if the
     // `keystore` feature stored the key there.
     assert!(kolimi_sync::forget_device(device_b.path()).unwrap());
+}
+
+#[tokio::test]
+async fn enrollment_code_mismatch_is_refused() {
+    let server = start_server().await;
+    let device_a = tempfile::tempdir().unwrap();
+    let approve_config = config(&server.url, device_a.path(), Some(passphrase_options()));
+    let (keyring, _recovery) = create_keyring_with_params(E2EE_PASS, &fast_params()).unwrap();
+    upload_keyring(&approve_config, &keyring).await.unwrap();
+    kolimi_sync::publish_identity(&approve_config)
+        .await
+        .unwrap();
+
+    let device_b = tempfile::tempdir().unwrap();
+    let enroll_config = config(&server.url, device_b.path(), None);
+    let pending = kolimi_sync::start_enrollment(&enroll_config, "laptop")
+        .await
+        .unwrap();
+    let id = pending.id();
+
+    // Approving with a code that does not match the device's key (exactly what
+    // a server-side key substitution produces) is refused.
+    let error = kolimi_sync::approve_device(&approve_config, id, "0000-0000-0000")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("code mismatch"), "{error}");
+
+    // The enrollment is untouched, and the correct code is accepted.
+    let still_pending = kolimi_sync::pending_enrollment(&approve_config, id)
+        .await
+        .unwrap();
+    assert_eq!(still_pending.code, pending.details.code);
+    kolimi_sync::approve_device(&approve_config, id, &pending.details.code)
+        .await
+        .unwrap();
 }

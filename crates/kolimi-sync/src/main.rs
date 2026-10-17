@@ -2,13 +2,14 @@
 //! and a Kolimi server (desktop client core alpha).
 
 use std::error::Error;
+use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Parser;
 use kolimi_crypto::recovery_code_display;
 use kolimi_sync::{
-    E2eeOptions, ShareTarget, SyncConfig, create_keyring, publish_identity, share_path,
-    sync_once_rooted, unshare_path, upload_keyring,
+    E2eeOptions, ShareTarget, SyncConfig, create_keyring, known_recipient_keys, publish_identity,
+    share_path, sync_once_rooted, unshare_path, upload_keyring,
 };
 
 #[derive(Parser)]
@@ -72,6 +73,15 @@ struct Cli {
     #[arg(long = "e2ee-approve", value_name = "ENROLLMENT_ID")]
     e2ee_approve: Option<i64>,
 
+    /// The approval code shown on the new device (with --e2ee-approve). When
+    /// omitted you are prompted to type it.
+    #[arg(long = "e2ee-code", value_name = "CODE")]
+    e2ee_code: Option<String>,
+
+    /// Print the recipient encryption keys pinned on this device (TOFU).
+    #[arg(long = "e2ee-fingerprints")]
+    e2ee_fingerprints: bool,
+
     /// Forget this device's local key material (the OS-keystore entry and
     /// `.kolimi/device.json`), so it must be enrolled again.
     #[arg(long = "e2ee-forget-device")]
@@ -133,16 +143,50 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     if let Some(name) = cli.e2ee_enroll.clone() {
-        let id = kolimi_sync::enroll_device(&config, &name).await?;
+        let pending = kolimi_sync::start_enrollment(&config, &name).await?;
+        println!("Enrollment {} created for “{name}”.", pending.details.id);
+        println!("On the already-unlocked device, compare this code before approving:");
+        println!("  approval code:   {}", pending.details.code);
+        println!("  key fingerprint: {}", pending.details.fingerprint);
+        let id = kolimi_sync::finish_enrollment(&config, &pending).await?;
         println!(
-            "enrolled this device as “{name}” (enrollment {id}); device key saved to the OS keystore (or .kolimi/device.json)"
+            "enrolled this device (enrollment {id}); device key saved to the OS keystore (or .kolimi/device.json)"
         );
         return Ok(());
     }
 
     if let Some(id) = cli.e2ee_approve {
-        let name = kolimi_sync::approve_device(&config, id).await?;
+        let pending = kolimi_sync::pending_enrollment(&config, id).await?;
+        println!(
+            "Pending device “{}” (enrollment {})",
+            pending.name, pending.id
+        );
+        println!("  key fingerprint: {}", pending.fingerprint);
+        println!("  approval code:   {}", pending.code);
+        let code = match cli.e2ee_code.clone() {
+            Some(code) => code,
+            None => {
+                print!("Confirm the code shown on the new device: ");
+                std::io::stdout().flush()?;
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                line
+            }
+        };
+        let name = kolimi_sync::approve_device(&config, id, &code).await?;
         println!("approved device “{name}” (enrollment {id})");
+        return Ok(());
+    }
+
+    if cli.e2ee_fingerprints {
+        let keys = known_recipient_keys(&config.local_dir)?;
+        if keys.is_empty() {
+            println!("no recipient keys pinned yet");
+        } else {
+            for (member, fingerprint) in keys {
+                println!("{member}  {fingerprint}");
+            }
+        }
         return Ok(());
     }
 
