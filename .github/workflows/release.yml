@@ -217,7 +217,7 @@ jobs:
 
   aur:
     name: AUR update
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     env:
@@ -242,13 +242,15 @@ jobs:
       - if: steps.gate.outputs.present == 'true'
         name: Bump PKGBUILD and .SRCINFO
         run: |
-          scripts/aur-bump.sh "${GITHUB_REF_NAME#v}"
+          tag="${{ inputs.tag || github.ref_name }}"
+          scripts/aur-bump.sh "${tag#v}"
           useradd -m builder
           chown -R builder .
           runuser -u builder -- bash -c 'cd packaging/arch && makepkg --printsrcinfo > .SRCINFO'
       - if: steps.gate.outputs.present == 'true'
         name: Push to AUR
         run: |
+          tag="${{ inputs.tag || github.ref_name }}"
           mkdir -p ~/.ssh
           printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
@@ -261,7 +263,7 @@ jobs:
           git config user.name "Kolimi CI"
           git config user.email "ci@kolimi.local"
           git add PKGBUILD .SRCINFO
-          git commit -m "kolimi-server ${GITHUB_REF_NAME}" || echo "no changes to push"
+          git commit -m "kolimi-server $tag" || echo "no changes to push"
           git push
 
   publish:

@@ -129,9 +129,20 @@ pub struct DisableRequest {
 /// recovery code).
 pub async fn disable(
     State(state): State<AppState>,
+    crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
     Extension(user): Extension<CurrentUser>,
     Json(req): Json<DisableRequest>,
 ) -> Response {
+    // Per-account lockout on top of the global rate limiter, so a stolen
+    // session cannot brute-force the 6-digit code unbounded.
+    let lockout_key = format!("totp-disable:{}:{ip}", user.user_id);
+    if state.lockout.check(&lockout_key).is_some() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "too many failed attempts, try again later" })),
+        )
+            .into_response();
+    }
     let Some((secret_b32, last_step)) = state.db.totp_secret(user.user_id).await.ok().flatten()
     else {
         return api::bad_request("two-factor is not enabled");
@@ -140,15 +151,30 @@ pub async fn disable(
         return api::internal_error();
     };
     let now = (kolimi_db::now_millis() / 1000) as u64;
-    let verified = totp::verify(&secret, &req.code, now, last_step.map(|s| s as u64)).is_some()
-        || state
+    let matched_step = totp::verify(&secret, &req.code, now, last_step.map(|s| s as u64));
+    let mut verified = matched_step.is_some();
+    // Consume the step so the same code cannot be replayed.
+    if let Some(step) = matched_step
+        && !state
+            .db
+            .consume_totp_step(user.user_id, step)
+            .await
+            .unwrap_or(false)
+    {
+        verified = false;
+    }
+    if !verified {
+        verified = state
             .db
             .consume_recovery_code(user.user_id, &totp::hash_recovery_code(&req.code))
             .await
             .unwrap_or(false);
+    }
     if !verified {
+        state.lockout.record_failure(&lockout_key);
         return api::unauthorized("invalid code");
     }
+    state.lockout.record_success(&lockout_key);
     if state.db.clear_totp(user.user_id).await.is_err() {
         return api::internal_error();
     }

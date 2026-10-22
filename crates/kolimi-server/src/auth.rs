@@ -38,14 +38,15 @@ pub async fn require_auth(
 
     // Cookie-authenticated state-changing requests must carry the
     // double-submit CSRF token on every surface (API, WebDAV, plugins), not
-    // just `/api/*`.
-    if via_cookie
-        && matches!(
-            method,
-            Method::POST | Method::PUT | Method::PATCH | Method::DELETE
-        )
-        && !csrf_ok(&state, &headers, user.session_hash.as_ref()).await
-    {
+    // just `/api/*`. Covers WebDAV mutating methods too.
+    let is_mutating = matches!(
+        method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) || matches!(
+        method.as_str(),
+        "MKCOL" | "MKCALENDAR" | "MOVE" | "COPY" | "PROPPATCH" | "LOCK" | "UNLOCK"
+    );
+    if via_cookie && is_mutating && !csrf_ok(&state, &headers, user.session_hash.as_ref()).await {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
 
@@ -118,7 +119,9 @@ async fn authenticate_basic(
 ) -> Result<CurrentUser, Response> {
     // Keying the lockout on (account, source) means a flood from one
     // client cannot lock the account out for everyone else.
-    let lockout_key = format!("basic:{username}:{ip}");
+    // Lowercase the account: SQLite matches usernames `COLLATE NOCASE`,
+    // so `Alice` and `alice` are the same account and must share lockout.
+    let lockout_key = format!("basic:{}:{ip}", username.to_lowercase());
     if state.lockout.check(&lockout_key).is_some() {
         return Err(StatusCode::TOO_MANY_REQUESTS.into_response());
     }
@@ -166,12 +169,22 @@ async fn authenticate_basic(
     };
 
     match user {
-        Some(user) if !user.disabled => Ok(CurrentUser {
-            user_id: user.id,
-            username: user.username,
-            is_admin: user.is_admin,
-            session_hash: None,
-        }),
+        Some(user) if !user.disabled => {
+            // Basic auth carries only a password, so it can never satisfy a
+            // second factor. Reject it outright when TOTP is enrolled; use a
+            // session (which enforces TOTP) or a scoped token instead.
+            // A DB error fails closed: never downgrade to password-only.
+            match state.db.totp_secret(user.id).await {
+                Ok(Some(_)) => Err(unauthorized()),
+                Ok(None) => Ok(CurrentUser {
+                    user_id: user.id,
+                    username: user.username,
+                    is_admin: user.is_admin,
+                    session_hash: None,
+                }),
+                Err(_) => Err(unauthorized()),
+            }
+        }
         _ => Err(unauthorized()),
     }
 }

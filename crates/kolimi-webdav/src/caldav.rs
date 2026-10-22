@@ -655,7 +655,7 @@ async fn home(
             }
             render_response(&resources, &[], &wanted, None)
         }
-        "MKCALENDAR" | "MKCOL" => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        "MKCALENDAR" | "MKCOL" => method_not_allowed(),
         _ => method_not_allowed(),
     }
 }
@@ -771,7 +771,7 @@ async fn create_collection(
     {
         Ok(collection) => collection,
         Err(kolimi_db::DbError::Conflict(_)) => {
-            return StatusCode::METHOD_NOT_ALLOWED.into_response();
+            return method_not_allowed();
         }
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
@@ -898,11 +898,22 @@ async fn object(
             response
         }
         "PUT" => put_object(vfs, user, &collection, name, existing, headers, body, kind).await,
-        "DELETE" => match db.delete_dav_object(collection.id, name).await {
-            Ok(true) => StatusCode::NO_CONTENT.into_response(),
-            Ok(false) => StatusCode::NOT_FOUND.into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        },
+        "DELETE" => {
+            if let Some(value) = header_str(headers, header::IF_MATCH) {
+                let value = value.trim();
+                if value != "*"
+                    && let Some(object) = &existing
+                    && !cond::matches_etag(value, &quote_etag(&object.etag), false)
+                {
+                    return StatusCode::PRECONDITION_FAILED.into_response();
+                }
+            }
+            match db.delete_dav_object(collection.id, name).await {
+                Ok(true) => StatusCode::NO_CONTENT.into_response(),
+                Ok(false) => StatusCode::NOT_FOUND.into_response(),
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
         "PROPFIND" => {
             let Some(object) = existing else {
                 return StatusCode::NOT_FOUND.into_response();
@@ -921,7 +932,10 @@ async fn object(
                 modified_at: object.modified_at,
             };
             let data = wanted.wants_data(kind).then_some(object.data);
-            let resources = vec![object_resource(segments, kind, &meta, data)];
+            // `segments` includes the object name; the href helper appends it
+            // again, so render from the parent collection segments.
+            let parent = &segments[..segments.len().saturating_sub(1)];
+            let resources = vec![object_resource(parent, kind, &meta, data)];
             render_response(&resources, &[], &wanted, None)
         }
         _ => method_not_allowed(),
@@ -931,7 +945,7 @@ async fn object(
 #[allow(clippy::too_many_arguments)]
 async fn put_object(
     vfs: &Vfs,
-    _user: &CurrentUser,
+    user: &CurrentUser,
     collection: &DavCollection,
     name: &str,
     existing: Option<DavObject>,
@@ -957,11 +971,17 @@ async fn put_object(
         },
     };
 
-    if let Some(value) = header_str(headers, header::IF_NONE_MATCH)
-        && value.trim() == "*"
-        && existing.is_some()
-    {
-        return StatusCode::PRECONDITION_FAILED.into_response();
+    if let Some(value) = header_str(headers, header::IF_NONE_MATCH) {
+        let value = value.trim();
+        if value == "*" {
+            if existing.is_some() {
+                return StatusCode::PRECONDITION_FAILED.into_response();
+            }
+        } else if let Some(object) = &existing
+            && cond::matches_etag(value, &quote_etag(&object.etag), true)
+        {
+            return StatusCode::PRECONDITION_FAILED.into_response();
+        }
     }
     if let Some(value) = header_str(headers, header::IF_MATCH) {
         match &existing {
@@ -976,6 +996,23 @@ async fn put_object(
 
     let etag = blake3::hash(&data).to_hex().to_string();
     let now = kolimi_db::now_millis();
+    // DAV objects count against the account quota like any other content.
+    // Replacing an object only charges the size delta.
+    if let Ok((quota, used)) = vfs.quota_state(user.user_id).await
+        && quota > 0
+    {
+        let old_size = existing
+            .as_ref()
+            .map(|object| object.size.max(0) as u64)
+            .unwrap_or(0);
+        if used
+            .saturating_sub(old_size)
+            .saturating_add(data.len() as u64)
+            > quota
+        {
+            return StatusCode::INSUFFICIENT_STORAGE.into_response();
+        }
+    }
     match vfs
         .db()
         .put_dav_object(
@@ -1040,6 +1077,7 @@ async fn report(
             let wanted: Wanted = props.into();
             let since = match sync_token {
                 None => 0,
+                Some(token) if token.trim().is_empty() => 0,
                 Some(token) => match parse_sync_token(&token) {
                     Some((id, seq)) if id == collection.id => seq,
                     _ => return invalid_sync_token(),
@@ -1495,7 +1533,14 @@ fn options() -> Response {
 }
 
 fn method_not_allowed() -> Response {
-    StatusCode::METHOD_NOT_ALLOWED.into_response()
+    let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
+    response.headers_mut().insert(
+        header::ALLOW,
+        HeaderValue::from_static(
+            "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCOL, MKCALENDAR",
+        ),
+    );
+    response
 }
 
 fn bad_request(message: &str) -> Response {

@@ -142,7 +142,7 @@ async fn encrypted_file_shared_with_a_user_syncs_decrypted() {
     assert_eq!(report.pushed, 1, "{report:?}");
 
     // Share it with bob (one wrapped file key).
-    let wrapped = share_file(&alice, "Private/secret.bin", "bob")
+    let wrapped = share_file(&alice, "/", "Private/secret.bin", "bob")
         .await
         .unwrap();
     assert_eq!(wrapped, 1);
@@ -186,7 +186,7 @@ async fn encrypted_file_shared_with_a_user_syncs_decrypted() {
     assert_eq!(report.pushed, 0, "{report:?}");
 
     // Revoking the share removes bob's local copy on the next pass.
-    unshare_file(&alice, "Private/secret.bin", "bob")
+    unshare_file(&alice, "/", "Private/secret.bin", "bob")
         .await
         .unwrap();
     let report = sync_once(&bob).await.unwrap();
@@ -212,7 +212,7 @@ async fn independent_recipient_decoder() {
     secret.extend(pseudorandom(600_000, 3));
     std::fs::write(alice_dir.join("Private/secret.bin"), &secret).unwrap();
     sync_once(&alice).await.unwrap();
-    share_file(&alice, "Private/secret.bin", "bob")
+    share_file(&alice, "/", "Private/secret.bin", "bob")
         .await
         .unwrap();
 

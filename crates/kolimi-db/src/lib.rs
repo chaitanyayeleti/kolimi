@@ -590,8 +590,11 @@ impl Db {
     ///
     /// Password login is rejected for accounts whose hash is empty; the
     /// caller must ensure at least one passkey is registered first.
+    /// Bumps `credentials_version` so cached Basic credentials stop working.
     pub async fn clear_password(&self, username: &str) -> Result<(), DbError> {
-        let result = sqlx::query("UPDATE users SET password_hash = '' WHERE username = ?")
+        let result = sqlx::query(
+            "UPDATE users SET password_hash = '', credentials_version = credentials_version + 1 WHERE username = ?",
+        )
             .bind(username)
             .execute(&self.pool)
             .await?;
@@ -1180,7 +1183,20 @@ impl Db {
         Ok(result.rows_affected())
     }
 
-    /// Moves a node to the trash.
+    /// Bumps a node's `modified_at` so collection ETags change when children
+    /// are added, modified, moved, or deleted (Finder/Explorer/rclone rely on
+    /// this to invalidate cached listings).
+    pub async fn touch_node(&self, user_id: i64, node_id: i64, now: i64) -> Result<(), DbError> {
+        sqlx::query("UPDATE nodes SET modified_at = ? WHERE user_id = ? AND id = ?")
+            .bind(now)
+            .bind(user_id)
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Moves a node and its whole subtree to the trash.
     pub async fn trash_node(
         &self,
         user_id: i64,
@@ -1188,6 +1204,8 @@ impl Db {
         original_path: &str,
         now: i64,
     ) -> Result<(), DbError> {
+        // Trash the subtree, not just the directory row: descendants must not
+        // leak as live nodes (sync tree, shares, search) with a missing parent.
         let result = sqlx::query(
             "UPDATE nodes SET trashed_at = ?, original_path = ?
              WHERE user_id = ? AND id = ? AND trashed_at IS NULL",
@@ -1201,6 +1219,23 @@ impl Db {
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("node {node_id}")));
         }
+        sqlx::query(
+            "WITH RECURSIVE subtree(id) AS (
+                 SELECT ? UNION ALL
+                 SELECT n.id FROM nodes n JOIN subtree s ON n.parent_id = s.id
+                 WHERE n.user_id = ?
+             )
+             UPDATE nodes SET trashed_at = ?
+             WHERE user_id = ? AND id IN (SELECT id FROM subtree)
+               AND id != ? AND trashed_at IS NULL",
+        )
+        .bind(node_id)
+        .bind(user_id)
+        .bind(now)
+        .bind(user_id)
+        .bind(node_id)
+        .execute(&self.pool)
+        .await?;
         // Trashed nodes are hidden from `received_shares`, so mounts change.
         self.bump_shares_epoch();
         Ok(())
@@ -1231,6 +1266,24 @@ impl Db {
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("trashed node {node_id}")));
         }
+        // Restore the whole subtree, not just the directory row, to match
+        // recursive trash.
+        sqlx::query(
+            "WITH RECURSIVE subtree(id) AS (
+                 SELECT ? UNION ALL
+                 SELECT n.id FROM nodes n JOIN subtree s ON n.parent_id = s.id
+                 WHERE n.user_id = ?
+             )
+             UPDATE nodes SET trashed_at = NULL, original_path = NULL
+             WHERE user_id = ? AND id IN (SELECT id FROM subtree)
+               AND id != ? AND trashed_at IS NOT NULL",
+        )
+        .bind(node_id)
+        .bind(user_id)
+        .bind(user_id)
+        .bind(node_id)
+        .execute(&self.pool)
+        .await?;
         // A restored node can reappear as a received mount.
         self.bump_shares_epoch();
         Ok(())
@@ -1506,7 +1559,7 @@ impl Db {
         let mut stack = vec![(src.id, root.id)];
         while let Some((orig_parent, new_parent)) = stack.pop() {
             let kids = sqlx::query_as::<_, Node>(
-                "SELECT * FROM nodes WHERE user_id = ? AND parent_id = ?",
+                "SELECT * FROM nodes WHERE user_id = ? AND parent_id = ? AND trashed_at IS NULL",
             )
             .bind(user_id)
             .bind(orig_parent)
@@ -1555,6 +1608,19 @@ async fn insert_copy(
          SELECT ?, namespace, name, value FROM dead_props WHERE node_id = ?",
     )
     .bind(copy.id)
+    .bind(src.id)
+    .execute(&mut *conn)
+    .await?;
+
+    // Preserve encryption: the copy points at the same ciphertext, so it
+    // needs the same wrapped file key. Without this the copy is served as
+    // plaintext ciphertext and can never be decrypted.
+    sqlx::query(
+        "INSERT INTO e2ee_file_keys (node_id, user_id, wrapped_key, updated_at)
+         SELECT ?, user_id, wrapped_key, ? FROM e2ee_file_keys WHERE node_id = ?",
+    )
+    .bind(copy.id)
+    .bind(now)
     .bind(src.id)
     .execute(&mut *conn)
     .await?;

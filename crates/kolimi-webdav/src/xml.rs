@@ -522,7 +522,16 @@ impl PropEntry {
             )
         };
         Self {
-            href: davpath::encode_href(segments),
+            href: {
+                let href = davpath::encode_href(segments);
+                // Collections must end with `/` (GNOME/KDE/davfs2/Windows
+                // compare the collection href with a trailing slash).
+                if node.is_dir() && !href.ends_with('/') {
+                    format!("{href}/")
+                } else {
+                    href
+                }
+            },
             display_name,
             is_dir: node.is_dir(),
             size: node.size,

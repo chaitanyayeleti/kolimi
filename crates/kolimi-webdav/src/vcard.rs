@@ -35,11 +35,13 @@ fn unfold(data: &str) -> Vec<String> {
     lines
 }
 
-/// Extracts the value of a property, honouring parameters (`UID;x=1:v`).
+/// Extracts the value of a property, honouring parameters (`UID;x=1:v`) and
+/// grouping prefixes (`item1.UID`).
 fn property_value(line: &str, name: &str) -> Option<String> {
     let (key, value) = line.split_once(':')?;
     let key = key.split(';').next()?;
-    if key.eq_ignore_ascii_case(name) {
+    let base = key.rsplit('.').next().unwrap_or(key);
+    if base.eq_ignore_ascii_case(name) {
         Some(value.trim().to_string())
     } else {
         None
@@ -48,6 +50,7 @@ fn property_value(line: &str, name: &str) -> Option<String> {
 
 /// Validates a vCard object resource and returns its UID.
 pub fn validate_vcard(data: &str) -> Result<String, VcardError> {
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
     let lines = unfold(data);
     let begin = lines
         .first()

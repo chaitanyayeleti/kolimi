@@ -219,6 +219,8 @@ impl Vfs {
         self.db
             .record_change(user_id, &path, "upsert", None, 0, now, None)
             .await?;
+        // Parents change when children appear: bump the ETag clients cache.
+        let _ = self.db.touch_node(user_id, parent_id, now).await;
         Node::from_db(node)
     }
 
@@ -229,9 +231,21 @@ impl Vfs {
         if existing.as_ref().is_some_and(|n| n.kind != "file") {
             return Err(VfsError::IsCollection);
         }
+        // Check quota before writing anything: otherwise the chunks are
+        // already on disk when the quota fails, and a retry deduplicates
+        // them (`new_bytes = 0`) and bypasses the quota.
+        let (quota, used) = self.quota_state(user_id).await?;
+        let old_size = existing.as_ref().map(|n| n.size.max(0) as u64).unwrap_or(0);
+        if quota > 0
+            && used
+                .saturating_sub(old_size)
+                .saturating_add(data.len() as u64)
+                > quota
+        {
+            return Err(quota_error(quota));
+        }
         let (manifest, new_bytes) = self.store.ingest_bytes(user_id, data).await?;
-        // Quota applies to newly written bytes: re-uploading identical
-        // content (deduplicated) adds nothing and must not be rejected.
+        // Re-check after ingest (concurrent uploads may have raced).
         let (quota, used) = self.quota_state(user_id).await?;
         if quota > 0 && used.saturating_add(new_bytes) > quota {
             return Err(quota_error(quota));
@@ -381,6 +395,7 @@ impl Vfs {
                 None,
             )
             .await?;
+        let _ = self.db.touch_node(user_id, parent_id, now).await;
         Node::from_db(node)
     }
 
@@ -539,6 +554,21 @@ impl Vfs {
         manifest: &kolimi_chunk::Manifest,
         expected: Option<&str>,
     ) -> Result<Option<Node>, VfsError> {
+        // A manifest that repeats one chunk 10k times declares gigabytes while
+        // storing kilobytes. The logical size must fit the quota, not just
+        // the deduplicated physical bytes.
+        if !manifest.is_consistent() {
+            return Err(VfsError::Conflict(
+                "manifest size does not match chunk lengths".to_string(),
+            ));
+        }
+        // Cap absurd manifests before they allocate or loop: 100k chunks or
+        // 16 GiB logical size is far beyond any legitimate file here.
+        if manifest.chunks.len() > 100_000 || manifest.size > 16 * 1024 * 1024 * 1024 {
+            return Err(VfsError::Store(kolimi_store::StoreError::TooLarge {
+                limit: 16 * 1024 * 1024 * 1024,
+            }));
+        }
         let current = self.stat(user_id, raw).await?;
         let current_id = current
             .as_ref()
@@ -550,6 +580,14 @@ impl Vfs {
         for chunk in &manifest.chunks {
             if !self.store.has_chunk(user_id, &chunk.hash).await? {
                 return Err(VfsError::MissingChunk(chunk.hash));
+            }
+        }
+        // Quota on logical size: replacing a file frees its old size first.
+        let (quota, used) = self.quota_state(user_id).await?;
+        if quota > 0 {
+            let old_size = current.as_ref().map(|n| n.size).unwrap_or(0);
+            if used.saturating_sub(old_size).saturating_add(manifest.size) > quota {
+                return Err(quota_error(quota));
             }
         }
         // The manifest itself must be persisted server-side before the
@@ -582,10 +620,14 @@ impl Vfs {
             .node_path(user_id, node.id)
             .await?
             .unwrap_or_else(|| format!("/{}", node.name));
+        let parent_id = node.parent_id;
         self.db.trash_node(user_id, node.id, &path, now).await?;
         self.db
             .record_change(user_id, &path, "delete", None, 0, now, None)
             .await?;
+        if let Some(parent_id) = parent_id {
+            let _ = self.db.touch_node(user_id, parent_id, now).await;
+        }
         Ok(())
     }
 
@@ -674,6 +716,7 @@ impl Vfs {
         }
 
         let now = kolimi_db::now_millis();
+        let src_parent_id = src.parent_id;
         if copy {
             self.db
                 .copy_subtree(user_id, &to_db(src), dst_parent_id, dst_name, now)
@@ -682,6 +725,7 @@ impl Vfs {
             self.db
                 .record_change(user_id, &path, "upsert", None, 0, now, None)
                 .await?;
+            let _ = self.db.touch_node(user_id, dst_parent_id, now).await;
         } else {
             let from_path = self
                 .db
@@ -695,6 +739,12 @@ impl Vfs {
             self.db
                 .record_change(user_id, &path, "move", None, 0, now, Some(&from_path))
                 .await?;
+            let _ = self.db.touch_node(user_id, dst_parent_id, now).await;
+            if let Some(old_parent) = src_parent_id
+                && old_parent != dst_parent_id
+            {
+                let _ = self.db.touch_node(user_id, old_parent, now).await;
+            }
         }
         Ok(existing.is_none())
     }
@@ -826,6 +876,14 @@ impl Vfs {
         } else {
             node.name.clone()
         };
+
+        // Restoring to the root must not resurrect a reserved namespace:
+        // this path bypasses the root-level check in `resolve_parent`.
+        if dest_parent.parent_id.is_none()
+            && crate::authz::RESERVED_ROOT_NAMES.contains(&name.as_str())
+        {
+            return Err(VfsError::Conflict("reserved name".to_string()));
+        }
 
         if node.parent_id != Some(dest_parent.id) || name != node.name {
             self.db
@@ -1182,10 +1240,12 @@ mod tests {
         vfs.delete(user, "/docs").await.unwrap();
 
         assert!(vfs.stat(user, "/docs").await.unwrap().is_none());
-        assert_eq!(vfs.trash(user).await.unwrap().len(), 1);
+        // Both the directory and its child are trashed (recursive trash).
+        assert_eq!(vfs.trash(user).await.unwrap().len(), 2);
 
         let trash = vfs.trash(user).await.unwrap();
-        vfs.restore_from_trash(user, trash[0].id).await.unwrap();
+        let dir = trash.iter().find(|n| n.name == "docs").unwrap();
+        vfs.restore_from_trash(user, dir.id).await.unwrap();
         assert_eq!(vfs.read(user, "/docs/a.txt").await.unwrap().1, b"a");
     }
 

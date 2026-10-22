@@ -246,6 +246,18 @@ fn cleanup_stale_temp_files(local: &Path) {
     }
 }
 
+/// Guard that removes the sync lockfile when the pass ends, on every path
+/// (success or error).
+struct SyncLock {
+    path: PathBuf,
+}
+
+impl Drop for SyncLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Runs one full sync pass: pull, then push.
 pub async fn sync_once(config: &SyncConfig) -> Result<SyncReport, SyncError> {
     sync_once_rooted(config, "/").await
@@ -258,11 +270,28 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
     let root = remote_prefix(remote);
     let http = Http::new(config)?;
     std::fs::create_dir_all(config.local_dir.join(".kolimi"))?;
+    // Best-effort inter-process lock: another sync pass holding the lock
+    // wins, this one returns an empty report early.
+    let lock_path = config.local_dir.join(".kolimi").join("lock");
+    let _lock = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(_) => SyncLock { path: lock_path },
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Ok(SyncReport::default());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let mut state = State::load(&config.local_dir)?;
     cleanup_stale_temp_files(&config.local_dir);
     let e2ee = unlock_e2ee(&http, config).await?;
     let mut report = SyncReport::default();
     pull(&http, config, &root, e2ee.as_ref(), &mut state, &mut report).await?;
+    // Persist pull progress before push: a push failure must not lose the
+    // pulled state and cause false conflicts on the next pass.
+    let _ = state.save(&config.local_dir);
     push(&http, config, &root, e2ee.as_ref(), &mut state, &mut report).await?;
     if report.conflicts > 0 {
         // Fetch the winning server versions for the conflicted paths.
@@ -308,6 +337,67 @@ fn safe_rel(rel: &str) -> Result<(), SyncError> {
             .any(|part| part.is_empty() || part == "." || part == "..");
     if unsafe_path {
         return Err(SyncError::Protocol(format!("unsafe remote path: {rel:?}")));
+    }
+    Ok(())
+}
+
+/// Whether `local` itself or any ancestor under `local_dir` is a symlink.
+/// The remote tree is untrusted: following a planted symlink would write
+/// outside the mirror, so pull skips such files instead.
+fn has_symlink_ancestor(local_dir: &Path, local: &Path) -> bool {
+    let mut current: Option<&Path> = Some(local);
+    while let Some(path) = current {
+        // Only consider paths inside the mirror (including `local` itself);
+        // stop at (excluding) the mirror root.
+        if path != local_dir {
+            if !path.starts_with(local_dir) {
+                break;
+            }
+            if let Ok(meta) = std::fs::symlink_metadata(path)
+                && meta.file_type().is_symlink()
+            {
+                return true;
+            }
+        }
+        if path == local_dir {
+            break;
+        }
+        current = path.parent();
+    }
+    false
+}
+
+/// Moves aside any file that blocks directory creation for a pull: if an
+/// ancestor of `local` (under `local_dir`) exists as a file, it is renamed
+/// to a conflict copy so `create_dir_all` can succeed.
+fn ensure_parent_dirs(
+    local_dir: &Path,
+    parent: &Path,
+    state: &mut State,
+    _report: &mut SyncReport,
+) -> Result<(), SyncError> {
+    // Walk from the topmost component under `local_dir` down to `parent`;
+    // moving aside the first blocking file fixes the whole chain because each
+    // level is then created by `create_dir_all`.
+    let mut chain: Vec<PathBuf> = Vec::new();
+    let mut current: Option<&Path> = Some(parent);
+    while let Some(path) = current {
+        if path == local_dir || !path.starts_with(local_dir) {
+            break;
+        }
+        chain.push(path.to_path_buf());
+        current = path.parent();
+    }
+    for ancestor in chain.iter().rev() {
+        if let Ok(meta) = std::fs::symlink_metadata(ancestor)
+            && !meta.file_type().is_dir()
+            && !meta.file_type().is_symlink()
+        {
+            let conflict = conflict_path(ancestor);
+            std::fs::rename(ancestor, &conflict)?;
+            record_conflict(state, local_dir, &conflict);
+            break;
+        }
     }
     Ok(())
 }
@@ -518,27 +608,46 @@ impl ShareTarget {
 /// Shares a path with one user, wrapping encrypted file keys for them.
 pub async fn share_file(
     config: &SyncConfig,
+    root: &str,
     rel_path: &str,
     recipient: &str,
 ) -> Result<u64, SyncError> {
-    share_path(config, rel_path, ShareTarget::User(recipient.to_string())).await
+    share_path(
+        config,
+        root,
+        rel_path,
+        ShareTarget::User(recipient.to_string()),
+    )
+    .await
 }
 
 /// Shares a path with a group, wrapping encrypted file keys for every
 /// member (per-member X25519 wrapping; not MLS — see RFC 0007).
 pub async fn share_file_to_group(
     config: &SyncConfig,
+    root: &str,
     rel_path: &str,
     group: &str,
 ) -> Result<u64, SyncError> {
-    share_path(config, rel_path, ShareTarget::Group(group.to_string())).await
+    share_path(
+        config,
+        root,
+        rel_path,
+        ShareTarget::Group(group.to_string()),
+    )
+    .await
 }
 
 /// Shares a path with a user or group. Returns how many key wraps were
 /// uploaded. Plaintext files are shared through the normal ACL path and
 /// need no keys.
+///
+/// `root` is the scoped remote root this local directory mirrors (as passed
+/// to [`sync_once_rooted`); `"/"` for the whole account. Server paths are
+/// built as `{root}/{rel}`.
 pub async fn share_path(
     config: &SyncConfig,
+    root: &str,
     rel_path: &str,
     target: ShareTarget,
 ) -> Result<u64, SyncError> {
@@ -548,8 +657,9 @@ pub async fn share_path(
             "sharing encrypted files requires e2ee options".to_string(),
         ));
     };
+    let root = remote_prefix(root);
     let rel_path = rel_path.trim_start_matches('/');
-    let server_path = format!("/{rel_path}");
+    let server_path = format!("{root}/{rel_path}");
 
     // Resolve the recipients (group members, minus ourselves).
     let members: Vec<String> = match &target {
@@ -643,7 +753,7 @@ pub async fn share_path(
     let result: Result<u64, SyncError> = async {
         let mut wrapped_count = 0u64;
         for rel in files {
-            let key_path = format!("/api/files/key?path={}", encode(&format!("/{rel}")));
+            let key_path = format!("/api/files/key?path={}", encode(&format!("{root}/{rel}")));
             let (status, body) = http.get_json(&key_path).await?;
             if status == 404 {
                 continue; // plaintext file
@@ -665,7 +775,7 @@ pub async fn share_path(
                 let share_key = e2ee.identity.wrap_file_key_for(public_key, &file_key)?;
                 let path = format!(
                     "/api/e2ee/share-key?path={}&recipient={}",
-                    encode(&format!("/{rel}")),
+                    encode(&format!("{root}/{rel}")),
                     encode(member)
                 );
                 let status = http.put_bytes(&path, &share_key).await?;
@@ -696,20 +806,31 @@ async fn rollback_share(http: &Http, share_id: Option<i64>) {
 /// recipient's wrapped keys).
 pub async fn unshare_file(
     config: &SyncConfig,
+    root: &str,
     rel_path: &str,
     recipient: &str,
 ) -> Result<(), SyncError> {
-    unshare_path(config, rel_path, ShareTarget::User(recipient.to_string())).await
+    unshare_path(
+        config,
+        root,
+        rel_path,
+        ShareTarget::User(recipient.to_string()),
+    )
+    .await
 }
 
 /// Revokes a share of `rel_path` from a user or group.
+///
+/// `root` is the scoped remote root (see [`share_path`]).
 pub async fn unshare_path(
     config: &SyncConfig,
+    root: &str,
     rel_path: &str,
     target: ShareTarget,
 ) -> Result<(), SyncError> {
     let http = Http::new(config)?;
-    let server_path = format!("/{}", rel_path.trim_start_matches('/'));
+    let root = remote_prefix(root);
+    let server_path = format!("{root}/{}", rel_path.trim_start_matches('/'));
     let list_path = format!("/api/shares?path={}", encode(&server_path));
     let (status, body) = http.get_json(&list_path).await?;
     if status != 200 {
@@ -1040,6 +1161,7 @@ pub struct Enrollment {
 
 /// A device enrollment this client started, holding its key material until the
 /// approving device approves it.
+#[derive(Clone)]
 pub struct PendingDevice {
     /// Details to display (id, name, code, fingerprint).
     pub details: Enrollment,
@@ -1544,7 +1666,20 @@ async fn pull(
                     )));
                 }
             }
+            if !file.encrypted
+                && !file.shared
+                && e2ee.is_some_and(|e2ee| e2ee.options.covers(rel))
+            {
+                return Err(SyncError::E2ee(format!(
+                    "remote file /{rel} is not encrypted but is under a configured e2ee root; refusing (possible downgrade)"
+                )));
+            }
             let local = config.local_dir.join(rel);
+            if has_symlink_ancestor(&config.local_dir, &local) {
+                return Err(SyncError::Protocol(format!(
+                    "refusing to write /{rel}: a path component is a symlink"
+                )));
+            }
             if let Some(known) = state.files.get(rel).cloned() {
                 if known.content_id == file.content_id {
                     if local.exists() {
@@ -1575,6 +1710,15 @@ async fn pull(
                 if known.deleted || locally_modified {
                     return Ok(());
                 }
+            } else if local.exists() || local.symlink_metadata().is_ok() {
+                // Untracked local file collides with a remote file
+                // (created locally before first sync, or create-create race).
+                // Never overwrite it: preserve it as a conflict copy, then
+                // pull the server version.
+                let conflict = conflict_path(&local);
+                std::fs::rename(&local, &conflict)?;
+                record_conflict(state, &config.local_dir, &conflict);
+                report.conflicts += 1;
             }
             let manifest_path = format!("/api/files/manifest?path={}", encode(&file.path));
             let (status, manifest_value) = http.get_json(&manifest_path).await?;
@@ -1594,6 +1738,13 @@ async fn pull(
                     "manifest for /{rel} has inconsistent size"
                 )));
             }
+            if manifest.content_id().to_hex() != file.content_id {
+                return Err(SyncError::Protocol(format!(
+                    "manifest content_id mismatch for /{rel}: tree says {}, manifest says {}",
+                    file.content_id,
+                    manifest.content_id().to_hex()
+                )));
+            }
             let file_key = if file.encrypted {
                 let e2ee = e2ee.ok_or_else(|| {
                     SyncError::E2ee(
@@ -1603,7 +1754,7 @@ async fn pull(
                 if file.shared {
                     Some(load_shared_file_key(http, state, e2ee, &file.path).await?)
                 } else {
-                    Some(load_file_key(http, state, e2ee, rel).await?)
+                    Some(load_file_key(http, state, e2ee, root, rel).await?)
                 }
             } else {
                 None
@@ -1635,7 +1786,21 @@ async fn pull(
                 })?;
             }
             if let Some(parent) = local.parent() {
+                ensure_parent_dirs(&config.local_dir, parent, state, report)?;
                 std::fs::create_dir_all(parent)?;
+            }
+            // Type clash: a directory sits where the remote file goes. An
+            // empty directory is removed; a non-empty one is preserved as a
+            // conflict copy.
+            if local.is_dir() {
+                let is_link = std::fs::symlink_metadata(&local)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                if !is_link && std::fs::remove_dir(&local).is_err() {
+                    let conflict = conflict_path(&local);
+                    std::fs::rename(&local, &conflict)?;
+                    record_conflict(state, &config.local_dir, &conflict);
+                }
             }
             let tmp = config
                 .local_dir
@@ -1707,15 +1872,26 @@ async fn load_file_key(
     http: &Http,
     state: &mut State,
     e2ee: &E2ee,
+    root: &str,
     rel: &str,
 ) -> Result<FileKey, SyncError> {
-    if let Some(cached) = state.keys.get(rel) {
-        let wrapped = STANDARD
-            .decode(cached)
-            .map_err(|error| SyncError::E2ee(format!("cached key: {error}")))?;
-        return Ok(e2ee.master.unwrap_file_key(&wrapped)?);
+    if let Some(cached) = state.keys.get(rel).cloned() {
+        let cached_result: Result<FileKey, SyncError> = (|| {
+            let wrapped = STANDARD
+                .decode(&cached)
+                .map_err(|error| SyncError::E2ee(format!("cached key: {error}")))?;
+            Ok(e2ee.master.unwrap_file_key(&wrapped)?)
+        })();
+        match cached_result {
+            Ok(key) => return Ok(key),
+            Err(_) => {
+                // Stale/corrupt cache (e.g. rotated key): drop it and fetch
+                // once from the server below.
+                state.keys.remove(rel);
+            }
+        }
     }
-    let path = format!("/api/files/key?path={}", encode(&format!("/{rel}")));
+    let path = format!("/api/files/key?path={}", encode(&format!("{root}/{rel}")));
     let (status, body) = http.get_json(&path).await?;
     if status != 200 {
         return Err(SyncError::Server { status, path });
@@ -1738,11 +1914,19 @@ async fn load_shared_file_key(
     e2ee: &E2ee,
     server_path: &str,
 ) -> Result<FileKey, SyncError> {
-    if let Some(cached) = state.keys.get(server_path) {
-        let wrapped = STANDARD
-            .decode(cached)
-            .map_err(|error| SyncError::E2ee(format!("cached share key: {error}")))?;
-        return Ok(e2ee.identity.unwrap_file_key(&wrapped)?);
+    if let Some(cached) = state.keys.get(server_path).cloned() {
+        let cached_result: Result<FileKey, SyncError> = (|| {
+            let wrapped = STANDARD
+                .decode(&cached)
+                .map_err(|error| SyncError::E2ee(format!("cached share key: {error}")))?;
+            Ok(e2ee.identity.unwrap_file_key(&wrapped)?)
+        })();
+        match cached_result {
+            Ok(key) => return Ok(key),
+            Err(_) => {
+                state.keys.remove(server_path);
+            }
+        }
     }
     let path = format!("/api/e2ee/share-key?path={}", encode(server_path));
     let (status, body) = http.get_json(&path).await?;
@@ -1773,6 +1957,7 @@ async fn fetch_or_create_file_key(
     http: &Http,
     state: &mut State,
     e2ee: &E2ee,
+    root: &str,
     rel: &str,
 ) -> Result<(FileKey, Option<Vec<u8>>), SyncError> {
     if let Some(cached) = state.keys.get(rel) {
@@ -1781,7 +1966,7 @@ async fn fetch_or_create_file_key(
             .map_err(|error| SyncError::E2ee(format!("cached key: {error}")))?;
         return Ok((e2ee.master.unwrap_file_key(&wrapped)?, None));
     }
-    let path = format!("/api/files/key?path={}", encode(&format!("/{rel}")));
+    let path = format!("/api/files/key?path={}", encode(&format!("{root}/{rel}")));
     let (status, body) = http.get_json(&path).await?;
     match status {
         200 => {
@@ -1894,6 +2079,27 @@ async fn push(
         {
             continue;
         }
+        let remote_path = format!("{root}/{rel}");
+        // Pre-check: when we have a known content_id, fetch the current
+        // remote manifest and compare before uploading any chunks. If the
+        // server moved on, take the 409-conflict path locally (keep the
+        // server version, preserve local edits) without uploading.
+        if let Some(known) = state.files.get(&rel).cloned() {
+            let manifest_path = format!("/api/files/manifest?path={}", encode(&remote_path));
+            let (status, manifest_value) = http.get_json(&manifest_path).await?;
+            if status == 200
+                && let Ok(remote_manifest) = serde_json::from_value::<Manifest>(manifest_value)
+                && remote_manifest.content_id().to_hex() != known.content_id
+            {
+                let conflict = conflict_path(&local_path);
+                std::fs::rename(&local_path, &conflict)?;
+                record_conflict(state, &config.local_dir, &conflict);
+                state.files.remove(&rel);
+                state.keys.remove(&rel);
+                report.conflicts += 1;
+                continue;
+            }
+        }
         let data = std::fs::read(&local_path)?;
         let mut pending_key: Option<Vec<u8>> = None;
         let mut file_key: Option<FileKey> = None;
@@ -1901,7 +2107,7 @@ async fn push(
             // Encrypt-then-chunk (RFC 0007): chunk boundaries follow the
             // plaintext so edits stay delta-friendly; the manifest hashes
             // ciphertext chunks.
-            let (key, pending) = fetch_or_create_file_key(http, state, e2ee, &rel).await?;
+            let (key, pending) = fetch_or_create_file_key(http, state, e2ee, root, &rel).await?;
             pending_key = pending;
             let mut chunks = Vec::new();
             let mut total = 0u64;
@@ -1965,7 +2171,6 @@ async fn push(
             }
         }
         let content_id = manifest.content_id().to_hex();
-        let remote_path = format!("{root}/{rel}");
         let mut path = format!("/api/files?path={}", encode(&remote_path));
         if let Some(known) = state.files.get(&rel) {
             path.push_str(&format!("&if_content_id={}", known.content_id));
@@ -2013,6 +2218,21 @@ async fn push(
                 state.keys.remove(&rel);
                 report.conflicts += 1;
             }
+            // A missing parent (e.g. the remote folder was deleted) surfaces
+            // as 400 here because MKCOL was skipped via `created_dirs`.
+            // Evict the cached parents so the next pass re-creates them.
+            400 => {
+                let mut prefix = String::new();
+                let mut parts: Vec<&str> = rel.split('/').collect();
+                parts.pop();
+                for part in parts {
+                    prefix.push('/');
+                    prefix.push_str(part);
+                    state.created_dirs.remove(&format!("{root}{prefix}"));
+                }
+                state.created_dirs.remove(root);
+                return Err(SyncError::Server { status, path });
+            }
             status => return Err(SyncError::Server { status, path }),
         }
     }
@@ -2057,10 +2277,12 @@ async fn mkcol(http: &Http, dir: &str) -> Result<(), SyncError> {
 }
 
 /// Records a local-only conflict copy (relative path) so `collect_files`
-/// never pushes it back to the server.
+/// Never pushes it back to the server.
 fn record_conflict(state: &mut State, local_dir: &Path, conflict: &Path) {
     if let Ok(rel) = conflict.strip_prefix(local_dir) {
-        state.conflicts.insert(rel.to_string_lossy().to_string());
+        state
+            .conflicts
+            .insert(rel.to_string_lossy().to_string().replace('\\', "/"));
     }
 }
 
@@ -2106,7 +2328,8 @@ fn collect_files(
                 .strip_prefix(root)
                 .map_err(|_| std::io::Error::other("path outside root"))?
                 .to_string_lossy()
-                .to_string();
+                .to_string()
+                .replace('\\', "/");
             // Local-only conflict copies (tracked by relative path) are never
             // pushed back.
             if state.conflicts.contains(&rel) {

@@ -187,6 +187,17 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Removes every document owned by a user (account deletion).
+    /// Call [`commit`](Self::commit) afterwards to make it visible.
+    pub fn delete_user(&self, user_id: i64) -> Result<(), SearchError> {
+        let writer = self.writer.lock().map_err(|_| SearchError::Locked)?;
+        writer.delete_term(Term::from_field_text(
+            self.fields.user,
+            &user_id.to_string(),
+        ));
+        Ok(())
+    }
+
     /// Commits pending changes and makes them visible to searches.
     pub fn commit(&self) -> Result<(), SearchError> {
         {
@@ -302,9 +313,19 @@ fn make_snippet(text: &str, terms: &[String]) -> String {
         .filter_map(|term| lower.find(term))
         .min()
         .unwrap_or(0);
-    let start = position.saturating_sub(RADIUS);
+    // `position` is a byte offset into `lower`, whose byte length can differ
+    // from `text` (e.g. `İ`). Clamp and snap to char boundaries so slicing
+    // can never panic on multi-byte UTF-8.
+    let start = position.saturating_sub(RADIUS).min(text.len());
     let end = (position + RADIUS * 2).min(text.len());
-    let mut snippet: String = text[start..end].chars().collect();
+    let start = text.floor_char_boundary(start);
+    let end = text.ceil_char_boundary(end).min(text.len());
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, end)
+    };
+    let mut snippet: String = text.get(start..end).unwrap_or("").chars().collect();
     if snippet.len() < text.len() {
         if start > 0 {
             snippet.insert(0, '…');

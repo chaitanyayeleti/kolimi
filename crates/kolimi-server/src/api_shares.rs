@@ -12,6 +12,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use futures_util::TryStreamExt;
 use kolimi_auth::{CurrentUser, password, token};
 use kolimi_db::{DbError, ShareRow};
 use serde::Deserialize;
@@ -413,8 +414,10 @@ pub async fn update(
 
 /// `DELETE /api/shares/{id}` — revoke a share.
 ///
-/// The owner can revoke any share; a recipient can remove a user share
-/// addressed to them, and members can remove a group share for their group.
+/// The owner can revoke any share. A recipient can only remove a user share
+/// addressed to them (leaving the group). Group shares can only be revoked
+/// by the owner: allowing any member to delete the row would revoke access
+/// for the whole group.
 pub async fn delete(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
@@ -423,23 +426,39 @@ pub async fn delete(
     let Some(share) = state.db.share_by_id(share_id).await.ok().flatten() else {
         return api::not_found();
     };
+    // Group members can leave the share (removing themselves from the group)
+    // without revoking it for everyone else. This is handled before the
+    // owner-only check below.
+    if share.owner_id != user.user_id && share.kind == "group" {
+        if let Some(group_id) = share.recipient_group_id {
+            let members = state.db.group_members(group_id).await.unwrap_or_default();
+            if members.iter().any(|m| m.id == user.user_id) {
+                // Leave: drop membership and this member's wrapped keys only.
+                let _ = state.db.remove_group_member(group_id, user.user_id).await;
+                let _ = state
+                    .db
+                    .delete_share_keys(share.node_id, user.user_id)
+                    .await;
+                audit(
+                    &state,
+                    Some(user.user_id),
+                    Some(&user.username),
+                    "share.leave",
+                    &share_id.to_string(),
+                    json!({}),
+                )
+                .await;
+                return StatusCode::NO_CONTENT.into_response();
+            }
+        }
+        return api::forbidden("not allowed to revoke this share");
+    }
     let mut allowed = share.owner_id == user.user_id;
     if !allowed {
         allowed = match share.kind.as_str() {
             "user" => share.recipient_user_id == Some(user.user_id),
-            "group" => {
-                if let Some(group_id) = share.recipient_group_id {
-                    state
-                        .db
-                        .group_members(group_id)
-                        .await
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|member| member.id == user.user_id)
-                } else {
-                    false
-                }
-            }
+            // Group members leave via the path above, not by deleting the
+            // share row for everyone.
             _ => false,
         };
     }
@@ -453,8 +472,14 @@ pub async fn delete(
             {
                 let _ = state.db.delete_share_keys(share.node_id, recipient).await;
             }
-            if share.kind == "group" {
-                let _ = state.db.delete_share_keys_for_node(share.node_id).await;
+            if share.kind == "group"
+                && let Some(group_id) = share.recipient_group_id
+            {
+                // Only drop wrapped keys for members of this group who no
+                // longer have any share covering the node (direct or via
+                // another group). Never wipe keys for unrelated recipients.
+                let _ =
+                    remove_group_share_keys(&state, share.owner_id, share.node_id, group_id).await;
             }
             audit(
                 &state,
@@ -594,10 +619,16 @@ async fn public_download_inner(
     if node.is_dir() {
         return api::bad_request("not a file");
     }
-    let data = match state.vfs.read_node_content(share.owner_id, &node).await {
-        Ok(data) => data,
+    let Some(content_id) = node.content_id else {
+        return api::not_found();
+    };
+    let manifest = match state.vfs.manifest(share.owner_id, &content_id).await {
+        Ok(manifest) => std::sync::Arc::new(manifest),
         Err(_) => return api::internal_error(),
     };
+    // Stream chunk-by-chunk: public links must not buffer multi-gigabyte
+    // files in RAM (WebDAV GET already streams this way).
+    let stream = state.vfs.store().content_stream(share.owner_id, manifest);
     audit(
         state,
         None,
@@ -614,13 +645,18 @@ async fn public_download_inner(
         "attachment; filename*=UTF-8''{}",
         percent_encoding::utf8_percent_encode(&node.name, percent_encoding::NON_ALPHANUMERIC)
     );
-    let mut response = Response::new(axum::body::Body::from(data));
+    let mut response = Response::new(axum::body::Body::from_stream(
+        stream.map_err(|_| axum::Error::new("chunk read failed")),
+    ));
     let headers_out = response.headers_mut();
     if let Ok(value) = HeaderValue::from_str(&content_type) {
         headers_out.insert(header::CONTENT_TYPE, value);
     }
     if let Ok(value) = HeaderValue::from_str(&disposition) {
         headers_out.insert(header::CONTENT_DISPOSITION, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&node.size.to_string()) {
+        headers_out.insert(header::CONTENT_LENGTH, value);
     }
     response
 }
@@ -786,6 +822,40 @@ fn password_required() -> Response {
         Json(json!({ "error": "password required", "password_required": true })),
     )
         .into_response()
+}
+
+/// Drops wrapped E2EE keys for members of a revoked group share, but only for
+/// members who no longer have any share covering the node (direct user share
+/// or another group). Recipients with independent access keep their keys.
+async fn remove_group_share_keys(state: &AppState, owner_id: i64, node_id: i64, group_id: i64) {
+    let remaining = state
+        .db
+        .shares_for_node(owner_id, node_id)
+        .await
+        .unwrap_or_default();
+    let mut still_authorized = std::collections::HashSet::new();
+    for share in &remaining {
+        if share.kind == "user"
+            && let Some(recipient) = share.recipient_user_id
+        {
+            still_authorized.insert(recipient);
+        }
+        if share.kind == "group"
+            && let Some(gid) = share.recipient_group_id
+            && let Ok(members) = state.db.group_members(gid).await
+        {
+            for member in members {
+                still_authorized.insert(member.id);
+            }
+        }
+    }
+    if let Ok(members) = state.db.group_members(group_id).await {
+        for member in members {
+            if !still_authorized.contains(&member.id) {
+                let _ = state.db.delete_share_keys(node_id, member.id).await;
+            }
+        }
+    }
 }
 
 fn entries_json(nodes: &[kolimi_vfs::Node]) -> Vec<Value> {

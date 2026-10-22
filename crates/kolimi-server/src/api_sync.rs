@@ -213,6 +213,25 @@ pub async fn shared_tree(
 
     let mut entries = Vec::new();
     let mut seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    // Mirror `Vfs::received_mounts`: identical share names get ` (2)`,
+    // ` (3)`, … suffixes so distinct mounts never collide under
+    // `/Shared with me/`.
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut display: HashMap<(i64, i64), String> = HashMap::new();
+    for share in &shares {
+        let key = (share.owner_id, share.node_id);
+        if display.contains_key(&key) {
+            continue;
+        }
+        let base = share.name.clone();
+        let mut name = base.clone();
+        let mut suffix = 1;
+        while !used.insert(name.clone()) {
+            suffix += 1;
+            name = format!("{base} ({suffix})");
+        }
+        display.insert(key, name);
+    }
     let mut nodes_cache: HashMap<i64, Vec<kolimi_db::Node>> = HashMap::new();
     let mut encrypted_cache: HashMap<i64, std::collections::HashSet<i64>> = HashMap::new();
     let mut info_cache: HashMap<i64, HashMap<i64, (Option<i64>, String)>> = HashMap::new();
@@ -275,10 +294,11 @@ pub async fn shared_tree(
             }
             relative.reverse();
             let suffix = relative.join("/");
+            let mount = &display[&(share.owner_id, share.node_id)];
             let path = if suffix.is_empty() {
-                format!("/Shared with me/{}", share.name)
+                format!("/Shared with me/{mount}")
             } else {
-                format!("/Shared with me/{}/{}", share.name, suffix)
+                format!("/Shared with me/{mount}/{suffix}")
             };
             entries.push(json!({
                 "path": path,

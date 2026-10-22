@@ -53,6 +53,7 @@ struct SearchHit {
     size: u64,
     modified_at: i64,
     snippet: String,
+    encrypted: bool,
 }
 
 /// Upload-tray status for one file.
@@ -90,6 +91,7 @@ fn parse_results(body: &Value) -> Vec<SearchHit> {
                     size: item["size"].as_u64().unwrap_or(0),
                     modified_at: item["modified_at"].as_i64().unwrap_or(0),
                     snippet: item["snippet"].as_str().unwrap_or_default().to_string(),
+                    encrypted: item["encrypted"].as_bool().unwrap_or(false),
                 })
                 .collect()
         })
@@ -896,6 +898,12 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     };
 
     let rename_entry = move |entry: Entry| {
+        // Encrypted files are opaque blobs on the server: WebDAV MOVE
+        // returns 403. There is no server rename API, so refuse early.
+        if entry.encrypted {
+            error.set("Unlock encryption and use sync client to move encrypted files".to_string());
+            return;
+        }
         let Some(name) = api::prompt("New name", &entry.name) else {
             return;
         };
@@ -919,6 +927,12 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
 
     // Moves `entry` into `dest_dir` (drag-to-move onto a folder or crumb).
     let move_into = move |entry: Entry, dest_dir: String| {
+        // Encrypted files are opaque blobs on the server: WebDAV MOVE
+        // returns 403. There is no server move API, so refuse early.
+        if entry.encrypted {
+            error.set("Unlock encryption and use sync client to move encrypted files".to_string());
+            return;
+        }
         let source = entry.path.clone();
         let destination = format!("{}/{}", dest_dir.trim_end_matches('/'), entry.name);
         if destination == source {
@@ -980,6 +994,18 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             return;
         };
         let paths: Vec<String> = selected.get_untracked().into_iter().collect();
+        // Encrypted files are opaque blobs on the server: WebDAV MOVE
+        // returns 403 and there is no server move API, so refuse early.
+        let encrypted: std::collections::HashSet<String> = entries
+            .get_untracked()
+            .into_iter()
+            .filter(|e| e.encrypted)
+            .map(|e| e.path)
+            .collect();
+        if paths.iter().any(|p| encrypted.contains(p)) {
+            error.set("Unlock encryption and use sync client to move encrypted files".to_string());
+            return;
+        }
         let count = paths.len();
         spawn_local(async move {
             let mut failed = 0usize;
@@ -1409,12 +1435,21 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                 let name = hit.name.clone();
                                 let snippet = hit.snippet.clone();
                                 let path = hit.path.clone();
+                                let path_click = path.clone();
+                                let encrypted = hit.encrypted;
                                 let kind = if is_dir { "dir".to_string() } else { "file".to_string() };
                                 view! {
                                     <li class="file">
                                         <button
                                             class="file-open"
-                                            on:click=move |_| load(navigate.clone())
+                                            on:click=move |_| {
+                                                search_active.set(false);
+                                                if is_dir {
+                                                    load(path_click.clone());
+                                                } else {
+                                                    load(navigate.clone());
+                                                }
+                                            }
                                         >
                                             <span class="file-icon">
                                                 <Icon name=file_icon(&name, &kind)/>
@@ -1434,17 +1469,33 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                         </button>
                                         {(!is_dir)
                                             .then(|| {
-                                                view! {
-                                                    <span class="file-actions">
-                                                        <a
-                                                            class="icon-btn"
-                                                            title="Download"
-                                                            href=format!("/dav{}", encode_path(&download_path))
-                                                            download
-                                                        >
-                                                            <Icon name="download"/>
-                                                        </a>
-                                                    </span>
+                                                if encrypted {
+                                                    view! {
+                                                        <span class="file-actions">
+                                                            <button
+                                                                class="icon-btn"
+                                                                title="Unlock encryption to download"
+                                                                disabled
+                                                            >
+                                                                <Icon name="download"/>
+                                                            </button>
+                                                        </span>
+                                                    }
+                                                        .into_any()
+                                                } else {
+                                                    view! {
+                                                        <span class="file-actions">
+                                                            <a
+                                                                class="icon-btn"
+                                                                title="Download"
+                                                                href=format!("/dav{}", encode_path(&download_path))
+                                                                download
+                                                            >
+                                                                <Icon name="download"/>
+                                                            </a>
+                                                        </span>
+                                                    }
+                                                        .into_any()
                                                 }
                                             })}
                                     </li>
@@ -1631,15 +1682,29 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                                 })}
                                                             {(!is_dir)
                                                                 .then(|| {
-                                                                    view! {
-                                                                        <a
-                                                                            class="icon-btn"
-                                                                            title="Download"
-                                                                            href=format!("/dav{}", encode_path(&download))
-                                                                            download
-                                                                        >
-                                                                            <Icon name="download"/>
-                                                                        </a>
+                                                                    if encrypted {
+                                                                        view! {
+                                                                            <button
+                                                                                class="icon-btn"
+                                                                                title="Unlock encryption to download"
+                                                                                disabled
+                                                                            >
+                                                                                <Icon name="download"/>
+                                                                            </button>
+                                                                        }
+                                                                            .into_any()
+                                                                    } else {
+                                                                        view! {
+                                                                            <a
+                                                                                class="icon-btn"
+                                                                                title="Download"
+                                                                                href=format!("/dav{}", encode_path(&download))
+                                                                                download
+                                                                            >
+                                                                                <Icon name="download"/>
+                                                                            </a>
+                                                                        }
+                                                                            .into_any()
                                                                     }
                                                                 })}
                                                             {(!shared)
@@ -1823,15 +1888,29 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                                 })}
                                                             {(!is_dir)
                                                                 .then(|| {
-                                                                    view! {
-                                                                        <a
-                                                                            class="icon-btn"
-                                                                            title="Download"
-                                                                            href=format!("/dav{}", encode_path(&download))
-                                                                            download
-                                                                        >
-                                                                            <Icon name="download"/>
-                                                                        </a>
+                                                                    if encrypted {
+                                                                        view! {
+                                                                            <button
+                                                                                class="icon-btn"
+                                                                                title="Unlock encryption to download"
+                                                                                disabled
+                                                                            >
+                                                                                <Icon name="download"/>
+                                                                            </button>
+                                                                        }
+                                                                            .into_any()
+                                                                    } else {
+                                                                        view! {
+                                                                            <a
+                                                                                class="icon-btn"
+                                                                                title="Download"
+                                                                                href=format!("/dav{}", encode_path(&download))
+                                                                                download
+                                                                            >
+                                                                                <Icon name="download"/>
+                                                                            </a>
+                                                                        }
+                                                                            .into_any()
                                                                     }
                                                                 })}
                                                             {(!shared)
@@ -2108,6 +2187,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     .map(|(entry, x, y)| {
                         let is_dir = entry.kind == "dir";
                         let shared = entry.shared;
+                        let encrypted = entry.encrypted;
                         let open_e = entry.clone();
                         let download = entry.path.clone();
                         let copy_path = entry.path.clone();
@@ -2134,16 +2214,31 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                     })}
                                 {(!is_dir)
                                     .then(|| {
-                                        view! {
-                                            <a
-                                                class="ctx-item"
-                                                href=format!("/dav{}", encode_path(&download))
-                                                download
-                                                on:click=move |_| context_menu.set(None)
-                                            >
-                                                <Icon name="download"/>
-                                                "Download"
-                                            </a>
+                                        if encrypted {
+                                            view! {
+                                                <button
+                                                    class="ctx-item"
+                                                    title="Unlock encryption to download"
+                                                    disabled
+                                                >
+                                                    <Icon name="download"/>
+                                                    "Download"
+                                                </button>
+                                            }
+                                                .into_any()
+                                        } else {
+                                            view! {
+                                                <a
+                                                    class="ctx-item"
+                                                    href=format!("/dav{}", encode_path(&download))
+                                                    download
+                                                    on:click=move |_| context_menu.set(None)
+                                                >
+                                                    <Icon name="download"/>
+                                                    "Download"
+                                                </a>
+                                            }
+                                                .into_any()
                                         }
                                     })}
                                 <button

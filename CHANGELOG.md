@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.25] - 2026-10-23
+
+### Fixed
+- **Phase 1 hardening.** Basic auth now rejects TOTP-enrolled accounts,
+  lockout/cache keys are case-insensitive, `/api/totp/*` is rate-limited and
+  `disable` consumes steps with per-account lockout. CSRF covers WebDAV
+  mutating methods. WebDAV locks are per-owner with a cap. Group-share revoke
+  is owner-only (members leave instead of revoking for all) with scoped key
+  cleanup. Trash/restore are recursive, copies skip trashed nodes and preserve
+  file keys. Sync fixes rooted E2EE paths, create-create protection,
+  conflict pre-checks, manifest verification, downgrade refusal, symlink
+  guards, key-cache retry, and a sync lockfile. Quota enforced on logical
+  manifest size, chunk races use random temp files + fsync + mtime touch,
+  public downloads stream, search snippets are UTF-8 safe, parent ETags bump,
+  and DAV compat fixes (well-known, sync-token, href slashes, If-Match,
+  vCard, lock lifecycle).
+
+
 ## [0.1.24] - 2026-10-17
 
 ### Changed

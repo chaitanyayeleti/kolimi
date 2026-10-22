@@ -63,6 +63,43 @@ fn login_body(code: Option<&str>) -> Value {
     }
 }
 
+/// Logs in via `/api/session` and returns `(session_cookie, csrf_cookie)`.
+async fn login_session(app: &Router, code: Option<&str>) -> (StatusCode, Vec<String>) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/session")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(login_body(code).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let cookies: Vec<String> = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| {
+            v.to_str()
+                .ok()
+                .map(|s| s.split(';').next().unwrap_or("").to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    (status, cookies)
+}
+
+fn csrf_token_from(cookies: &[String]) -> String {
+    cookies
+        .iter()
+        .find_map(|c| c.strip_prefix("kolimi_csrf="))
+        .unwrap_or("")
+        .to_string()
+}
+
 fn current_code(secret: &TotpSecret) -> String {
     secret.code_at((kolimi_db::now_millis() / 1000) as u64)
 }
@@ -121,13 +158,19 @@ async fn totp_enrollment_login_replay_and_recovery() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Status reflects enrollment and remaining codes.
+    // Basic auth is rejected once TOTP is enrolled, so use the session.
+    // Use the next time step: the current one was consumed by logins above.
+    let code = secret.code_at((kolimi_db::now_millis() / 1000) as u64 + 30);
+    let (status, cookies) = login_session(&app, Some(&code)).await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie_header = cookies.join("; ");
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/api/totp")
-                .header(header::AUTHORIZATION, basic())
+                .header(header::COOKIE, &cookie_header)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -140,11 +183,26 @@ async fn totp_enrollment_login_replay_and_recovery() {
     assert_eq!(status_body["enabled"], true);
     assert_eq!(status_body["recovery_codes_remaining"], 9);
 
-    // Disable with a code from the next step (the current one was
-    // consumed by the login above); login goes back to password-only.
-    let code = secret.code_at((kolimi_db::now_millis() / 1000) as u64 + 30);
-    let (status, _) = post(&app, "/api/totp/disable", &json!({ "code": code })).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Disable with an unused recovery code (the TOTP steps were consumed
+    // by the logins above); login goes back to password-only.
+    // Session POSTs need the double-submit CSRF token.
+    let csrf = csrf_token_from(&cookies);
+    let code = recovery_codes[1].clone();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/totp/disable")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie_header)
+                .header("x-csrf-token", &csrf)
+                .body(Body::from(json!({ "code": code }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
     let (status, _) = post(&app, "/api/session", &login_body(None)).await;
     assert_eq!(status, StatusCode::OK);
 

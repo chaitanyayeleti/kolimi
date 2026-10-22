@@ -11,6 +11,8 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqliteConnection;
 
+use futures_util::StreamExt;
+
 use crate::{Db, DbError, now_millis};
 
 /// One audit entry.
@@ -159,12 +161,14 @@ impl Db {
 
     /// Recomputes the whole chain and reports the first inconsistency.
     pub async fn audit_verify(&self) -> Result<AuditVerify, DbError> {
-        let rows: Vec<AuditEntry> = sqlx::query_as("SELECT * FROM audit_log ORDER BY id")
-            .fetch_all(&self.pool)
-            .await?;
+        // Stream rows instead of loading the whole log into memory: the
+        // audit table grows without bound.
+        let mut rows = sqlx::query_as::<_, AuditEntry>("SELECT * FROM audit_log ORDER BY id")
+            .fetch(&self.pool);
         let mut expected_prev: Vec<u8> = Vec::new();
         let mut entries = 0;
-        for row in &rows {
+        while let Some(row) = rows.next().await {
+            let row = row?;
             entries += 1;
             let expected = chain_hash(
                 &expected_prev,

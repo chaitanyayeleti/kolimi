@@ -54,7 +54,14 @@ pub fn PublicApp(token: String) -> impl IntoView {
                 };
                 match api::get(&url).await {
                     Ok(r) if r.status == 200 => {
-                        meta.set(Meta::Ready(r.body));
+                        let mut body = r.body;
+                        // `GET /public/{token}/list/{subpath}` returns only
+                        // `{ path, entries }` with no `kind`/`name`: treat
+                        // list responses as dirs.
+                        if body.get("kind").is_none() && body.get("entries").is_some() {
+                            body["kind"] = json!("dir");
+                        }
+                        meta.set(Meta::Ready(body));
                         sub.set(subpath);
                         locked.set(false);
                         error.set(String::new());
@@ -129,7 +136,10 @@ pub fn PublicApp(token: String) -> impl IntoView {
                     }
                     Meta::Ready(meta) => {
                         let name = meta["name"].as_str().unwrap_or_default().to_string();
-                        let is_dir = meta["kind"].as_str() == Some("dir");
+                        // List responses carry `entries` but no `kind`: treat as dir.
+                        let is_dir = meta["kind"].as_str() == Some("dir")
+                            || (meta.get("kind").is_none()
+                                && meta.get("entries").is_some());
                         let subpath = sub.get();
                         let token = token_sv.get_value();
                         let download_url = if subpath.is_empty() {

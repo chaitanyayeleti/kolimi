@@ -24,7 +24,7 @@ codegen-units = 1
 strip = true
 
 [workspace.package]
-version = "0.1.24"
+version = "0.1.25"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/chaitanyayeleti/kolimi"
@@ -48,19 +48,19 @@ hmac = "0.12"
 http-body-util = "0.1"
 httpdate = "1"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
-kolimi-auth = { version = "0.1.24", path = "crates/kolimi-auth" }
-kolimi-chunk = { version = "0.1.24", path = "crates/kolimi-chunk" }
-kolimi-crypto = { version = "0.1.24", path = "crates/kolimi-crypto" }
-kolimi-db = { version = "0.1.24", path = "crates/kolimi-db" }
-kolimi-ffi = { version = "0.1.24", path = "crates/kolimi-ffi" }
-kolimi-plugins = { version = "0.1.24", path = "crates/kolimi-plugins" }
-kolimi-preview = { version = "0.1.24", path = "crates/kolimi-preview" }
-kolimi-search = { version = "0.1.24", path = "crates/kolimi-search" }
-kolimi-server = { version = "0.1.24", path = "crates/kolimi-server" }
-kolimi-store = { version = "0.1.24", path = "crates/kolimi-store" }
-kolimi-sync = { version = "0.1.24", path = "crates/kolimi-sync" }
-kolimi-vfs = { version = "0.1.24", path = "crates/kolimi-vfs" }
-kolimi-webdav = { version = "0.1.24", path = "crates/kolimi-webdav" }
+kolimi-auth = { version = "0.1.25", path = "crates/kolimi-auth" }
+kolimi-chunk = { version = "0.1.25", path = "crates/kolimi-chunk" }
+kolimi-crypto = { version = "0.1.25", path = "crates/kolimi-crypto" }
+kolimi-db = { version = "0.1.25", path = "crates/kolimi-db" }
+kolimi-ffi = { version = "0.1.25", path = "crates/kolimi-ffi" }
+kolimi-plugins = { version = "0.1.25", path = "crates/kolimi-plugins" }
+kolimi-preview = { version = "0.1.25", path = "crates/kolimi-preview" }
+kolimi-search = { version = "0.1.25", path = "crates/kolimi-search" }
+kolimi-server = { version = "0.1.25", path = "crates/kolimi-server" }
+kolimi-store = { version = "0.1.25", path = "crates/kolimi-store" }
+kolimi-sync = { version = "0.1.25", path = "crates/kolimi-sync" }
+kolimi-vfs = { version = "0.1.25", path = "crates/kolimi-vfs" }
+kolimi-webdav = { version = "0.1.25", path = "crates/kolimi-webdav" }
 mime_guess = "2"
 opentelemetry = "0.33"
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "grpc-tonic"] }

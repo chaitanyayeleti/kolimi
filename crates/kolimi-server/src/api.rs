@@ -44,8 +44,9 @@ pub async fn login(
         return bad_request("username and password are required");
     }
     // Key the lockout on (account, source) so one client cannot lock an
-    // account out for everyone.
-    let lockout_key = format!("login:{}:{}", req.username, ip);
+    // account out for everyone. Lowercase the account: SQLite matches
+    // usernames `COLLATE NOCASE`.
+    let lockout_key = format!("login:{}:{ip}", req.username.to_lowercase());
     if state.lockout.check(&lockout_key).is_some() {
         audit(
             &state,
@@ -721,6 +722,15 @@ pub async fn delete_user(
         Ok(()) => {
             // Drop any cached Basic-auth credential for the deleted account.
             state.cred_cache.clear();
+            // The DB cascades don't reach the search index: drop the
+            // user's documents too, or their filenames stay searchable.
+            if let Err(error) = state
+                .search
+                .delete_user(target.id)
+                .and_then(|()| state.search.commit())
+            {
+                tracing::error!(%error, user_id = target.id, "could not remove deleted user's search data");
+            }
             // The row and its cascades are gone; drop the per-user blob
             // directory too, since the janitor only visits existing users.
             if let Err(error) = state.vfs.remove_user_data(target.id).await {

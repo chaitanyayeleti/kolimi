@@ -591,7 +591,7 @@ async fn propfind_depth_zero_returns_only_target() {
     let (status, _, body) = send(&server.app, req).await;
     assert_eq!(status, StatusCode::from_u16(207).unwrap());
     let xml = String::from_utf8(body).unwrap();
-    assert!(xml.contains("<d:href>/dav/docs</d:href>"));
+    assert!(xml.contains("<d:href>/dav/docs/</d:href>"));
     assert_eq!(xml.matches("<d:response>").count(), 1);
 }
 

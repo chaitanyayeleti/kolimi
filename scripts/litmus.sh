@@ -16,7 +16,6 @@ WORK="${LITMUS_WORK:-/tmp/kolimi-litmus-build}"
 PORT="${LITMUS_PORT:-18099}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA="$(mktemp -d)"
-trap 'rm -rf "$DATA"' EXIT
 SERVER_PID=""
 
 cleanup() {
@@ -74,6 +73,10 @@ for _ in $(seq 1 50); do
     fi
     sleep 0.1
 done
+if ! curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+    echo "litmus: server did not become ready on port $PORT" >&2
+    exit 1
+fi
 
 # --- suites ---
 URL="http://127.0.0.1:$PORT/dav/"

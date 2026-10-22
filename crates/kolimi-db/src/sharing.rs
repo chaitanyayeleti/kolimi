@@ -135,19 +135,30 @@ impl Db {
 
     /// Deletes a group (memberships and group shares cascade).
     pub async fn delete_group(&self, group_id: i64) -> Result<bool, DbError> {
-        let mut tx = self.pool.begin().await?;
-        // Drop wrapped keys for the group's shares before the share rows
-        // cascade away, in the same transaction as the delete.
-        sqlx::query(
-            "DELETE FROM e2ee_share_keys
-             WHERE node_id IN (
-                 SELECT node_id FROM shares
-                 WHERE kind = 'group' AND recipient_group_id = ?
-             )",
+        // Collect affected nodes and members first: key cleanup must only
+        // drop keys for members of this group, never for unrelated
+        // recipients who share the same node via another share.
+        let node_ids: Vec<(i64,)> = sqlx::query_as(
+            "SELECT node_id FROM shares WHERE kind = 'group' AND recipient_group_id = ?",
         )
         .bind(group_id)
-        .execute(&mut *tx)
+        .fetch_all(&self.pool)
         .await?;
+        let member_ids: Vec<(i64,)> =
+            sqlx::query_as("SELECT user_id FROM group_members WHERE group_id = ?")
+                .bind(group_id)
+                .fetch_all(&self.pool)
+                .await?;
+        let mut tx = self.pool.begin().await?;
+        for (node_id,) in &node_ids {
+            for (member_id,) in &member_ids {
+                sqlx::query("DELETE FROM e2ee_share_keys WHERE node_id = ? AND recipient_id = ?")
+                    .bind(node_id)
+                    .bind(member_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
         let result = sqlx::query("DELETE FROM groups WHERE id = ?")
             .bind(group_id)
             .execute(&mut *tx)

@@ -353,6 +353,10 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             };
             let hash = kolimi_auth::password::hash_password(&password)?;
             db.set_password(&username, &hash).await?;
+            // A password change must not leave existing sessions alive.
+            if let Some(user) = db.find_user(&username).await? {
+                db.delete_user_sessions(user.id).await?;
+            }
             db.audit_append(
                 None,
                 Some("cli"),
@@ -470,6 +474,19 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             let store = kolimi_store::BlobStore::open(data.join("blobs")).await?;
             if let Err(error) = store.remove_user(user.id).await {
                 eprintln!("warning: could not remove blob data for {username}: {error}");
+            }
+            // The DB cascades don't reach the search index: drop the
+            // user's documents too, or their filenames stay searchable.
+            // Best-effort, like the blob cleanup above.
+            match kolimi_search::SearchIndex::open(&data.join("search")) {
+                Ok(search) => {
+                    if let Err(error) = search.delete_user(user.id).and_then(|()| search.commit()) {
+                        eprintln!("warning: could not remove search data for {username}: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("warning: could not open search index for {username}: {error}");
+                }
             }
             db.audit_append(
                 None,

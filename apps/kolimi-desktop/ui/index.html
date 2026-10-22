@@ -263,11 +263,18 @@
                 const code = await invoke("setup_e2ee", {
                   server: account.server, username: account.username, passphrase: setupPass.value
                 });
+                // Do not refresh yet: that would wipe the recovery code.
+                // Only refresh once the user acknowledges having saved it.
                 recoveryOut.replaceChildren(
                   el("div", {}, "Recovery code — save it now, it is shown once:"),
-                  el("code", {}, code));
-                setMsg("Encryption set up", "ok");
-                refresh();
+                  el("code", {}, code),
+                  el("div", { class: "row", style: "margin-top:8px" },
+                    el("button", { onclick: async () => {
+                      recoveryOut.replaceChildren();
+                      setMsg("Encryption set up", "ok");
+                      refresh();
+                    } }, "I saved it")));
+                setMsg("Save your recovery code, then click “I saved it”.", "ok");
               } catch (e) { setMsg(String(e), "err"); }
             } }, "Set up encryption")),
           recoveryOut

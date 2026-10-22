@@ -676,6 +676,12 @@ async fn validate_login(server: &str, username: &str, password: &str) -> Result<
 
 fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        // Navigate the existing window to the requested server instead of
+        // just focusing the stale URL.
+        let base = server.trim_end_matches('/');
+        let target = format!("{base}/app/");
+        let escaped = target.replace('\\', "\\\\").replace('\'', "\\'");
+        let _ = window.eval(format!("window.location.href = '{escaped}'"));
         let _ = window.show();
         let _ = window.set_focus();
         // Opening the app should reflect the server right away.
@@ -1143,9 +1149,25 @@ fn update_pair(
             .iter_mut()
             .find(|pair| pair.local_dir == dir)
             .ok_or_else(|| "directory not found".to_string())?;
-        pair.local_dir = local;
+        let old_remote = pair.remote.clone();
+        let old_local = pair.local_dir.clone();
+        pair.local_dir = local.clone();
         pair.remote = normalize_remote(&remote);
         pair.encrypted_roots = normalize_roots(encrypted_roots);
+        // Changing the remote root or local folder invalidates the sync
+        // state: the tracked paths belong to the old root. Drop state.json
+        // so the next pass re-baselines instead of deleting local files as
+        // "remote deletions".
+        if old_remote != pair.remote || old_local != pair.local_dir {
+            let _ = std::fs::remove_file(
+                std::path::Path::new(&pair.local_dir).join(".kolimi/state.json"),
+            );
+            if old_local != pair.local_dir {
+                let _ = std::fs::remove_file(
+                    std::path::Path::new(&old_local).join(".kolimi/state.json"),
+                );
+            }
+        }
         settings.clone()
     };
     save_settings_file(&settings)?;

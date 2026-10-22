@@ -139,7 +139,7 @@ async fn recipient_key_pinning_refuses_a_changed_key() {
     sync_once(&alice).await.unwrap();
 
     // The first share pins bob's key.
-    share_file(&alice, "Private/secret.bin", "bob")
+    share_file(&alice, "/", "Private/secret.bin", "bob")
         .await
         .unwrap();
     let pinned = known_recipient_keys(&alice_dir).unwrap();
@@ -154,7 +154,7 @@ async fn recipient_key_pinning_refuses_a_changed_key() {
     pins.insert("bob".to_string(), "00".repeat(32));
     std::fs::write(&pins_path, serde_json::to_vec(&pins).unwrap()).unwrap();
 
-    let error = share_file(&alice, "Private/secret.bin", "bob")
+    let error = share_file(&alice, "/", "Private/secret.bin", "bob")
         .await
         .unwrap_err();
     assert!(
@@ -165,7 +165,7 @@ async fn recipient_key_pinning_refuses_a_changed_key() {
     // After the operator re-pins (having verified the new fingerprint out of
     // band), sharing works again.
     std::fs::remove_file(&pins_path).unwrap();
-    share_file(&alice, "Private/secret.bin", "bob")
+    share_file(&alice, "/", "Private/secret.bin", "bob")
         .await
         .unwrap();
 

@@ -139,7 +139,18 @@ impl Keyring {
         };
         let key = hkdf32(master_key.as_bytes(), None, KEYRING_MAC_INFO)?;
         let input = self.mac_input()?;
-        if hex_encode(blake3::keyed_hash(&key, &input).as_bytes()) != *expected {
+        let actual = blake3::keyed_hash(&key, &input);
+        let actual_bytes = actual.as_bytes();
+        let expected_bytes = hex_decode(expected)
+            .map_err(|_| CryptoError::Keyring("integrity check failed".to_string()))?;
+        if actual_bytes.len() != expected_bytes.len() {
+            return Err(CryptoError::Keyring("integrity check failed".to_string()));
+        }
+        let mut diff = 0u8;
+        for i in 0..actual_bytes.len() {
+            diff |= actual_bytes[i] ^ expected_bytes[i];
+        }
+        if diff != 0 {
             return Err(CryptoError::Keyring("integrity check failed".to_string()));
         }
         Ok(())

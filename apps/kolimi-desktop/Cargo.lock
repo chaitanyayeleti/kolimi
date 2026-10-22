@@ -2480,7 +2480,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-chunk"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-crypto"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-desktop"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "keyring",
  "kolimi-sync",
@@ -2528,10 +2528,11 @@ dependencies = [
 
 [[package]]
 name = "kolimi-sync"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "base64 0.23.1",
  "clap",
+ "keyring",
  "kolimi-chunk",
  "kolimi-crypto",
  "percent-encoding",

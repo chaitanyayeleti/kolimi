@@ -210,10 +210,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         };
         if cli.unshare {
-            unshare_path(&config, &path, target.clone()).await?;
+            unshare_path(&config, &cli.remote, &path, target.clone()).await?;
             println!("revoked {path} for {} {}", target.kind(), target.name());
         } else {
-            let wrapped = share_path(&config, &path, target.clone()).await?;
+            let wrapped = share_path(&config, &cli.remote, &path, target.clone()).await?;
             println!(
                 "shared {path} with {} {} ({wrapped} encrypted file key(s) wrapped)",
                 target.kind(),

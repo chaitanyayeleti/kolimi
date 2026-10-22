@@ -37,6 +37,9 @@ pub struct FfiSyncConfig {
     pub e2ee_recovery_code: Option<String>,
     /// WebAuthn PRF output (exactly 32 bytes) from the platform ceremony.
     pub e2ee_prf_secret: Option<Vec<u8>>,
+    /// Remote subfolder to mirror (absolute server path; empty or `/` for
+    /// the whole account). Mirrors the CLI `--remote` flag.
+    pub remote: Option<String>,
 }
 
 /// What one sync pass did.
@@ -52,6 +55,8 @@ pub struct FfiSyncReport {
     pub removed_remote: u64,
     /// Push conflicts (server version kept, local copy preserved).
     pub conflicts: u64,
+    /// Files skipped this pass due to a per-file error (not fatal).
+    pub failed: u64,
 }
 
 impl From<SyncReport> for FfiSyncReport {
@@ -62,6 +67,7 @@ impl From<SyncReport> for FfiSyncReport {
             removed_local: report.removed_local,
             removed_remote: report.removed_remote,
             conflicts: report.conflicts,
+            failed: report.failed,
         }
     }
 }
@@ -134,6 +140,7 @@ pub enum FfiError {
 #[derive(uniffi::Object)]
 pub struct KolimiSync {
     config: SyncConfig,
+    remote: Option<String>,
     /// A device enrollment started by `start_enrollment`, awaiting approval.
     pending: Mutex<Option<kolimi_sync::PendingDevice>>,
 }
@@ -162,6 +169,7 @@ impl KolimiSync {
                 local_dir: config.local_dir.into(),
                 e2ee,
             },
+            remote: config.remote,
             pending: Mutex::new(None),
         })
     }
@@ -170,8 +178,13 @@ impl KolimiSync {
     /// background worker; overlapping calls are the platform's job to
     /// prevent.
     pub async fn sync_once(&self) -> Result<FfiSyncReport, FfiError> {
-        kolimi_sync::sync_once(&self.config)
-            .await
+        let remote = self.remote.as_deref().unwrap_or("");
+        let result = if remote.is_empty() || remote == "/" {
+            kolimi_sync::sync_once(&self.config).await
+        } else {
+            kolimi_sync::sync_once_rooted(&self.config, remote).await
+        };
+        result
             .map(FfiSyncReport::from)
             .map_err(|error| match error {
                 // A locked keyring is a first-class state, not a failure
@@ -198,16 +211,20 @@ impl KolimiSync {
     /// Waits for the in-progress enrollment to be approved and persists the
     /// device key. Returns the enrollment id.
     pub async fn finish_enrollment(&self) -> Result<i64, FfiError> {
-        let pending = {
-            let mut guard = self.pending.lock().map_err(|_| lock_poisoned())?;
-            guard.take()
+        let cloned = {
+            let guard = self.pending.lock().map_err(|_| lock_poisoned())?;
+            guard.clone()
         }
         .ok_or_else(|| FfiError::E2ee {
             message: "no enrollment in progress".to_string(),
         })?;
-        kolimi_sync::finish_enrollment(&self.config, &pending)
+        let id = kolimi_sync::finish_enrollment(&self.config, &cloned)
             .await
-            .map_err(e2ee_error)
+            .map_err(e2ee_error)?;
+        // Only clear the pending enrollment after the poll succeeded, so a
+        // failure (timeout, network) can be retried.
+        let _ = self.pending.lock().map_err(|_| lock_poisoned())?.take();
+        Ok(id)
     }
 
     /// Fetches a pending enrollment's details (name, fingerprint, code) so an
@@ -224,7 +241,10 @@ impl KolimiSync {
     pub async fn approve_device(&self, id: i64, code: String) -> Result<String, FfiError> {
         kolimi_sync::approve_device(&self.config, id, &code)
             .await
-            .map_err(e2ee_error)
+            .map_err(|error| match error {
+                kolimi_sync::SyncError::Locked(message) => FfiError::Locked { message },
+                other => e2ee_error(other),
+            })
     }
 
     /// Forgets this device's local key material (the OS-keystore entry and

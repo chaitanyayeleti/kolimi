@@ -9,7 +9,7 @@ Type=simple
 User=kolimi
 Group=kolimi
 EnvironmentFile=-/etc/kolimi/kolimi.env
-ExecStart=/usr/local/bin/kolimi-server serve
+ExecStart=/usr/bin/kolimi-server serve
 Restart=on-failure
 RestartSec=2s
 

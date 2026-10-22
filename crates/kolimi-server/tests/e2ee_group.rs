@@ -147,7 +147,7 @@ async fn group_share_reaches_members_and_removal_revokes() {
     std::fs::write(alice_dir.join("Private/doc.bin"), &secret).unwrap();
     sync_once(&alice).await.unwrap();
 
-    let wrapped = share_file_to_group(&alice, "Private/doc.bin", "team")
+    let wrapped = share_file_to_group(&alice, "/", "Private/doc.bin", "team")
         .await
         .unwrap();
     assert_eq!(wrapped, 2, "one wrap per member");

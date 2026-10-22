@@ -281,6 +281,9 @@ impl BlobStore {
         }
         let path = self.chunk_path(user_id, hash);
         if tokio::fs::try_exists(&path).await? {
+            // Touch: reusing an old orphaned chunk for a new upload must
+            // refresh its mtime, or the janitor can sweep it mid-upload.
+            touch_mtime(&path).await;
             return Ok(false);
         }
         let tmp = self.tmp_path()?;
@@ -331,6 +334,7 @@ impl BlobStore {
         let content_id = manifest.content_id();
         let path = self.manifest_path(user_id, &content_id);
         if tokio::fs::try_exists(&path).await? {
+            touch_mtime(&path).await;
             return Ok(content_id);
         }
         let json = serde_json::to_vec(manifest)
@@ -473,7 +477,10 @@ impl BlobStore {
         user_id: i64,
         manifest: &Manifest,
     ) -> Result<Vec<u8>, StoreError> {
-        let mut out = Vec::with_capacity(manifest.size as usize);
+        // Do not pre-allocate `manifest.size`: a malicious or corrupt manifest
+        // can declare gigabytes while referencing a single chunk. Grow
+        // incrementally as verified chunks arrive.
+        let mut out = Vec::new();
         for chunk in &manifest.chunks {
             let bytes = self.get_chunk(user_id, &chunk.hash).await?;
             out.extend_from_slice(&bytes);
@@ -556,27 +563,6 @@ impl BlobStore {
             .checked_sub(grace)
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        let chunks = collect_files(&self.chunks_dir(user_id)).await?;
-        for path in chunks {
-            let Some(hash) = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.parse::<Hash>().ok())
-            else {
-                continue;
-            };
-            if keep_chunks.contains(&hash) {
-                continue;
-            }
-            if older_than(&path, cutoff).await? {
-                if let Ok(meta) = tokio::fs::metadata(&path).await {
-                    stats.bytes_freed = stats.bytes_freed.saturating_add(meta.len());
-                }
-                tokio::fs::remove_file(&path).await?;
-                stats.chunks_deleted += 1;
-            }
-        }
-
         let manifests = collect_files(&self.manifests_dir(user_id)).await?;
         for path in manifests {
             let Some(content_id) = path
@@ -595,6 +581,27 @@ impl BlobStore {
                 }
                 tokio::fs::remove_file(&path).await?;
                 stats.manifests_deleted += 1;
+            }
+        }
+
+        let chunks = collect_files(&self.chunks_dir(user_id)).await?;
+        for path in chunks {
+            let Some(hash) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<Hash>().ok())
+            else {
+                continue;
+            };
+            if keep_chunks.contains(&hash) {
+                continue;
+            }
+            if older_than(&path, cutoff).await? {
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    stats.bytes_freed = stats.bytes_freed.saturating_add(meta.len());
+                }
+                tokio::fs::remove_file(&path).await?;
+                stats.chunks_deleted += 1;
             }
         }
 
@@ -655,10 +662,37 @@ fn chunk_file(chunks_dir: &Path, path: &Path) -> Result<(Manifest, u64), StoreEr
         let dir = chunks_dir.join(&hex[..2]).join(&hex[2..4]);
         std::fs::create_dir_all(&dir)?;
         let target = dir.join(&hex);
-        if !target.exists() {
-            let tmp = dir.join(format!("{hex}.part"));
-            std::fs::write(&tmp, &chunk.data)?;
-            std::fs::rename(&tmp, &target)?;
+        if target.exists() {
+            // Touch reused chunks so the janitor's grace period covers
+            // in-flight uploads that deduplicate old blobs.
+            let _ = std::fs::File::options()
+                .write(true)
+                .open(&target)
+                .and_then(|f| f.set_modified(SystemTime::now()));
+        } else {
+            // Random temp name: a deterministic `{hex}.part` lets two
+            // concurrent uploads of the same chunk truncate each other.
+            // fsync before rename for crash safety (documented above).
+            let tmp = dir.join(format!(
+                "{hex}.{}.{}.part",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            {
+                let mut f = std::fs::File::create(&tmp)?;
+                use std::io::Write;
+                f.write_all(&chunk.data)?;
+                f.sync_all()?;
+            }
+            // Another thread may have won the race; overwrite is safe
+            // (same hash == same bytes), ignoreAlreadyExists-style errors.
+            let _ = std::fs::rename(&tmp, &target).or_else(|_| {
+                let _ = std::fs::remove_file(&tmp);
+                Ok::<(), io::Error>(())
+            });
             new_bytes += chunk.data.len() as u64;
         }
         refs.push(ChunkRef {
@@ -727,6 +761,15 @@ async fn older_than(path: &Path, cutoff: SystemTime) -> Result<bool, StoreError>
     let metadata = tokio::fs::metadata(path).await?;
     let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     Ok(modified < cutoff)
+}
+
+/// Refreshes a blob's mtime so the janitor's grace period covers in-flight
+/// uploads that deduplicate it. Best-effort: failures are ignored.
+async fn touch_mtime(path: &Path) {
+    if let Ok(file) = tokio::fs::File::options().append(true).open(path).await {
+        let std_file = file.into_std().await;
+        let _ = std_file.set_modified(SystemTime::now());
+    }
 }
 
 async fn collect_blobs(

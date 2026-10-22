@@ -192,6 +192,24 @@ pub fn upload(
     xhr.set_onerror(Some(onerror.as_ref().unchecked_ref()));
     onerror.forget();
 
+    let onabort_done = done.clone();
+    let onabort = Closure::<dyn FnMut()>::new(move || {
+        if let Some(callback) = onabort_done.borrow_mut().take() {
+            callback(Err("upload cancelled".to_string()));
+        }
+    });
+    xhr.set_onabort(Some(onabort.as_ref().unchecked_ref()));
+    onabort.forget();
+
+    let ontimeout_done = done.clone();
+    let ontimeout = Closure::<dyn FnMut()>::new(move || {
+        if let Some(callback) = ontimeout_done.borrow_mut().take() {
+            callback(Err("upload timed out".to_string()));
+        }
+    });
+    xhr.set_ontimeout(Some(ontimeout.as_ref().unchecked_ref()));
+    ontimeout.forget();
+
     let array = js_sys::Uint8Array::from(bytes.as_slice());
     let _ = xhr.send_with_opt_buffer_source(Some(array.as_ref()));
 }

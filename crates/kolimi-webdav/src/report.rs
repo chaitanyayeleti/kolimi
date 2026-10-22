@@ -178,7 +178,10 @@ pub fn parse_report(body: &[u8]) -> Result<Report, ()> {
                     let value = buffer.trim().to_string();
                     buffer.clear();
                     match kind {
-                        CaptureKind::SyncToken => sync_token = Some(value),
+                        CaptureKind::SyncToken => {
+                            // RFC 6578: an empty sync-token means initial sync.
+                            sync_token = if value.is_empty() { None } else { Some(value) }
+                        }
                         CaptureKind::SyncLevel => {
                             level = Some(match value.as_str() {
                                 "1" => 1,

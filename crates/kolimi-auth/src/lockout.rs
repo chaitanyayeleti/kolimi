@@ -58,6 +58,14 @@ impl FailedAuthTracker {
                     || now.duration_since(entry.first_failure) < self.window
             });
         }
+        // Hard cap: a flood of unique keys must not grow the map without
+        // bound. Evict arbitrary entries until under the limit.
+        while map.len() > 10_000 {
+            let Some(evict) = map.keys().next().cloned() else {
+                break;
+            };
+            map.remove(&evict);
+        }
         let entry = map.entry(key.to_string()).or_insert(Entry {
             failures: 0,
             first_failure: now,

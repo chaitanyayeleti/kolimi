@@ -145,9 +145,10 @@ if [ "$NO_SYSTEMD" = 0 ] && command -v systemctl >/dev/null 2>&1 && [ "$(id -u)"
         systemd-sysusers /usr/lib/sysusers.d/kolimi.conf 2>/dev/null || true
     fi
     mkdir -p "$DATA_DIR"
-    chown kolimi:kolimi "$DATA_DIR" 2>/dev/null || true
     chmod 700 "$DATA_DIR"
-    say "systemd unit installed; enable with: systemctl enable --now kolimi"
+    # Ownership is fixed after the admin user is created below: creating the
+    # database as root before chown leaves kolimi.db owned by root.
+    say "systemd unit will be available after package install; enable with: systemctl enable --now kolimi"
 fi
 
 # Create the admin account (idempotent-ish: fails loudly if it exists).
@@ -168,6 +169,12 @@ if printf '%s\n' "$PASSWORD" | KOLIMI_DATA="$DATA_DIR" "$PREFIX/bin/kolimi-serve
     fi
 else
     say "note: user '$ADMIN' may already exist; skipping creation"
+fi
+# Fix ownership after the database may have been created as root above, so
+# the kolimi service user can write to it.
+if [ "$(id -u)" = 0 ]; then
+    chown -R kolimi:kolimi "$DATA_DIR" 2>/dev/null || true
+    chmod 700 "$DATA_DIR"
 fi
 
 say ""

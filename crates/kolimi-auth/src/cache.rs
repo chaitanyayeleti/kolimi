@@ -5,9 +5,12 @@ use std::{
 };
 
 /// Builds a cache key for a credential pair, without retaining the password.
+/// The username is lowercased so `Alice` and `alice` share lockout/cache
+/// state (SQLite matches usernames `COLLATE NOCASE`).
 pub fn credential_cache_key(username: &str, password: &str) -> String {
     format!(
-        "{username}:{}",
+        "{}:{}",
+        username.to_lowercase(),
         hex::encode(blake3::hash(password.as_bytes()).as_bytes())
     )
 }

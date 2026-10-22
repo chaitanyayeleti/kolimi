@@ -93,7 +93,11 @@ impl LockManager {
         let timeout = clamp_timeout(timeout_secs);
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.purge(now);
-        if inner.conflicts(path, scope) {
+        // Bound total lock state: lock-null exhaustion must not OOM the server.
+        if inner.locks.len() > 10_000 {
+            return Err(LockError::Conflict);
+        }
+        if inner.conflicts(owner, path, scope) {
             return Err(LockError::Conflict);
         }
         let token = new_token(&mut inner.counter, owner, path);
@@ -193,6 +197,22 @@ impl LockManager {
             .map(|lock| lock.token.clone())
             .collect()
     }
+
+    /// Removes `owner`'s locks rooted at `root` (the path itself and any
+    /// descendant), e.g. after the subtree is deleted or moved away.
+    pub fn remove_subtree(&self, owner: i64, root: &str) {
+        let now = Instant::now();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.purge(now);
+        inner.locks.retain(|locked, entries| {
+            if locked == root || is_ancestor(root, locked) {
+                entries.retain(|(who, _)| *who != owner);
+                !entries.is_empty()
+            } else {
+                true
+            }
+        });
+    }
 }
 
 impl Inner {
@@ -232,10 +252,11 @@ impl Inner {
         None
     }
 
-    fn conflicts(&self, path: &str, scope: Scope) -> bool {
+    fn conflicts(&self, owner: i64, path: &str, scope: Scope) -> bool {
         self.locks.iter().any(|(locked, entries)| {
-            entries.iter().any(|(_, lock)| {
-                covers(locked, lock, path)
+            entries.iter().any(|(who, lock)| {
+                *who == owner
+                    && covers(locked, lock, path)
                     && (lock.scope == Scope::Exclusive || scope == Scope::Exclusive)
             })
         })
@@ -281,23 +302,30 @@ fn new_token(counter: &mut u64, owner: i64, path: &str) -> String {
 
 /// Parses the state tokens from an RFC 4918 `If` header.
 ///
-/// Every `<...>` value that is not an absolute resource URL (a tagged-list
-/// resource) is treated as a state token; `Not` and entity-tag conditions are
-/// ignored by this implementation.
+/// Only non-negated lock tokens are returned: `Not <...>` conditions and
+/// tagged-list resource paths (anything containing `/`) are skipped, matching
+/// what [`evaluate_if`] enforces for untagged lists.
 pub fn if_tokens(header: &str) -> Vec<String> {
     let mut tokens = Vec::new();
-    let mut rest = header;
-    while let Some(start) = rest.find('<') {
-        let after = &rest[start + 1..];
-        let Some(end) = after.find('>') else {
+    let mut search_from = 0;
+    while let Some(rel_start) = header[search_from..].find('<') {
+        let start = search_from + rel_start;
+        let after = &header[start + 1..];
+        let Some(rel_end) = after.find('>') else {
             break;
         };
-        let token = &after[..end];
-        let lower = token.to_ascii_lowercase();
-        if !token.is_empty() && !lower.starts_with("http://") && !lower.starts_with("https://") {
+        let token = &after[..rel_end];
+        // A token preceded by `Not` is negated (it asserts absence), so it
+        // must not be treated as a presented token.
+        let negated = header[..start]
+            .trim_end()
+            .rsplit(|c: char| c == '(' || c == ')' || c.is_whitespace())
+            .next()
+            .is_some_and(|word| word == "Not");
+        if !negated && !token.is_empty() && !token.contains('/') {
             tokens.push(token.to_string());
         }
-        rest = &after[end + 1..];
+        search_from = start + 1 + rel_end + 1;
     }
     tokens
 }
@@ -511,15 +539,16 @@ mod tests {
         let header = "(<opaquelocktoken:abc> <urn:other:x>) Not <opaquelocktoken:def>";
         assert_eq!(
             if_tokens(header),
-            vec![
-                "opaquelocktoken:abc".to_string(),
-                "urn:other:x".to_string(),
-                "opaquelocktoken:def".to_string()
-            ]
+            vec!["opaquelocktoken:abc".to_string(), "urn:other:x".to_string(),]
         );
         // Tagged-list resource URLs are not state tokens.
         let tagged = "<http://host/dav/a> (<opaquelocktoken:abc>)";
         assert_eq!(if_tokens(tagged), vec!["opaquelocktoken:abc".to_string()]);
+        // Relative resource paths are not state tokens either.
+        assert_eq!(
+            if_tokens("</dav/a> (<opaquelocktoken:abc>)"),
+            vec!["opaquelocktoken:abc".to_string()]
+        );
         assert_eq!(parse_timeout("Second-120"), 120);
         assert_eq!(parse_timeout("Infinite"), MAX_TIMEOUT);
         assert_eq!(parse_timeout("garbage"), 0);

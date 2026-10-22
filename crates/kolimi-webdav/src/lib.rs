@@ -105,7 +105,7 @@ fn options() -> Response {
     headers.insert(header::ALLOW, HeaderValue::from_static(ALLOW));
     headers.insert(
         axum::http::HeaderName::from_static("dav"),
-        HeaderValue::from_static("1, 2, sync-collection"),
+        HeaderValue::from_static("1, 2, sync-collection, calendar-access, addressbook"),
     );
     headers.insert(
         axum::http::HeaderName::from_static("ms-author-via"),
@@ -258,11 +258,17 @@ async fn put(
         return encrypted_forbidden();
     }
 
-    if let Some(value) = header_str(headers, header::IF_NONE_MATCH)
-        && value.trim() == "*"
-        && existing.is_some()
-    {
-        return StatusCode::PRECONDITION_FAILED.into_response();
+    if let Some(value) = header_str(headers, header::IF_NONE_MATCH) {
+        let value = value.trim();
+        if value == "*" {
+            if existing.is_some() {
+                return StatusCode::PRECONDITION_FAILED.into_response();
+            }
+        } else if let Some(node) = &existing
+            && cond::matches_etag(value, &node.etag(), true)
+        {
+            return StatusCode::PRECONDITION_FAILED.into_response();
+        }
     }
     if let Some(value) = header_str(headers, header::IF_MATCH) {
         match &existing {
@@ -306,8 +312,25 @@ async fn delete(
     if let Some(response) = lock_check(vfs, locks, user_id, path, headers).await {
         return response;
     }
+    if let Some(value) = header_str(headers, header::IF_MATCH) {
+        let value = value.trim();
+        if value != "*" {
+            match vfs.stat_access(user_id, path).await {
+                Ok(Some(access)) => {
+                    if !cond::matches_etag(value, &access.node.etag(), false) {
+                        return StatusCode::PRECONDITION_FAILED.into_response();
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => return vfs_error(e),
+            }
+        }
+    }
     match vfs.delete_access(user_id, path).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            locks.remove_subtree(user_id, path);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(VfsError::Root) => StatusCode::FORBIDDEN.into_response(),
         Err(e) => vfs_error(e),
     }
@@ -330,7 +353,7 @@ async fn mkcol(
     }
     match vfs.mkdir_access(user_id, path).await {
         Ok(_) => StatusCode::CREATED.into_response(),
-        Err(VfsError::AlreadyExists) => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        Err(VfsError::AlreadyExists) => method_not_allowed(),
         Err(e) => vfs_error(e),
     }
 }
@@ -570,11 +593,15 @@ async fn copy_move(
         return encrypted_forbidden();
     }
     // Moving writes to the destination (and removes the source); copying only
-    // writes to the destination.
-    if let Some(response) = lock_check(vfs, locks, user_id, &destination, headers).await {
+    // writes to the destination. Check the source first: the `If` header may
+    // carry the source token, which must not fail the destination check when
+    // the destination itself is unlocked.
+    if is_move && let Some(response) = lock_check(vfs, locks, user_id, source, headers).await {
         return response;
     }
-    if is_move && let Some(response) = lock_check(vfs, locks, user_id, source, headers).await {
+    if !locks.covering_tokens(user_id, &destination).is_empty()
+        && let Some(response) = lock_check(vfs, locks, user_id, &destination, headers).await
+    {
         return response;
     }
     let overwrite = match header_str(headers, "overwrite") {
@@ -596,6 +623,9 @@ async fn copy_move(
 
     match result {
         Ok(created) => {
+            if is_move {
+                locks.remove_subtree(user_id, source);
+            }
             if created {
                 StatusCode::CREATED.into_response()
             } else {
@@ -769,6 +799,7 @@ async fn report_file_tree(vfs: &Vfs, user: &CurrentUser, path: &str, body: Body)
     }
     let since = match sync_token {
         None => 0,
+        Some(token) if token.trim().is_empty() => 0,
         Some(token) => match parse_user_sync_token(&token, user.user_id) {
             Some(seq) => seq,
             None => return caldav::invalid_sync_token(),
@@ -836,6 +867,14 @@ async fn report_file_tree(vfs: &Vfs, user: &CurrentUser, path: &str, body: Body)
         ReportProps::Only(list) => xml::RequestedProps::Only(list),
         _ => xml::RequestedProps::All,
     };
+    // A path deleted and re-created within the window resolves live above;
+    // drop the stale tombstone so the href is not reported twice.
+    if !deleted.is_empty() && !entries.is_empty() {
+        let live: std::collections::HashSet<&str> =
+            entries.iter().map(|entry| entry.href.as_str()).collect();
+        let mut seen_deleted = std::collections::HashSet::new();
+        deleted.retain(|href| !live.contains(href.as_str()) && seen_deleted.insert(href.clone()));
+    }
     let token = format!("urn:kolimi:sync:user:{}:{}", user.user_id, latest);
     match xml::multistatus_sync(&entries, &deleted, &requested, &token) {
         Ok(xml) => {
@@ -908,5 +947,11 @@ fn vfs_error(e: VfsError) -> Response {
             | StoreError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         },
     };
-    status.into_response()
+    let mut response: Response = status.into_response();
+    if status == StatusCode::METHOD_NOT_ALLOWED {
+        response
+            .headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static(ALLOW));
+    }
+    response
 }

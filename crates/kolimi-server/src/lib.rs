@@ -24,7 +24,7 @@ use std::{path::Path, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Router,
-    routing::{delete, get, patch, post},
+    routing::{any, delete, get, patch, post},
 };
 use kolimi_auth::{cache::CredentialCache, lockout::FailedAuthTracker, passkey::Passkeys};
 use kolimi_db::Db;
@@ -288,8 +288,8 @@ pub fn build_app(state: AppState) -> Router {
     let public = Router::new()
         .route("/healthz", get(api::healthz))
         .route("/", get(ui::root))
-        .route("/.well-known/caldav", get(ui::well_known))
-        .route("/.well-known/carddav", get(ui::well_known))
+        .route("/.well-known/caldav", any(ui::well_known))
+        .route("/.well-known/carddav", any(ui::well_known))
         .route("/app", get(ui::index))
         .route("/app/", get(ui::index))
         .route("/app/{*path}", get(ui::asset))

@@ -29,6 +29,10 @@ pub const LINK_WINDOW: Duration = Duration::from_secs(5 * 60);
 pub const PREVIEW_LIMIT: u32 = 120;
 /// Window for [`PREVIEW_LIMIT`].
 pub const PREVIEW_WINDOW: Duration = Duration::from_secs(60);
+/// TOTP enable/disable attempts allowed per window, per client.
+pub const TOTP_LIMIT: u32 = 10;
+/// Window for [`TOTP_LIMIT`].
+pub const TOTP_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// Cap on tracked keys before stale entries are swept.
 const MAX_KEYS: usize = 10_000;
@@ -134,8 +138,11 @@ pub async fn limit(State(state): State<AppState>, req: Request, next: Next) -> R
     let method = req.method();
     let is_auth = (method == Method::POST && path == "/api/session")
         || path.starts_with("/api/passkeys/login/");
+    let is_totp = method == Method::POST && path.starts_with("/api/totp/");
     let (class, max, window) = if is_auth {
         ("auth", AUTH_LIMIT, AUTH_WINDOW)
+    } else if is_totp {
+        ("totp", TOTP_LIMIT, TOTP_WINDOW)
     } else if method == Method::POST && path.starts_with("/public/") && path.ends_with("/unlock") {
         ("link", LINK_LIMIT, LINK_WINDOW)
     } else if path == "/api/preview" {

@@ -40,6 +40,7 @@ fn config(
         password: PASS.to_string(),
         token: None,
         local_dir: local.to_string_lossy().to_string(),
+        remote: None,
         encrypted_roots: vec!["Private".to_string()],
         e2ee_passphrase: passphrase.map(str::to_string),
         e2ee_recovery_code: recovery.map(str::to_string),
