@@ -287,12 +287,64 @@ async fn delete_removes_the_user_and_cascades() {
 
     // Blob storage is per-user and must not be left orphaned on delete.
     let bob_id = state.db.find_user("bob").await.unwrap().unwrap().id;
+    let alice_id = state.db.find_user("alice").await.unwrap().unwrap().id;
     let bob_blobs = dir
         .path()
         .join("blobs")
         .join("users")
         .join(bob_id.to_string());
     assert!(bob_blobs.exists(), "bob has stored blobs before deletion");
+
+    // Give bob a wrapped file key, a keyring, a calendar and shares in both
+    // directions: deleting the account must cascade every one of them.
+    let bob_node = state.vfs.resolve(bob_id, "/bobfile.txt").await.unwrap();
+    state
+        .db
+        .set_file_key(bob_id, bob_node.id, b"wrapped-key")
+        .await
+        .unwrap();
+    state.db.set_keyring(bob_id, "{}").await.unwrap();
+    state
+        .db
+        .create_dav_collection(bob_id, "calendar", "work", Some("Work"))
+        .await
+        .unwrap();
+    request(
+        &app,
+        "PUT",
+        "/dav/alicefile.txt",
+        Some(&basic("alice", PASS)),
+        None,
+    )
+    .await;
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/shares",
+        Some(&basic("alice", PASS)),
+        Some(json!({
+            "path": "/alicefile.txt",
+            "kind": "user",
+            "recipient": "bob",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/shares",
+        Some(&basic("bob", PASS)),
+        Some(json!({
+            "path": "/bobfile.txt",
+            "kind": "user",
+            "recipient": "alice",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(state.db.shares_owned(alice_id).await.unwrap().len(), 1);
+    assert_eq!(state.db.shares_owned(bob_id).await.unwrap().len(), 1);
 
     // You cannot delete yourself; a missing user is 404.
     let (status, _) = request(
@@ -333,6 +385,55 @@ async fn delete_removes_the_user_and_cascades() {
         "bob's blobs are removed with the account"
     );
     assert!(state.db.find_user("bob").await.unwrap().is_none());
+    assert!(
+        // The user (and with it the root node) is gone, so every lookup by
+        // their id now fails rather than resolving the old tree.
+        state.vfs.stat(bob_id, "/bobfile.txt").await.is_err(),
+        "bob's file nodes are removed"
+    );
+    assert!(
+        state.db.file_key(bob_node.id).await.unwrap().is_none(),
+        "bob's wrapped file key is removed"
+    );
+    assert!(
+        state.db.keyring(bob_id).await.unwrap().is_none(),
+        "bob's keyring is removed"
+    );
+    assert!(
+        state
+            .db
+            .list_dav_collections(bob_id, "calendar")
+            .await
+            .unwrap()
+            .is_empty(),
+        "bob's calendars are removed"
+    );
+    assert!(
+        state.db.shares_owned(bob_id).await.unwrap().is_empty(),
+        "shares bob created are removed"
+    );
+    assert!(
+        state
+            .db
+            .shares_owned(alice_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|share| share.recipient_user_id != Some(bob_id)),
+        "alice's shares to bob are removed"
+    );
+    let (_, received) = request(
+        &app,
+        "GET",
+        "/api/shares/received",
+        Some(&basic("alice", PASS)),
+        None,
+    )
+    .await;
+    assert!(
+        received["mounts"].as_array().unwrap().is_empty(),
+        "bob's share to alice is gone: {received}"
+    );
     let (status, _) = request(
         &app,
         "GET",
