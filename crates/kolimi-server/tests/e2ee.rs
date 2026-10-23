@@ -345,9 +345,10 @@ async fn legacy_plaintext_names_are_updated_in_place_not_duplicated() {
         .filter_map(|entry| entry["path"].as_str())
         .filter(|path| path.starts_with("/Private/"))
         .filter(|path| {
-            let name = path.rsplit('/').next().unwrap_or_default();
-            name == "legacy.txt"
-                || kolimi_crypto::decode_name(&master, name).as_deref() == Some("legacy.txt")
+            kolimi_crypto::decode_name_path(&master, path)
+                .rsplit('/')
+                .next()
+                == Some("legacy.txt")
         })
         .map(str::to_string)
         .collect();

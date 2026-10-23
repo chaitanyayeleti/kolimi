@@ -405,7 +405,8 @@ pub async fn migrate_names(master: &MasterKey) -> Result<usize, String> {
             // Content is still plaintext; encrypt it before hiding its name.
             continue;
         }
-        let encoded = encode_component(master, &name)?;
+        let parent_plaintext = decode_display_path(Some(master), &parent);
+        let encoded = encode_component(master, &parent_plaintext, &name)?;
         let new_path = format!("{parent}/{encoded}");
         move_file(&format!("{parent}/{name}"), &new_path).await?;
         mapping.insert(old_path, new_path);
@@ -511,13 +512,35 @@ pub async fn file_key_and_lengths(
     Ok((*file_key.as_bytes(), lengths))
 }
 
-/// Decodes a stored file/folder name for display, leaving plaintext names
-/// (and names from another keyring) untouched.
+/// One received encrypted share: its stored mount prefix, wrapped display
+/// name, and (for folders) the key that decodes its children.
+#[derive(Clone, PartialEq)]
+pub struct ShareDisplay {
+    /// `/Shared with me/<stored mount name>`
+    pub prefix: String,
+    /// The owner's plaintext name for the mount.
+    pub name: String,
+    /// Key for the mount's children; `None` for a shared file.
+    pub key: Option<[u8; 32]>,
+}
+
+/// A bare name with no path context (legacy fallback). Prefer
+/// [`display_name_of`] when a path is available.
 pub fn decode_display_name(master: Option<&MasterKey>, name: &str) -> String {
     if let Some(master) = master {
-        return kolimi_crypto::decode_name(master, name).unwrap_or_else(|| name.to_string());
+        if let Some(decoded) = kolimi_crypto::NameKey::root(master).decode(name) {
+            return decoded;
+        }
+        if let Some(decoded) = kolimi_crypto::decode_name_path(master, name)
+            .rsplit('/')
+            .next()
+            .filter(|decoded| !decoded.is_empty())
+            && decoded != name
+        {
+            return decoded.to_string();
+        }
+        return name.to_string();
     }
-    // Locked: never show the opaque `k1_…` bytes — say what they are.
     if kolimi_crypto::is_encoded_name(name) {
         "Encrypted item".to_string()
     } else {
@@ -525,25 +548,120 @@ pub fn decode_display_name(master: Option<&MasterKey>, name: &str) -> String {
     }
 }
 
-/// Decodes every path segment for display. The returned path is for humans
-/// only; navigation must keep using the stored, encoded path.
+/// Decodes a stored path for display. Navigation must keep using the stored,
+/// encoded path.
 pub fn decode_display_path(master: Option<&MasterKey>, path: &str) -> String {
-    path.split('/')
-        .map(|segment| decode_display_name(master, segment))
-        .collect::<Vec<_>>()
-        .join("/")
+    match master {
+        Some(master) => kolimi_crypto::decode_name_path(master, path),
+        None => path
+            .split('/')
+            .map(|segment| {
+                if kolimi_crypto::is_encoded_name(segment) {
+                    "Encrypted item"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/"),
+    }
 }
 
-/// Encodes one name for storage inside an encrypted folder.
-pub fn encode_component(master: &MasterKey, name: &str) -> Result<String, String> {
-    kolimi_crypto::encode_name(master, name)
+/// The display name of a node, using its full stored path for key context.
+pub fn display_name_of(master: Option<&MasterKey>, path: &str) -> String {
+    decode_display_path(master, path)
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Decodes a path that may live below a received encrypted share.
+///
+/// The mount segment itself uses the name wrapped for this recipient; the
+/// rest is decoded with the folder key from the same envelope. Plaintext
+/// mounts pass through the normal per-folder decoder.
+pub fn decode_display_path_with_shares(
+    master: Option<&MasterKey>,
+    path: &str,
+    shares: &[ShareDisplay],
+) -> String {
+    let Some(master) = master else {
+        return decode_display_path(None, path);
+    };
+    for share in shares {
+        let Some(rest) = path.strip_prefix(&share.prefix) else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            continue;
+        }
+        // Keep the "Shared with me" segment so breadcrumb labels stay
+        // aligned with the stored path's segment count.
+        let parent = share
+            .prefix
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.trim_start_matches('/').to_string())
+            .unwrap_or_default();
+        let mut out = vec![parent, share.name.clone()];
+        let mut key = share.key.map(kolimi_crypto::NameKey::from_bytes);
+        for segment in rest.split('/').filter(|segment| !segment.is_empty()) {
+            let decoded = key.as_ref().and_then(|key| key.decode(segment));
+            match decoded {
+                Some(name) => {
+                    if let Some(current) = key.as_ref() {
+                        key = current.child(&name).ok();
+                    }
+                    out.push(name);
+                }
+                None => {
+                    out.push(segment.to_string());
+                    if let Some(current) = key.as_ref() {
+                        key = current.child(segment).ok();
+                    }
+                }
+            }
+        }
+        let decoded = out.join("/");
+        return if path.starts_with('/') {
+            format!("/{decoded}")
+        } else {
+            decoded
+        };
+    }
+    // Legacy root-level encrypted names still carry the root-key fallback.
+    decode_display_path(Some(master), path)
+}
+
+/// The display name of a node, honouring received-share name keys.
+pub fn display_name_with_shares(
+    master: Option<&MasterKey>,
+    path: &str,
+    shares: &[ShareDisplay],
+) -> String {
+    decode_display_path_with_shares(master, path, shares)
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Encodes one name under the plaintext path of its parent folder.
+pub fn encode_component(
+    master: &MasterKey,
+    parent_plaintext: &str,
+    name: &str,
+) -> Result<String, String> {
+    let key = kolimi_crypto::name_key_for_path(master, parent_plaintext)
+        .map_err(|_| "could not derive the folder name key".to_string())?;
+    key.encode(name)
         .map_err(|_| "could not encrypt the file name".to_string())
 }
 
 /// Decrypts an encrypted file, returning its name and plaintext bytes.
 pub async fn decrypt_file(master: &MasterKey, path: &str) -> Result<(String, Vec<u8>), String> {
     let (file_key, manifest) = load_file(master, path).await?;
-    let name = decode_display_name(Some(master), path.rsplit('/').next().unwrap_or("file"));
+    let name = display_name_of(Some(master), path);
     let Some(chunks) = manifest["chunks"].as_array() else {
         return Ok((name, Vec::new()));
     };
@@ -949,6 +1067,7 @@ async fn own_identity(master: &MasterKey) -> Result<kolimi_crypto::Identity, Str
 pub async fn decrypt_shared_file(
     master: &MasterKey,
     server_path: &str,
+    display_name: &str,
 ) -> Result<(String, Vec<u8>), String> {
     let identity = own_identity(master).await?;
     let response = api::get(&format!("/api/e2ee/share-key?path={}", encode(server_path))).await?;
@@ -961,11 +1080,12 @@ pub async fn decrypt_shared_file(
     let wrapped = STANDARD
         .decode(response.body["wrapped_key"].as_str().unwrap_or_default())
         .map_err(|_| "Malformed share key".to_string())?;
-    let secret = identity.private_bytes();
-    let raw = kolimi_crypto::unwrap_secret(&secret, &wrapped)
+    // Share keys are file-key wraps (SHARE_AAD), not device-enrollment
+    // wraps; unwrap with the identity's file-key method.
+    let file_key = identity
+        .unwrap_file_key(&wrapped)
         .map_err(|_| "Could not unwrap the share key".to_string())?;
-    let file_key = FileKey::from_bytes(raw);
-    let name = server_path.rsplit('/').next().unwrap_or("file").to_string();
+    let name = display_name.to_string();
     let manifest = api::get(&format!("/api/files/manifest?path={}", encode(server_path))).await?;
     if manifest.status != 200 {
         return Err("Could not load the file manifest".to_string());
@@ -993,6 +1113,8 @@ async fn decrypt_manifest(
             .map_err(|_| "Decryption failed (wrong key or corrupt data)".to_string())?;
         out.extend_from_slice(plaintext.as_slice());
     }
+    let out = kolimi_crypto::unpad_file(&out)
+        .map_err(|_| "Decryption failed (corrupt padding)".to_string())?;
     Ok((name.to_string(), out))
 }
 
@@ -1043,15 +1165,110 @@ pub async fn share_encrypted_with(
     username: &str,
 ) -> Result<usize, String> {
     let info = file_info(path).await?;
-    if info["kind"].as_str() == Some("dir") {
+    let is_dir = info["kind"].as_str() == Some("dir");
+    let encrypted = info["encrypted"].as_bool() == Some(true);
+    // The recipient needs the plaintext mount name (and, for a folder, the
+    // per-folder name key) before file keys are useful. This is the piece
+    // that used to leave `Shared with me` showing `k1_…`.
+    if encrypted {
+        share_name_with(master, path, is_dir, username).await?;
+    }
+    if is_dir {
         share_encrypted_dir(master, path, username).await
-    } else if info["encrypted"].as_bool() == Some(true) {
+    } else if encrypted {
         let wrapped = wrap_share_key(master, path, username).await?;
         put_share_key(path, username, &wrapped).await?;
         Ok(1)
     } else {
         Ok(0)
     }
+}
+
+/// The opaque payload wrapped for one recipient of an encrypted share.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ShareNamePayload {
+    v: u8,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+}
+
+/// Wraps a share's display name (and a folder's name key) for one recipient.
+pub async fn share_name_with(
+    master: &MasterKey,
+    path: &str,
+    is_dir: bool,
+    username: &str,
+) -> Result<(), String> {
+    let plaintext = decode_display_path(Some(master), path);
+    let name = plaintext
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "could not determine the share name".to_string())?
+        .to_string();
+    let key = if is_dir {
+        Some(
+            STANDARD.encode(
+                kolimi_crypto::name_key_for_path(master, &plaintext)
+                    .map_err(|_| "could not derive the folder name key".to_string())?
+                    .to_bytes(),
+            ),
+        )
+    } else {
+        None
+    };
+    let payload = serde_json::to_vec(&ShareNamePayload { v: 1, name, key })
+        .map_err(|_| "could not encode the share name".to_string())?;
+    let public = recipient_public(username).await?;
+    let wrapped = kolimi_crypto::wrap_share_metadata_for(&public, &payload)
+        .map_err(|_| format!("could not wrap the name for {username}"))?;
+    let response = api::put_bytes(
+        &format!(
+            "/api/e2ee/share-name?path={}&recipient={}",
+            encode(path),
+            encode(username)
+        ),
+        &wrapped,
+    )
+    .await?;
+    if response.status == 204 {
+        Ok(())
+    } else {
+        Err(response
+            .error()
+            .unwrap_or("could not store the share name")
+            .to_string())
+    }
+}
+
+/// Unwraps a received share name and, for a folder, its name key.
+pub async fn unwrap_share_name(
+    master: &MasterKey,
+    wrapped_b64: &str,
+) -> Result<(String, Option<[u8; 32]>), String> {
+    let identity = own_identity(master).await?;
+    let wrapped = STANDARD
+        .decode(wrapped_b64)
+        .map_err(|_| "Malformed share name".to_string())?;
+    let bytes = kolimi_crypto::unwrap_share_metadata(&identity.private_bytes(), &wrapped)
+        .map_err(|_| "Could not unwrap the share name".to_string())?;
+    let payload: ShareNamePayload =
+        serde_json::from_slice(&bytes).map_err(|_| "Malformed share name payload".to_string())?;
+    if payload.v != 1 {
+        return Err("Unsupported share name version".to_string());
+    }
+    let key = match payload.key {
+        Some(encoded) => Some(
+            STANDARD
+                .decode(encoded)
+                .map_err(|_| "Malformed folder key".to_string())?
+                .try_into()
+                .map_err(|_| "Folder key must be 32 bytes".to_string())?,
+        ),
+        None => None,
+    };
+    Ok((payload.name, key))
 }
 
 /// Recursive directory half of [`share_encrypted_with`] (iterative, so no

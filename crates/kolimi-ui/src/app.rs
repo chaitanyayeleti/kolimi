@@ -78,23 +78,27 @@ struct UploadItem {
     file: web_sys::File,
 }
 
-fn parse_results(body: &Value, master: Option<&MasterKey>) -> Vec<SearchHit> {
+fn parse_results(
+    body: &Value,
+    master: Option<&MasterKey>,
+    shares: &[crate::e2ee::ShareDisplay],
+) -> Vec<SearchHit> {
     body.get("results")
         .and_then(Value::as_array)
         .map(|items| {
             items
                 .iter()
-                .map(|item| SearchHit {
-                    name: crate::e2ee::decode_display_name(
-                        master,
-                        item["name"].as_str().unwrap_or_default(),
-                    ),
-                    path: item["path"].as_str().unwrap_or_default().to_string(),
-                    is_dir: item["is_dir"].as_bool().unwrap_or(false),
-                    size: item["size"].as_u64().unwrap_or(0),
-                    modified_at: item["modified_at"].as_i64().unwrap_or(0),
-                    snippet: item["snippet"].as_str().unwrap_or_default().to_string(),
-                    encrypted: item["encrypted"].as_bool().unwrap_or(false),
+                .map(|item| {
+                    let path = item["path"].as_str().unwrap_or_default().to_string();
+                    SearchHit {
+                        name: crate::e2ee::display_name_with_shares(master, &path, shares),
+                        path,
+                        is_dir: item["is_dir"].as_bool().unwrap_or(false),
+                        size: item["size"].as_u64().unwrap_or(0),
+                        modified_at: item["modified_at"].as_i64().unwrap_or(0),
+                        snippet: item["snippet"].as_str().unwrap_or_default().to_string(),
+                        encrypted: item["encrypted"].as_bool().unwrap_or(false),
+                    }
                 })
                 .collect()
         })
@@ -172,46 +176,98 @@ pub fn encode_path(path: &str) -> String {
         .join("/")
 }
 
-fn parse_entries(body: &Value, master: Option<&MasterKey>) -> Vec<Entry> {
+/// Fetches received mounts and unwraps their display names/keys.
+async fn received_mounts(
+    master: Option<&MasterKey>,
+) -> (Vec<Value>, Vec<crate::e2ee::ShareDisplay>) {
+    let mut mounts = Vec::new();
+    if let Ok(response) = api::get("/api/shares/received").await
+        && response.status == 200
+    {
+        mounts = response.body["mounts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+    }
+    let mut shares = Vec::new();
+    if let Some(master) = master {
+        for mount in &mounts {
+            let (Some(wrapped), Some(prefix)) =
+                (mount["wrapped_name"].as_str(), mount["mount"].as_str())
+            else {
+                continue;
+            };
+            if let Ok((name, key)) = crate::e2ee::unwrap_share_name(master, wrapped).await {
+                shares.push(crate::e2ee::ShareDisplay {
+                    prefix: prefix.to_string(),
+                    name,
+                    key,
+                });
+            }
+        }
+    }
+    (mounts, shares)
+}
+
+fn parse_entries(
+    body: &Value,
+    master: Option<&MasterKey>,
+    shares: &[crate::e2ee::ShareDisplay],
+) -> Vec<Entry> {
     body.get("entries")
         .and_then(Value::as_array)
         .map(|items| {
             items
                 .iter()
-                .map(|item| Entry {
-                    name: crate::e2ee::decode_display_name(
-                        master,
-                        item["name"].as_str().unwrap_or_default(),
-                    ),
-                    path: item["path"].as_str().unwrap_or_default().to_string(),
-                    kind: item["kind"].as_str().unwrap_or("file").to_string(),
-                    size: item["size"].as_u64().unwrap_or(0),
-                    modified_at: item["modified_at"].as_i64().unwrap_or(0),
-                    shared: item["shared"].as_bool().unwrap_or(false),
-                    owner: item["owner"].as_str().map(str::to_string),
-                    permission: item["permission"].as_str().map(str::to_string),
-                    encrypted: item["encrypted"].as_bool().unwrap_or(false),
+                .map(|item| {
+                    let path = item["path"].as_str().unwrap_or_default().to_string();
+                    Entry {
+                        name: crate::e2ee::display_name_with_shares(master, &path, shares),
+                        path,
+                        kind: item["kind"].as_str().unwrap_or("file").to_string(),
+                        size: item["size"].as_u64().unwrap_or(0),
+                        modified_at: item["modified_at"].as_i64().unwrap_or(0),
+                        shared: item["shared"].as_bool().unwrap_or(false),
+                        owner: item["owner"].as_str().map(str::to_string),
+                        permission: item["permission"].as_str().map(str::to_string),
+                        encrypted: item["encrypted"].as_bool().unwrap_or(false),
+                    }
                 })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn parse_trash(body: &Value, master: Option<&MasterKey>) -> Vec<TrashItem> {
+fn parse_trash(
+    body: &Value,
+    master: Option<&MasterKey>,
+    shares: &[crate::e2ee::ShareDisplay],
+) -> Vec<TrashItem> {
     body.as_array()
         .map(|items| {
             items
                 .iter()
-                .map(|item| TrashItem {
-                    id: item["id"].as_i64().unwrap_or(0),
-                    name: crate::e2ee::decode_display_name(
-                        master,
-                        item["name"].as_str().unwrap_or_default(),
-                    ),
-                    original_path: item["original_path"]
-                        .as_str()
-                        .map(|path| crate::e2ee::decode_display_path(master, path)),
-                    size: item["size"].as_u64().unwrap_or(0),
+                .map(|item| {
+                    let original = item["original_path"].as_str();
+                    let display_path = original.map(|path| {
+                        crate::e2ee::decode_display_path_with_shares(master, path, shares)
+                    });
+                    TrashItem {
+                        id: item["id"].as_i64().unwrap_or(0),
+                        name: display_path
+                            .as_deref()
+                            .and_then(|path| path.rsplit('/').next())
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                crate::e2ee::decode_display_name(
+                                    master,
+                                    item["name"].as_str().unwrap_or_default(),
+                                )
+                            }),
+                        original_path: display_path,
+                        size: item["size"].as_u64().unwrap_or(0),
+                    }
                 })
                 .collect()
         })
@@ -648,10 +704,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 return;
             }
             let path = entry.path.clone();
+            let display_name = entry.name.clone();
             let shared = entry.shared;
             spawn_local(async move {
                 let result = if shared {
-                    crate::e2ee::decrypt_shared_file(&master, &path).await
+                    crate::e2ee::decrypt_shared_file(&master, &path, &display_name).await
                 } else {
                     crate::e2ee::decrypt_file(&master, &path).await
                 };
@@ -757,17 +814,10 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let load = move |next: String| nav.set(next);
     let load_seq = RwSignal::new(0u32);
     // Mounts received from others, with their permissions: gates Upload /
-    // New folder inside read-only shared folders.
+    // New folder inside read-only shared folders. `shared_names` carries the
+    // unwrapped display name (and, for folders, the name key) per mount.
     let received = RwSignal::new(Vec::<Value>::new());
-    let refresh_received = move || {
-        spawn_local(async move {
-            if let Ok(r) = api::get("/api/shares/received").await
-                && r.status == 200
-            {
-                received.set(r.body["mounts"].as_array().cloned().unwrap_or_default());
-            }
-        });
-    };
+    let shared_names = RwSignal::new(Vec::<crate::e2ee::ShareDisplay>::new());
     // Whether the current folder accepts writes: the own tree always does;
     // a received mount only with "write" permission.
     let can_write_here = move |current: &str| {
@@ -796,11 +846,15 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         let requested = nav.get();
         // Navigating leaves any multi-select behind.
         selected.set(std::collections::HashSet::new());
-        refresh_received();
         loading.set(true);
         let seq = load_seq.get_untracked().wrapping_add(1);
         load_seq.set(seq);
         spawn_local(async move {
+            let master = e2ee_master.get_untracked();
+            let (mounts, names) = received_mounts(master.as_ref()).await;
+            received.set(mounts);
+            shared_names.set(names);
+            let shares = shared_names.get_untracked();
             let url = format!("/api/browse?path={}", encode(&requested));
             let result = api::get(&url).await;
             // A newer navigation supersedes this response: don't apply it or
@@ -811,7 +865,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             match result {
                 Ok(r) if r.status == 200 => {
                     folder_encrypted.set(r.body["encrypted"].as_bool().unwrap_or(false));
-                    entries.set(parse_entries(&r.body, e2ee_master.get_untracked().as_ref()));
+                    entries.set(parse_entries(&r.body, master.as_ref(), &shares));
                     parent.set(
                         r.body
                             .get("parent")
@@ -856,9 +910,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let load_trash = move || {
         spawn_local(async move {
             match api::get("/api/trash").await {
-                Ok(r) if r.status == 200 => {
-                    trash.set(parse_trash(&r.body, e2ee_master.get_untracked().as_ref()))
-                }
+                Ok(r) if r.status == 200 => trash.set(parse_trash(
+                    &r.body,
+                    e2ee_master.get_untracked().as_ref(),
+                    &shared_names.get_untracked(),
+                )),
                 Ok(r) => error.set(r.error().unwrap_or("Could not load trash").to_string()),
                 Err(e) => error.set(e),
             }
@@ -1028,14 +1084,16 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 };
                 // The server must not learn the name: encode it as one
                 // opaque path segment inside the encrypted folder.
-                let target = match crate::e2ee::encode_component(&master, &plain_name) {
-                    Ok(encoded) => format!("{}/{}", dir.trim_end_matches('/'), encoded),
-                    Err(e) => {
-                        finish(false, None);
-                        error.set(e);
-                        return;
-                    }
-                };
+                let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &dir);
+                let target =
+                    match crate::e2ee::encode_component(&master, &parent_plaintext, &plain_name) {
+                        Ok(encoded) => format!("{}/{}", dir.trim_end_matches('/'), encoded),
+                        Err(e) => {
+                            finish(false, None);
+                            error.set(e);
+                            return;
+                        }
+                    };
                 progress.set(50);
                 match crate::e2ee::upload_encrypted(&master, &target, &bytes).await {
                     Ok(()) => {
@@ -1186,7 +1244,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     e2ee_open.set(true);
                     return;
                 };
-                match crate::e2ee::encode_component(&master, &name) {
+                let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &current);
+                match crate::e2ee::encode_component(&master, &parent_plaintext, &name) {
                     Ok(encoded) => encoded,
                     Err(e) => {
                         error.set(e);
@@ -1281,7 +1340,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     e2ee_open.set(true);
                     return;
                 };
-                let encoded = match crate::e2ee::encode_component(&master, &name) {
+                let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &current);
+                let encoded = match crate::e2ee::encode_component(&master, &parent_plaintext, &name)
+                {
                     Ok(encoded) => encoded,
                     Err(e) => {
                         error.set(e);
@@ -1344,7 +1405,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     e2ee_open.set(true);
                     return;
                 };
-                let encoded = match crate::e2ee::encode_component(&master, &name) {
+                let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &dest_dir);
+                let encoded = match crate::e2ee::encode_component(&master, &parent_plaintext, &name)
+                {
                     Ok(encoded) => encoded,
                     Err(e) => {
                         error.set(e);
@@ -1498,10 +1561,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             return;
         };
         let path = entry.path.clone();
+        let display_name = entry.name.clone();
         let shared = entry.shared;
         spawn_local(async move {
             let result = if shared {
-                crate::e2ee::decrypt_shared_file(&master, &path).await
+                crate::e2ee::decrypt_shared_file(&master, &path, &display_name).await
             } else {
                 crate::e2ee::decrypt_file(&master, &path).await
             };
@@ -1690,14 +1754,16 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 let target = if kolimi_crypto::is_encoded_name(&name) {
                     file.path.clone()
                 } else {
-                    let encoded = match crate::e2ee::encode_component(&master, &name) {
-                        Ok(encoded) => encoded,
-                        Err(e) => {
-                            error.set(e);
-                            encrypting.set(false);
-                            return;
-                        }
-                    };
+                    let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &dir);
+                    let encoded =
+                        match crate::e2ee::encode_component(&master, &parent_plaintext, &name) {
+                            Ok(encoded) => encoded,
+                            Err(e) => {
+                                error.set(e);
+                                encrypting.set(false);
+                                return;
+                            }
+                        };
                     let target = format!("{dir}/{encoded}");
                     if let Err(e) = crate::e2ee::move_file(&file.path, &target).await {
                         error.set(format!("Renaming “{name}” for encryption failed: {e}"));
@@ -1761,7 +1827,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             let url = format!("/api/search?q={}&limit=50", encode(&text));
             match api::get(&url).await {
                 Ok(r) if r.status == 200 => {
-                    results.set(parse_results(&r.body, e2ee_master.get_untracked().as_ref()));
+                    results.set(parse_results(
+                        &r.body,
+                        e2ee_master.get_untracked().as_ref(),
+                        &shared_names.get_untracked(),
+                    ));
                     search_active.set(true);
                     error.set(String::new());
                 }
@@ -1951,6 +2021,17 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                 .split('/')
                                 .filter(|s| !s.is_empty())
                                 .collect();
+                            let decoded_path = crate::e2ee::decode_display_path_with_shares(
+                                e2ee_master.get_untracked().as_ref(),
+                                &current,
+                                &shared_names.get_untracked(),
+                            );
+                            let labels: Vec<String> = decoded_path
+                                .split('/')
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .collect();
+
                             let mut crumbs = vec![
                                 view! {
                                     <button
@@ -1971,14 +2052,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                     .into_any(),
                             ];
                             let mut accumulated = String::new();
-                            for segment in segments {
+                            for (label_index, segment) in segments.into_iter().enumerate() {
                                 accumulated.push('/');
                                 accumulated.push_str(segment);
                                 let target = accumulated.clone();
                                 let drop_target = accumulated.clone();
-                                let label = e2ee_master
-                                    .get_untracked()
-                                    .and_then(|master| kolimi_crypto::decode_name(&master, segment))
+                                let label = labels
+                                    .get(label_index)
+                                    .cloned()
                                     .unwrap_or_else(|| segment.to_string());
                                 crumbs.push(
                                     view! {
@@ -2104,9 +2185,10 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                             <span class="file-body">
                                                 <span class="file-name">{name.clone()}</span>
                                                 <span class="file-meta">
-                                                    {crate::e2ee::decode_display_path(
+                                                    {crate::e2ee::decode_display_path_with_shares(
                                                         e2ee_master.get_untracked().as_ref(),
                                                         &path,
+                                                        &shared_names.get_untracked(),
                                                     )}
                                                     {(!snippet.is_empty())
                                                         .then(|| {

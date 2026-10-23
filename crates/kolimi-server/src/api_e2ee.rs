@@ -262,6 +262,81 @@ pub async fn get_share_key(
     }
 }
 
+/// `GET /api/e2ee/share-name?path=` — the caller's wrapped share metadata
+/// (display name, and for a folder its name key). Only the owner and the
+/// recipients can read the blobs addressed to them.
+pub async fn get_share_name(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<KeyQuery>,
+) -> Response {
+    let access = match state.vfs.resolve_access(user.user_id, &query.path).await {
+        Ok(access) => access,
+        Err(kolimi_vfs::VfsError::NotFound) => return api::not_found(),
+        Err(_) => return api::internal_error(),
+    };
+    match state.db.share_name(access.node.id, user.user_id).await {
+        Ok(Some(wrapped)) => {
+            Json(json!({ "wrapped_name": STANDARD.encode(&wrapped) })).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no share metadata for this node" })),
+        )
+            .into_response(),
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `PUT /api/e2ee/share-name?path=&recipient=` — the owner wraps a node's
+/// display name (and a folder's name key) for one recipient.
+pub async fn put_share_name(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<ShareKeyQuery>,
+    body: Body,
+) -> Response {
+    let Some(recipient) = query.recipient.as_deref() else {
+        return api::bad_request("recipient is required");
+    };
+    let node = match owned_node(&state, &user, &query.path).await {
+        Ok(node) => node,
+        Err(response) => return response,
+    };
+    let Some(target) = state.db.find_user(recipient).await.ok().flatten() else {
+        return api::bad_request("no such user");
+    };
+    if state
+        .db
+        .public_key(target.id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return api::bad_request("recipient has no E2EE identity");
+    }
+    let wrapped = match read_body(body, MAX_KEY_BODY).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    match state.db.set_share_name(node.id, target.id, &wrapped).await {
+        Ok(()) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "e2ee.share_name_set",
+                &query.path,
+                json!({ "recipient": recipient }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
 /// `PUT /api/e2ee/share-key?path=&recipient=` — the owner wraps a file
 /// key for a recipient (ECIES; the server stores it opaquely).
 pub async fn put_share_key(
@@ -311,7 +386,7 @@ pub async fn put_share_key(
     }
 }
 
-async fn owned_file(
+async fn owned_node(
     state: &AppState,
     user: &CurrentUser,
     path: &str,
@@ -322,12 +397,21 @@ async fn owned_file(
         Err(_) => return Err(api::internal_error()),
     };
     if access.owner_id != user.user_id || access.is_mount_root {
-        return Err(api::forbidden("only the owner can manage file keys"));
-    }
-    if access.node.is_dir() {
-        return Err(api::bad_request("not a file"));
+        return Err(api::forbidden("only the owner can manage share metadata"));
     }
     Ok(access.node)
+}
+
+async fn owned_file(
+    state: &AppState,
+    user: &CurrentUser,
+    path: &str,
+) -> Result<kolimi_vfs::Node, Response> {
+    let node = owned_node(state, user, path).await?;
+    if node.is_dir() {
+        return Err(api::bad_request("not a file"));
+    }
+    Ok(node)
 }
 
 async fn read_body(body: Body, limit: usize) -> Result<Vec<u8>, Response> {

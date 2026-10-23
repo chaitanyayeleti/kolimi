@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 use crate::auth::cookie_value;
 use crate::{AppState, api, api_browse::root_path, audit};
+use base64::{Engine, engine::general_purpose::STANDARD};
 
 /// Default lifetime of a public link (30 days).
 pub const DEFAULT_LINK_TTL_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -246,21 +247,30 @@ pub async fn received(
         Ok(mounts) => mounts,
         Err(_) => return api::internal_error(),
     };
-    let items: Vec<Value> = mounts
-        .iter()
-        .map(|mount| {
-            json!({
-                "share_id": mount.share_id,
-                "owner": mount.owner_username,
-                "name": mount.name,
-                "mount": format!("/{}/{}", kolimi_vfs::SHARED_MOUNT, mount.name),
-                "kind": if mount.kind == kolimi_vfs::NodeKind::Dir { "dir" } else { "file" },
-                "permission": mount.permission.as_str(),
-                "size": mount.size,
-                "modified_at": mount.modified_at,
-            })
-        })
-        .collect();
+    let mut items = Vec::with_capacity(mounts.len());
+    for mount in &mounts {
+        // Encrypted shares carry an opaque display name (and, for folders, a
+        // name key) wrapped to this recipient. Including it here saves a
+        // request per mount and lets the UI render real names immediately.
+        let wrapped = state
+            .db
+            .share_name(mount.node_id, user.user_id)
+            .await
+            .ok()
+            .flatten();
+        items.push(json!({
+            "share_id": mount.share_id,
+            "owner": mount.owner_username,
+            "name": mount.name,
+            "mount": format!("/{}/{}", kolimi_vfs::SHARED_MOUNT, mount.name),
+            "kind": if mount.kind == kolimi_vfs::NodeKind::Dir { "dir" } else { "file" },
+            "permission": mount.permission.as_str(),
+            "size": mount.size,
+            "modified_at": mount.modified_at,
+            "encrypted": wrapped.is_some(),
+            "wrapped_name": wrapped.map(|bytes| STANDARD.encode(bytes)),
+        }));
+    }
     Json(json!({ "mounts": items })).into_response()
 }
 

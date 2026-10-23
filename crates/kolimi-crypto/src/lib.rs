@@ -35,8 +35,9 @@ pub use error::CryptoError;
 pub use file::FileKey;
 pub use identity::{
     DEVICE_KEY_LEN, Identity, SHARE_KEY_LEN, enrollment_code, fingerprint, is_valid_public_key,
-    normalize_code, unwrap_secret, wrap_secret_for, wrap_secret_with_ephemeral_nonce,
-    wrap_with_ephemeral, wrap_with_ephemeral_nonce,
+    normalize_code, unwrap_secret, unwrap_share_metadata, wrap_secret_for,
+    wrap_secret_with_ephemeral_nonce, wrap_share_metadata_for,
+    wrap_share_metadata_with_ephemeral_nonce, wrap_with_ephemeral, wrap_with_ephemeral_nonce,
 };
 pub use keyring::{
     Keyring, Wrap, generate_recovery_code, hex_decode, hex_encode, recovery_code_display,
@@ -46,5 +47,5 @@ pub use keys::{
     Argon2Params, kek_from_passphrase, kek_from_prf, kek_from_recovery_code, wrap_with_nonce,
 };
 pub use keys::{MasterKey, RECOVERY_CODE_LEN};
-pub use name::{NAME_PREFIX, decode_name, encode_name, is_encoded_name};
+pub use name::{NAME_PREFIX, NameKey, decode_name_path, is_encoded_name, name_key_for_path};
 pub use padding::{pad_file, padded_len, unpad_file};

@@ -242,6 +242,10 @@ pub fn build_app(state: AppState) -> Router {
             get(api_e2ee::get_share_key).put(api_e2ee::put_share_key),
         )
         .route(
+            "/api/e2ee/share-name",
+            get(api_e2ee::get_share_name).put(api_e2ee::put_share_name),
+        )
+        .route(
             "/api/e2ee/enrollments",
             get(api_e2ee::list_enrollments).post(api_e2ee::create_enrollment),
         )

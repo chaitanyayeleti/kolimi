@@ -65,6 +65,47 @@ impl Db {
         Ok(())
     }
 
+    /// Stores the wrapped share metadata (display name + optional folder
+    /// name key) of `node_id` for one recipient.
+    pub async fn set_share_name(
+        &self,
+        node_id: i64,
+        recipient_id: i64,
+        wrapped: &[u8],
+    ) -> Result<(), DbError> {
+        if wrapped.is_empty() || wrapped.len() > MAX_WRAPPED_KEY_BYTES {
+            return Err(DbError::Conflict("share name size".to_string()));
+        }
+        sqlx::query(
+            "INSERT INTO e2ee_share_names (node_id, recipient_id, wrapped, created_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(node_id, recipient_id) DO UPDATE SET wrapped = excluded.wrapped,
+                 created_at = excluded.created_at",
+        )
+        .bind(node_id)
+        .bind(recipient_id)
+        .bind(wrapped)
+        .bind(now_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Returns the wrapped share metadata of `node_id` for one recipient.
+    pub async fn share_name(
+        &self,
+        node_id: i64,
+        recipient_id: i64,
+    ) -> Result<Option<Vec<u8>>, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT wrapped FROM e2ee_share_names WHERE node_id = ? AND recipient_id = ?",
+        )
+        .bind(node_id)
+        .bind(recipient_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     /// Returns the wrapped key of a node, if it is encrypted.
     pub async fn file_key(&self, node_id: i64) -> Result<Option<Vec<u8>>, DbError> {
         Ok(

@@ -278,6 +278,81 @@ pub fn unwrap_secret(
         .map_err(|_| CryptoError::Malformed("device secret length".to_string()))
 }
 
+/// Additional authenticated data for share metadata (name + folder key).
+const SHARE_META_AAD: &[u8] = b"kolimi-share-meta-v1";
+
+/// Wraps an arbitrary small payload (a share's display name and, for
+/// folders, its name key) for a recipient's X25519 identity.
+///
+/// The wire shape is the same as a share-key wrap: ephemeral public key,
+/// nonce, then AEAD ciphertext. The payload is variable length, unlike a
+/// 32-byte file key.
+pub fn wrap_share_metadata_for(
+    recipient_public: &[u8; KEY_LEN],
+    metadata: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let ephemeral = random::<KEY_LEN>()?;
+    let nonce = random::<NONCE_LEN>()?;
+    wrap_share_metadata_with_ephemeral_nonce(&ephemeral, recipient_public, metadata, &nonce)
+}
+
+/// Deterministic variant for tests/vectors.
+#[doc(hidden)]
+pub fn wrap_share_metadata_with_ephemeral_nonce(
+    ephemeral_secret: &[u8; KEY_LEN],
+    recipient_public: &[u8; KEY_LEN],
+    metadata: &[u8],
+    nonce: &[u8; NONCE_LEN],
+) -> Result<Vec<u8>, CryptoError> {
+    let ephemeral = StaticSecret::from(*ephemeral_secret);
+    let ephemeral_public = PublicKey::from(&ephemeral).to_bytes();
+    let shared = ephemeral.diffie_hellman(&PublicKey::from(*recipient_public));
+    ensure_contributory(shared.as_bytes())?;
+    let wrap_key = ecies_wrap_key(
+        shared.as_bytes(),
+        &ephemeral_public,
+        recipient_public,
+        SHARE_META_AAD,
+    )?;
+    let mut out = Vec::with_capacity(KEY_LEN + NONCE_LEN + metadata.len() + TAG_LEN);
+    out.extend_from_slice(&ephemeral_public);
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(&aead_encrypt(&wrap_key, nonce, SHARE_META_AAD, metadata)?);
+    Ok(out)
+}
+
+/// Unwraps a payload produced by [`wrap_share_metadata_for`] with the
+/// recipient's private identity key.
+pub fn unwrap_share_metadata(
+    recipient_secret: &[u8; KEY_LEN],
+    wrapped: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    if wrapped.len() < KEY_LEN + NONCE_LEN + TAG_LEN {
+        return Err(CryptoError::Malformed(
+            "share metadata too short".to_string(),
+        ));
+    }
+    let (ephemeral_public, rest) = wrapped.split_at(KEY_LEN);
+    let (nonce, ciphertext) = rest.split_at(NONCE_LEN);
+    let ephemeral_public: [u8; KEY_LEN] = ephemeral_public
+        .try_into()
+        .map_err(|_| CryptoError::Malformed("ephemeral key".to_string()))?;
+    let nonce: [u8; NONCE_LEN] = nonce
+        .try_into()
+        .map_err(|_| CryptoError::Malformed("nonce".to_string()))?;
+    let recipient = StaticSecret::from(*recipient_secret);
+    let recipient_public = PublicKey::from(&recipient).to_bytes();
+    let shared = recipient.diffie_hellman(&PublicKey::from(ephemeral_public));
+    ensure_contributory(shared.as_bytes())?;
+    let wrap_key = ecies_wrap_key(
+        shared.as_bytes(),
+        &ephemeral_public,
+        &recipient_public,
+        SHARE_META_AAD,
+    )?;
+    Ok(aead_decrypt(&wrap_key, &nonce, SHARE_META_AAD, ciphertext)?.to_vec())
+}
+
 /// HKDF over the ECDH shared secret, salted with the ephemeral and recipient
 /// public keys, domain-separated by `aad`.
 fn ecies_wrap_key(
@@ -390,5 +465,25 @@ mod tests {
         let other = Identity::generate().unwrap();
         assert!(unwrap_secret(&other.private_bytes(), &wrapped).is_err());
         assert!(unwrap_secret(&device.private_bytes(), &wrapped[..10]).is_err());
+    }
+
+    #[test]
+    fn share_metadata_roundtrip_and_tamper() {
+        let recipient = Identity::generate().unwrap();
+        let metadata =
+            br#"{"v":1,"name":"Team","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#;
+        let wrapped = wrap_share_metadata_for(&recipient.public_key(), metadata).unwrap();
+        assert_eq!(
+            unwrap_share_metadata(&recipient.private_bytes(), &wrapped).unwrap(),
+            metadata
+        );
+
+        let other = Identity::generate().unwrap();
+        assert!(unwrap_share_metadata(&other.private_bytes(), &wrapped).is_err());
+
+        let mut tampered = wrapped.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(unwrap_share_metadata(&recipient.private_bytes(), &tampered).is_err());
     }
 }

@@ -185,13 +185,10 @@ async fn group_share_reaches_members_and_removal_revokes() {
         let report = sync_once(&config).await.unwrap();
         assert_eq!(report.pulled, 1, "{name}: {report:?}");
         let mounted = shared_file(dir).expect("shared file mounted");
-        assert!(
-            !mounted
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .contains("doc.bin"),
-            "the shared file name must stay encrypted"
+        assert_eq!(
+            mounted.file_name().unwrap().to_string_lossy(),
+            "doc.bin",
+            "the recipient must see the owner's real name"
         );
         assert_eq!(std::fs::read(&mounted).unwrap(), secret);
     }

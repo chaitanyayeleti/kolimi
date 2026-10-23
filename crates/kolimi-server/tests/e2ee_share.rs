@@ -214,13 +214,10 @@ async fn encrypted_file_shared_with_a_user_syncs_decrypted() {
     let report = sync_once(&bob).await.unwrap();
     assert_eq!(report.pulled, 1, "{report:?}");
     let bob_copy = shared_file(&bob_dir).expect("shared file mounted");
-    assert!(
-        !bob_copy
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .contains("secret.bin"),
-        "the shared file name must stay encrypted"
+    assert_eq!(
+        bob_copy.file_name().unwrap().to_string_lossy(),
+        "secret.bin",
+        "the recipient must see the owner's real name"
     );
     assert_eq!(std::fs::read(&bob_copy).unwrap(), secret);
 
@@ -249,6 +246,67 @@ async fn encrypted_file_shared_with_a_user_syncs_decrypted() {
     let report = sync_once(&bob).await.unwrap();
     assert_eq!(report.removed_local, 1, "{report:?}");
     assert!(!bob_copy.exists());
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn encrypted_folder_share_keeps_names_readable_and_siblings_private() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let alice_dir = root.path().join("alice");
+    let bob_dir = root.path().join("bob");
+    std::fs::create_dir_all(alice_dir.join("Private/Team/Sub")).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
+    setup_keyring(&server.url, "alice", &alice_dir).await;
+    setup_keyring(&server.url, "bob", &bob_dir).await;
+
+    let alice = config(&server.url, "alice", &alice_dir);
+    let bob = config(&server.url, "bob", &bob_dir);
+
+    std::fs::write(alice_dir.join("Private/Team/a.txt"), b"alpha").unwrap();
+    std::fs::write(alice_dir.join("Private/Team/Sub/b.txt"), b"beta").unwrap();
+    std::fs::write(alice_dir.join("Private/sibling.txt"), b"not shared").unwrap();
+    sync_once(&alice).await.unwrap();
+
+    let wrapped = share_file(&alice, "/", "Private/Team", "bob")
+        .await
+        .unwrap();
+    assert_eq!(wrapped, 2, "both files get a wrapped key");
+
+    let report = sync_once(&bob).await.unwrap();
+    assert!(report.pulled >= 2, "{report:?}");
+    assert_eq!(
+        std::fs::read(bob_dir.join("Shared with me/Team/a.txt")).unwrap(),
+        b"alpha"
+    );
+    assert_eq!(
+        std::fs::read(bob_dir.join("Shared with me/Team/Sub/b.txt")).unwrap(),
+        b"beta"
+    );
+    assert!(
+        !bob_dir.join("Shared with me/sibling.txt").exists(),
+        "only the shared subtree is mounted"
+    );
+
+    // No opaque `k1_…` segment anywhere in the recipient's local names.
+    fn walk(dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            out.push(name);
+            if entry.file_type().unwrap().is_dir() {
+                walk(&entry.path(), out);
+            }
+        }
+    }
+    let mut names = Vec::new();
+    walk(&bob_dir.join("Shared with me"), &mut names);
+    assert!(
+        !names.iter().any(|name| name.contains("k1_")),
+        "recipient names stayed opaque: {names:?}"
+    );
+    assert!(names.iter().any(|name| name == "Team"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Sub"), "{names:?}");
 
     server.handle.abort();
 }

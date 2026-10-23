@@ -141,12 +141,9 @@ impl EncryptPolicy {
             .any(|root| root.trim_matches('/').is_empty() || is_under(rel, root))
     }
 
-    /// Number of leading path segments that stay plaintext on the server.
-    ///
-    /// Everything below the *outermost* encrypted prefix is name-encoded, so
-    /// this deliberately picks the shortest matching prefix. `Some(0)` means
-    /// the sync root itself is encrypted and every segment is encoded.
-    fn encode_boundary(&self, rel: &str) -> Option<usize> {
+    /// The *outermost* encrypted prefix covering `rel`, relative to the
+    /// sync root. Everything below it is name-encoded.
+    fn encrypted_prefix(&self, rel: &str) -> Option<&str> {
         self.prefixes
             .iter()
             .chain(self.fallback.iter())
@@ -154,13 +151,13 @@ impl EncryptPolicy {
                 let root = root.trim_matches('/');
                 root.is_empty() || is_under(rel, root)
             })
-            .map(|root| {
+            .min_by_key(|root| {
                 root.trim_matches('/')
                     .split('/')
                     .filter(|segment| !segment.is_empty())
                     .count()
             })
-            .min()
+            .map(String::as_str)
     }
 }
 
@@ -448,13 +445,13 @@ async fn server_path_map(
             let Some(server_path) = entry["path"].as_str() else {
                 continue;
             };
-            let Some(rel) = relative_to_root(server_path, root) else {
+            let Some(rel) = local_rel_from_server(server_path, root, e2ee) else {
                 continue;
             };
             if rel.is_empty() {
                 continue;
             }
-            map.insert(local_rel(&rel, e2ee), server_path.to_string());
+            map.insert(rel, server_path.to_string());
         }
         if !body["has_more"].as_bool().unwrap_or(false) || !advanced {
             break;
@@ -549,50 +546,88 @@ struct E2ee {
 }
 
 impl E2ee {
-    /// Encodes the path segments after the encryption boundary for storage.
-    fn encode_rel(&self, rel: &str, boundary: usize) -> Result<String, SyncError> {
+    /// Encodes an absolute plaintext path for storage.
+    ///
+    /// Segments up to and including `prefix` (the encrypted root) stay
+    /// plaintext; everything below is encrypted under the per-folder key
+    /// chain. For a pair rooted inside an encrypted folder, `prefix` is the
+    /// pair root itself.
+    fn encode_abs(&self, absolute: &str, prefix: &str) -> Result<String, SyncError> {
+        let prefix_segments = prefix
+            .trim_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .count();
+        let mut key = kolimi_crypto::name_key_for_path(&self.master, prefix)?;
         let mut out: Vec<String> = Vec::new();
-        for (index, segment) in rel.split('/').enumerate() {
-            if index < boundary {
+        for (index, segment) in absolute
+            .trim_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .enumerate()
+        {
+            if index < prefix_segments {
                 out.push(segment.to_string());
             } else {
-                out.push(kolimi_crypto::encode_name(&self.master, segment)?);
+                out.push(key.encode(segment)?);
+                key = key.child(segment)?;
             }
         }
-        Ok(out.join("/"))
+        let joined = out.join("/");
+        if absolute.starts_with('/') {
+            Ok(format!("/{joined}"))
+        } else {
+            Ok(joined)
+        }
     }
 
-    /// Decodes every stored segment it can; plaintext names and names from
-    /// another keyring (shared encrypted folders) are left as-is.
-    fn decode_rel(&self, rel: &str) -> String {
-        rel.split('/')
-            .map(|segment| {
-                kolimi_crypto::decode_name(&self.master, segment)
-                    .unwrap_or_else(|| segment.to_string())
-            })
-            .collect::<Vec<_>>()
-            .join("/")
+    /// Decodes every stored segment it can. Legacy names (root-key encrypted
+    /// at every depth) are handled by the crypto fallback.
+    fn decode_abs(&self, path: &str) -> String {
+        kolimi_crypto::decode_name_path(&self.master, path)
+    }
+}
+
+fn join_abs(root: &str, rel: &str) -> String {
+    let root = root.trim_end_matches('/');
+    let rel = rel.trim_start_matches('/');
+    if rel.is_empty() {
+        if root.is_empty() {
+            "/".to_string()
+        } else {
+            root.to_string()
+        }
+    } else {
+        format!("{root}/{rel}")
     }
 }
 
 /// Encodes a local relative path for the server when it is covered by an
-/// encrypted root. Returns the input unchanged for plaintext paths.
-fn remote_rel(rel: &str, policy: &EncryptPolicy, e2ee: Option<&E2ee>) -> Result<String, SyncError> {
-    let Some(boundary) = policy.encode_boundary(rel) else {
-        return Ok(rel.to_string());
+/// encrypted root. Returns the absolute server path.
+fn remote_rel(
+    root: &str,
+    rel: &str,
+    policy: &EncryptPolicy,
+    e2ee: Option<&E2ee>,
+) -> Result<String, SyncError> {
+    let absolute = join_abs(root, rel);
+    let Some(prefix) = policy.encrypted_prefix(rel) else {
+        return Ok(absolute);
     };
     let Some(e2ee) = e2ee else {
         return Err(SyncError::Locked(format!(
             "/{rel} is in an encrypted folder — unlock encryption before syncing it"
         )));
     };
-    e2ee.encode_rel(rel, boundary)
+    e2ee.encode_abs(&absolute, &join_abs(root, prefix))
 }
 
-/// Decodes a server path into the local relative path.
-fn local_rel(rel: &str, e2ee: Option<&E2ee>) -> String {
-    e2ee.map(|e2ee| e2ee.decode_rel(rel))
-        .unwrap_or_else(|| rel.to_string())
+/// Decodes an owned server path and makes it relative to the sync root.
+fn local_rel_from_server(server_path: &str, root: &str, e2ee: Option<&E2ee>) -> Option<String> {
+    let decoded = e2ee
+        .map(|e2ee| e2ee.decode_abs(server_path))
+        .unwrap_or_else(|| server_path.to_string());
+    relative_to_root(&decoded, root)
 }
 
 async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, SyncError> {
@@ -977,6 +1012,34 @@ pub async fn share_path(
                     return Err(SyncError::Server { status, path });
                 }
                 wrapped_count += 1;
+            }
+        }
+
+        // The recipient also needs the plaintext mount name and, for a
+        // folder, the per-folder name key that decodes its contents.
+        let plain_abs = join_abs(&root, rel_path);
+        let name = rel_path.rsplit('/').next().unwrap_or(rel_path).to_string();
+        let key = if local_root.is_dir() {
+            Some(kolimi_crypto::name_key_for_path(&e2ee.master, &plain_abs)?)
+        } else {
+            None
+        };
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "v": 1,
+            "name": name,
+            "key": key.map(|key| STANDARD.encode(key.to_bytes())),
+        }))
+        .map_err(|error| SyncError::E2ee(format!("share name payload: {error}")))?;
+        for (member, public_key) in &recipients {
+            let wrapped = kolimi_crypto::wrap_share_metadata_for(public_key, &payload)?;
+            let path = format!(
+                "/api/e2ee/share-name?path={}&recipient={}",
+                encode(&server_path),
+                encode(member)
+            );
+            let status = http.put_bytes(&path, &wrapped).await?;
+            if status != 204 {
+                return Err(SyncError::Server { status, path });
             }
         }
         Ok(wrapped_count)
@@ -1775,6 +1838,103 @@ struct RemoteFile {
     shared: bool,
 }
 
+/// One received encrypted share whose display name (and folder name key)
+/// was wrapped for this account.
+struct SharedName {
+    /// Server-side mount path: `/Shared with me/<stored name>`.
+    prefix: String,
+    /// The owner's plaintext name for the mount.
+    name: String,
+    /// Key for a shared folder's children.
+    key: Option<kolimi_crypto::NameKey>,
+}
+
+#[derive(serde::Deserialize)]
+struct ShareNamePayload {
+    v: u8,
+    name: String,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// Loads and unwraps the name metadata of every received encrypted share.
+async fn load_shared_names(http: &Http, e2ee: Option<&E2ee>) -> Result<Vec<SharedName>, SyncError> {
+    let Some(e2ee) = e2ee else {
+        return Ok(Vec::new());
+    };
+    let (status, body) = http.get_json("/api/shares/received").await?;
+    if status != 200 {
+        return Ok(Vec::new());
+    }
+    let mounts = body["mounts"].as_array().cloned().unwrap_or_default();
+    let mut names = Vec::new();
+    for mount in mounts {
+        let (Some(prefix), Some(wrapped)) =
+            (mount["mount"].as_str(), mount["wrapped_name"].as_str())
+        else {
+            continue;
+        };
+        let Ok(wrapped) = STANDARD.decode(wrapped) else {
+            continue;
+        };
+        let Ok(metadata) =
+            kolimi_crypto::unwrap_share_metadata(&e2ee.identity.private_bytes(), &wrapped)
+        else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_slice::<ShareNamePayload>(&metadata) else {
+            continue;
+        };
+        if payload.v != 1 {
+            continue;
+        }
+        let key = payload
+            .key
+            .and_then(|encoded| STANDARD.decode(encoded).ok())
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .map(kolimi_crypto::NameKey::from_bytes);
+        names.push(SharedName {
+            prefix: prefix.to_string(),
+            name: payload.name,
+            key,
+        });
+    }
+    Ok(names)
+}
+
+/// Decodes a shared server path with the wrapped mount name and folder key.
+fn decode_shared_abs(path: &str, names: &[SharedName]) -> String {
+    for shared in names {
+        let Some(rest) = path.strip_prefix(&shared.prefix) else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            continue;
+        }
+        let mut out = vec![shared.name.clone()];
+        let mut key = shared.key.clone();
+        for segment in rest.split('/').filter(|segment| !segment.is_empty()) {
+            let decoded = key.as_ref().and_then(|key| key.decode(segment));
+            match decoded {
+                Some(name) => {
+                    if let Some(current) = key.as_ref() {
+                        key = current.child(&name).ok();
+                    }
+                    out.push(name);
+                }
+                None => {
+                    if let Some(current) = key.as_ref() {
+                        key = current.child(segment).ok();
+                    }
+                    out.push(segment.to_string());
+                }
+            }
+        }
+        return format!("/{}/{}", SHARED_MOUNT, out.join("/"));
+    }
+    path.to_string()
+}
+
 async fn remote_files(
     http: &Http,
     root: &str,
@@ -1812,8 +1972,7 @@ async fn remote_files(
                 && entry["encrypted"].as_bool() == Some(true)
                 && let Some(server_path) = entry["path"].as_str()
             {
-                if let Some(rel) = relative_to_root(server_path, root) {
-                    let rel = local_rel(&rel, e2ee);
+                if let Some(rel) = local_rel_from_server(server_path, root, e2ee) {
                     if rel.is_empty() {
                         // The pair's root folder itself is encrypted: every
                         // path below it is name-encoded.
@@ -1822,7 +1981,12 @@ async fn remote_files(
                         encrypted_dirs.push(rel);
                     }
                 } else if root.is_empty() {
-                    encrypted_dirs.push(local_rel(server_path.trim_matches('/'), e2ee));
+                    encrypted_dirs.push(
+                        e2ee.map(|e2ee| e2ee.decode_abs(server_path))
+                            .unwrap_or_else(|| server_path.to_string())
+                            .trim_matches('/')
+                            .to_string(),
+                    );
                 }
             }
             if entry["kind"].as_str() != Some("file") {
@@ -1834,12 +1998,11 @@ async fn remote_files(
             let Some(content_id) = entry["content_id"].as_str() else {
                 continue;
             };
-            let Some(rel) = relative_to_root(server_path, root) else {
-                continue;
-            };
             // Decode the stored names into the local relative path; the
             // RemoteFile keeps the encoded server path for HTTP requests.
-            let rel = local_rel(&rel, e2ee);
+            let Some(rel) = local_rel_from_server(server_path, root, e2ee) else {
+                continue;
+            };
             remote.insert(
                 rel,
                 RemoteFile {
@@ -1868,6 +2031,7 @@ async fn remote_files(
             "shared-tree response has no 'entries' array".to_string(),
         ));
     };
+    let shared_names = load_shared_names(http, e2ee).await?;
     for entry in entries {
         let Some(server_path) = entry["path"].as_str() else {
             continue;
@@ -1875,7 +2039,8 @@ async fn remote_files(
         let Some(content_id) = entry["content_id"].as_str() else {
             continue;
         };
-        let Some(rel) = relative_to_root(server_path, root) else {
+        let decoded = decode_shared_abs(server_path, &shared_names);
+        let Some(rel) = relative_to_root(&decoded, root) else {
             continue;
         };
         remote.insert(
@@ -2335,7 +2500,7 @@ async fn push(
             let local_rel = current.trim_start_matches('/');
             let stored = match stored_paths.get(local_rel) {
                 Some(stored) => stored.clone(),
-                None => format!("{root}/{}", remote_rel(local_rel, policy, e2ee)?),
+                None => remote_rel(root, local_rel, policy, e2ee)?,
             };
             dirs.insert(stored);
         }
@@ -2361,7 +2526,7 @@ async fn push(
         }
         let remote_path = match stored_paths.get(&rel) {
             Some(stored) => stored.clone(),
-            None => format!("{root}/{}", remote_rel(&rel, policy, e2ee)?),
+            None => remote_rel(root, &rel, policy, e2ee)?,
         };
         // Pre-check: when we have a known content_id, fetch the current
         // remote manifest and compare before uploading any chunks. If the

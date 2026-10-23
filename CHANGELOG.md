@@ -6,6 +6,34 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.39] - 2026-10-24
+
+### Added
+- **Encrypted share names for recipients.** Sharing an encrypted file or
+  folder with a user or group now wraps the owner's real mount name, and
+  for a folder the per-folder name key, for every recipient. `Shared with
+  me` shows `Team`, `note.txt`, nested folders and files instead of
+  `k1_…`. Name encryption is now hierarchical: a folder share hands out
+  only that folder's key, so sibling names under the parent stay private.
+  The server stores one opaque envelope per recipient and cannot read any
+  of it.
+- The sync client and web UI both decode received-share names; shared
+  previews and downloads use the folder key chain.
+
+### Fixed
+- Downloading/previewing an encrypted **shared** file in the web UI failed
+  with “Could not unwrap the share key” because it used the device-wrap AAD
+  instead of the file-key share AAD. Both paths now use the correct
+  identity method.
+- Shared encrypted previews now strip the length-padding header before
+  rendering (no more leading NUL bytes).
+
+### Changed
+- New names use per-folder keys (`HKDF` from the account root through the
+  plaintext path). Names created by 0.1.37–0.1.38 still decode through the
+  root-key fallback; no data migration is required.
+
+## [0.1.38] - 2026-10-26
 ## [0.1.38] - 2026-10-26
 
 ### Added
