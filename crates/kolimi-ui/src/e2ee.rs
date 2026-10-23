@@ -135,6 +135,14 @@ pub async fn setup(passphrase: &str) -> Result<String, String> {
     if passphrase.is_empty() {
         return Err("Enter a passphrase".to_string());
     }
+    // Never replace an existing keyring: a second setup would re-wrap a
+    // brand-new master key and orphan every file already encrypted.
+    if keyring_exists().await? {
+        return Err(
+            "Encryption is already set up for this account — unlock it instead of creating a new one"
+                .to_string(),
+        );
+    }
     let master = MasterKey::generate().map_err(|_| "could not generate the key".to_string())?;
     let recovery = kolimi_crypto::generate_recovery_code()
         .map_err(|_| "could not generate the recovery code".to_string())?;
@@ -564,12 +572,19 @@ pub async fn upload_encrypted(master: &MasterKey, path: &str, data: &[u8]) -> Re
                 .to_string());
         }
     }
-    let manifest = serde_json::to_value(&kolimi_chunk::Manifest {
+    let wrapped = master
+        .wrap_file_key(&file_key)
+        .map_err(|_| "could not wrap the file key".to_string())?;
+    // One request: manifest + wrapped key. The server refuses ciphertext
+    // into an encrypted folder without the key, and a crash can't leave a
+    // half-written file behind.
+    let mut manifest = serde_json::to_value(&kolimi_chunk::Manifest {
         version: kolimi_chunk::Manifest::VERSION,
         size: total,
         chunks,
     })
     .map_err(|_| "could not build the file manifest".to_string())?;
+    manifest["wrapped_key"] = serde_json::json!(STANDARD.encode(&wrapped));
     let response = api::send_json(
         "PUT",
         &format!("/api/files?path={}", encode(path)),
@@ -580,19 +595,6 @@ pub async fn upload_encrypted(master: &MasterKey, path: &str, data: &[u8]) -> Re
         return Err(response
             .error()
             .unwrap_or("could not save the file")
-            .to_string());
-    }
-    let wrapped = master
-        .wrap_file_key(&file_key)
-        .map_err(|_| "could not wrap the file key".to_string())?;
-    let response =
-        api::put_bytes(&format!("/api/files/key?path={}", encode(path)), &wrapped).await?;
-    if response.status != 204 {
-        // Roll back: ciphertext without a key would be unreadable.
-        let _ = api::dav("DELETE", &format!("/dav{}", encode(path)), None, &[]).await;
-        return Err(response
-            .error()
-            .unwrap_or("could not store the file key")
             .to_string());
     }
     Ok(())

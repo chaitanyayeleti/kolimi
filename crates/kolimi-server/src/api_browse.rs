@@ -13,7 +13,7 @@ use kolimi_vfs::{Node, SHARED_MOUNT, VfsError, path};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{AppState, api};
+use crate::{AppState, api, audit};
 
 /// Query parameters for `/api/browse`.
 #[derive(Deserialize)]
@@ -107,6 +107,13 @@ pub async fn browse(
                     Ok(ids) => ids.into_iter().collect(),
                     Err(_) => return api::internal_error(),
                 };
+            // Everything inside an encrypted folder is encrypted, even when
+            // the child folder carries no flag of its own.
+            let inherited = state
+                .vfs
+                .path_is_encrypted(user.user_id, &query.path)
+                .await
+                .unwrap_or(true);
             let entries: Vec<Value> = children
                 .iter()
                 .map(|child| {
@@ -116,7 +123,7 @@ pub async fn browse(
                         shared,
                         owner.clone(),
                         permission.clone(),
-                        encrypted.contains(&child.id),
+                        inherited || encrypted.contains(&child.id) || child.encrypted,
                     )
                 })
                 .collect();
@@ -241,31 +248,12 @@ pub async fn info(
         Err(VfsError::Forbidden) => return api::forbidden("no access"),
         Err(_) => return api::internal_error(),
     };
-    // A folder counts as encrypted when every file it holds is encrypted:
-    // the server stores keys per file, so a directory node never has one
-    // itself. This is what the web UI checks before deciding whether a new
-    // upload needs client-side encryption. Mixed folders stay plaintext;
-    // an empty folder has nothing to go on, so it stays plaintext too.
+    // `encrypted` means "everything at this path is client-side encrypted".
+    // It follows the folder hierarchy: any ancestor folder (including this
+    // one) that is declared encrypted makes the path encrypted. No guessing
+    // from the contents — an empty Vault is still a Vault.
     let encrypted = if access.node.is_dir() {
-        let ids = state
-            .db
-            .encrypted_node_ids(access.owner_id)
-            .await
-            .unwrap_or_default();
-        if ids.is_empty() {
-            false
-        } else {
-            match state.db.children(access.owner_id, access.node.id).await {
-                Ok(children) => {
-                    let files: Vec<_> = children
-                        .iter()
-                        .filter(|child| child.kind == "file")
-                        .collect();
-                    !files.is_empty() && files.iter().all(|file| ids.contains(&file.id))
-                }
-                Err(_) => true,
-            }
-        }
+        access.node.encrypted
     } else {
         state.db.is_encrypted(access.node.id).await.unwrap_or(true)
     };
@@ -278,6 +266,91 @@ pub async fn info(
         "encrypted": encrypted,
     }))
     .into_response()
+}
+
+/// Request body for `/api/files/encrypt`.
+#[derive(Deserialize)]
+pub struct EncryptRequest {
+    path: String,
+    encrypted: bool,
+}
+
+/// `POST /api/files/encrypt` — declare a folder encrypted (or plaintext).
+///
+/// The flag is what every client reads to decide whether uploads must be
+/// encrypted, so it can be set on an empty folder. Two safety rules:
+/// enabling is refused while plaintext files exist inside (they would be
+/// indistinguishable from ciphertext to other clients), and disabling is
+/// refused while encrypted files exist (it would expose them as plaintext).
+pub async fn set_encryption(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(req): Json<EncryptRequest>,
+) -> Response {
+    let access = match state.vfs.resolve_access(user.user_id, &req.path).await {
+        Ok(access) => access,
+        Err(VfsError::NotFound) => return api::not_found(),
+        Err(VfsError::Forbidden) => return api::forbidden("no access"),
+        Err(_) => return api::internal_error(),
+    };
+    if !access.node.is_dir() {
+        return api::bad_request("only folders can be encrypted");
+    }
+    if access.node.parent_id.is_none() {
+        return api::bad_request("the account root cannot be encrypted");
+    }
+    if !access.perm.allows(kolimi_vfs::Perm::Write) {
+        return api::forbidden("write access is required");
+    }
+    // Mixed folders would let a plaintext client masquerade as ciphertext
+    // (or the reverse), so refuse until the subtree is uniform.
+    let mut stack = vec![access.node.clone()];
+    let mut plaintext = 0usize;
+    let mut encrypted = 0usize;
+    while let Some(dir) = stack.pop() {
+        let children = match state.vfs.list_node(access.owner_id, &dir).await {
+            Ok(children) => children,
+            Err(_) => return api::internal_error(),
+        };
+        for child in children {
+            if child.is_dir() {
+                stack.push(child);
+            } else if state.db.is_encrypted(child.id).await.unwrap_or(true) {
+                encrypted += 1;
+            } else {
+                plaintext += 1;
+            }
+        }
+    }
+    if req.encrypted && plaintext > 0 {
+        return api::bad_request(
+            "this folder still holds unencrypted files — move them out or delete them first",
+        );
+    }
+    if !req.encrypted && encrypted > 0 {
+        return api::bad_request(
+            "this folder still holds encrypted files — remove them before making it plaintext",
+        );
+    }
+    match state
+        .db
+        .set_folder_encrypted(access.owner_id, access.node.id, req.encrypted)
+        .await
+    {
+        Ok(()) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "folder.encryption",
+                &req.path,
+                json!({ "encrypted": req.encrypted }),
+            )
+            .await;
+            Json(json!({ "path": req.path, "encrypted": req.encrypted })).into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
 }
 
 /// Request body for `/api/files/move`.

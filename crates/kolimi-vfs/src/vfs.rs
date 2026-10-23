@@ -44,6 +44,8 @@ pub struct Node {
     pub trashed: bool,
     /// Path at trash time.
     pub original_path: Option<String>,
+    /// Whether this folder's contents are end-to-end encrypted.
+    pub encrypted: bool,
 }
 
 impl Node {
@@ -80,6 +82,7 @@ impl Node {
             modified_at: node.modified_at,
             trashed: node.trashed_at.is_some(),
             original_path: node.original_path,
+            encrypted: node.encrypted,
         })
     }
 }
@@ -145,6 +148,31 @@ impl Vfs {
             node = Node::from_db(child.ok_or(VfsError::NotFound)?)?;
         }
         Ok(node)
+    }
+
+    /// Whether `raw` is inside an encrypted folder.
+    ///
+    /// Walks the ancestors: any folder (including the target itself) whose
+    /// `encrypted` flag is set governs everything beneath it. This is the
+    /// policy every write path checks, so a plaintext client cannot drop a
+    /// file into an encrypted tree, and an empty folder can still be
+    /// declared encrypted.
+    pub async fn path_is_encrypted(&self, user_id: i64, raw: &str) -> Result<bool, VfsError> {
+        let segments = path::parse(raw)?;
+        let mut node = self.root(user_id).await?;
+        if node.encrypted {
+            return Ok(true);
+        }
+        for segment in &segments {
+            let Some(child) = self.db.find_child(user_id, node.id, segment).await? else {
+                break;
+            };
+            node = Node::from_db(child)?;
+            if node.encrypted && node.is_dir() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Like [`Vfs::resolve`], but returns `None` instead of `NotFound`.
@@ -553,6 +581,7 @@ impl Vfs {
         raw: &str,
         manifest: &kolimi_chunk::Manifest,
         expected: Option<&str>,
+        wrapped_key: Option<&[u8]>,
     ) -> Result<Option<Node>, VfsError> {
         // A manifest that repeats one chunk 10k times declares gigabytes while
         // storing kilobytes. The logical size must fit the quota, not just
@@ -560,6 +589,15 @@ impl Vfs {
         if !manifest.is_consistent() {
             return Err(VfsError::Conflict(
                 "manifest size does not match chunk lengths".to_string(),
+            ));
+        }
+        // Encrypted folders must receive a wrapped key with the content.
+        // A file without one would be unreadable ciphertext, and accepting
+        // it would also let a plaintext client write into an encrypted tree.
+        if self.path_is_encrypted(user_id, raw).await? && wrapped_key.is_none() {
+            return Err(VfsError::Conflict(
+                "this folder is encrypted: upload the wrapped file key with the manifest"
+                    .to_string(),
             ));
         }
         // Cap absurd manifests before they allocate or loop: 100k chunks or
@@ -601,6 +639,9 @@ impl Vfs {
         let node = self
             .finalize_put_at(user_id, parent.id, &name, existing, manifest)
             .await?;
+        if let Some(wrapped) = wrapped_key {
+            self.db.set_file_key(user_id, node.id, wrapped).await?;
+        }
         Ok(Some(node))
     }
 
@@ -1075,6 +1116,7 @@ pub(crate) fn to_db(node: &Node) -> DbNode {
         modified_at: node.modified_at,
         trashed_at: None,
         original_path: None,
+        encrypted: node.encrypted,
     }
 }
 
@@ -1306,7 +1348,7 @@ mod tests {
         // Wrong expected content id: conflict.
         let manifest = vfs.manifest_of(user, "/a.txt").await.unwrap();
         assert!(
-            vfs.commit_manifest(user, "/a.txt", &manifest, Some("bogus"))
+            vfs.commit_manifest(user, "/a.txt", &manifest, Some("bogus"), None)
                 .await
                 .unwrap()
                 .is_none()
@@ -1314,7 +1356,7 @@ mod tests {
 
         // Correct expected id: accepted (idempotent).
         assert!(
-            vfs.commit_manifest(user, "/a.txt", &manifest, Some(&current))
+            vfs.commit_manifest(user, "/a.txt", &manifest, Some(&current), None)
                 .await
                 .unwrap()
                 .is_some()
@@ -1330,7 +1372,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            vfs.commit_manifest(user, "/a.txt", &missing, Some(&current))
+            vfs.commit_manifest(user, "/a.txt", &missing, Some(&current), None)
                 .await,
             Err(VfsError::MissingChunk(_))
         ));
@@ -1339,7 +1381,7 @@ mod tests {
         let edited = b"one plus more";
         let stored = vfs.store.ingest_bytes(user, edited).await.unwrap().0;
         let node = vfs
-            .commit_manifest(user, "/a.txt", &stored, Some(&current))
+            .commit_manifest(user, "/a.txt", &stored, Some(&current), None)
             .await
             .unwrap()
             .expect("commit with fresh chunks must succeed");
@@ -1498,7 +1540,11 @@ mod tests {
         vfs.put_bytes(user, "/a/b/c.txt", b"c").await.unwrap();
         vfs.delete(user, "/a").await.unwrap();
         assert!(vfs.stat(user, "/a").await.unwrap().is_none());
-        assert_eq!(vfs.list(user, "/").await.unwrap().len(), 0);
+        // Only the default folders remain (Photos/Videos/Images/Vault).
+        assert_eq!(
+            vfs.list(user, "/").await.unwrap().len(),
+            kolimi_db::DEFAULT_FOLDERS.len()
+        );
     }
 
     #[tokio::test]

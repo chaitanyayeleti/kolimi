@@ -6,6 +6,36 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.30] - 2026-10-26
+
+### Changed
+- **Encryption is now a property of a folder, not a setting to configure.**
+  Folders carry an `encrypted` flag on the server, so every client —
+  browser, desktop, phone — knows which paths must be encrypted before
+  upload *even when the folder is empty*. This removes the circular
+  "is this folder encrypted?" heuristic and makes the WebDAV boundary
+  real: WebDAV can no longer write plaintext into an encrypted folder.
+- **Every new account starts with `Photos`, `Videos`, `Images`, and
+  `Vault`.** The media folders stay plaintext (fast server thumbnails,
+  content search); `Vault` is encrypted from birth.
+- **First login offers "Set up your Vault"** — one passphrase, one
+  24-word recovery phrase, and a Later link. Dismissal is remembered and
+  Vault prompts again on first use.
+- **Sync follows the server policy per path**, so one pair syncing `/`
+  handles a mixed account (`Vault/**` encrypted, everything else
+  plaintext) with no per-pair configuration. Local `encrypted_roots`
+  still counts as an override, so older setups never silently downgrade.
+- Commits into an encrypted folder must carry the wrapped file key in the
+  same request (`wrapped_key`), so a crash cannot leave unreadable
+  ciphertext behind and a keyless client is refused.
+- "Encrypt this folder" / "Make this folder plaintext" in the context
+  menu; enabling is refused while plaintext files remain, disabling while
+  ciphertext remains, so folders never mix.
+- Setting up encryption twice is refused — a second setup would re-wrap a
+  new master key and orphan existing files.
+
+## [0.1.29] - 2026-10-26
+
 ## [0.1.29] - 2026-10-26
 
 ### Fixed

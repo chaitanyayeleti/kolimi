@@ -14,6 +14,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use kolimi_auth::CurrentUser;
 use kolimi_chunk::{Hash, Manifest};
@@ -153,7 +154,10 @@ pub async fn tree(
             "content_id": node.content_id.as_deref().and_then(bytes_to_hash_hex),
             "etag": etag_for(node),
             "modified_at": node.modified_at,
-            "encrypted": encrypted.contains(&node.id),
+            // Files: they have a wrapped key. Folders: the folder itself is
+            // declared encrypted. Either way this is the policy clients use
+            // to decide whether a path needs client-side encryption.
+            "encrypted": encrypted.contains(&node.id) || node.encrypted,
         }));
         last_id = node.id;
     }
@@ -479,10 +483,29 @@ pub async fn commit_file(
         Ok(bytes) => bytes,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
-    let manifest: Manifest = match serde_json::from_slice(&bytes) {
-        Ok(manifest) => manifest,
+    // The manifest is the body, optionally with a sibling `wrapped_key`
+    // (base64). Sending the key with the content is what makes a commit
+    // into an encrypted folder atomic: the server refuses ciphertext that
+    // arrives without one.
+    #[derive(serde::Deserialize)]
+    struct CommitBody {
+        #[serde(flatten)]
+        manifest: Manifest,
+        #[serde(default)]
+        wrapped_key: Option<String>,
+    }
+    let commit: CommitBody = match serde_json::from_slice(&bytes) {
+        Ok(commit) => commit,
         Err(_) => return bad_request("invalid manifest"),
     };
+    let wrapped_key = match commit.wrapped_key.as_deref() {
+        Some(encoded) => match STANDARD.decode(encoded) {
+            Ok(bytes) => Some(bytes),
+            Err(_) => return bad_request("wrapped_key must be base64"),
+        },
+        None => None,
+    };
+    let manifest = commit.manifest;
     if manifest.version != Manifest::VERSION {
         return bad_request("unsupported manifest version");
     }
@@ -503,6 +526,7 @@ pub async fn commit_file(
             &query.path,
             &manifest,
             query.if_content_id.as_deref(),
+            wrapped_key.as_deref(),
         )
         .await
     {

@@ -629,8 +629,14 @@ async fn browse_merges_mounts_and_reports_permissions() {
     assert_eq!(status, StatusCode::OK);
     let root = json_body(&body);
     let entries = root["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["name"], "docs");
+    // Bob's own default folders (Photos/Videos/Images/Vault) come first;
+    // the received share is the one flagged `shared`.
+    let received: Vec<&Value> = entries
+        .iter()
+        .filter(|entry| entry["shared"].as_bool() == Some(true))
+        .collect();
+    assert_eq!(received.len(), 1, "{root}");
+    let entries = received;
     assert_eq!(entries[0]["shared"], true);
     assert_eq!(entries[0]["owner"], ALICE);
     assert_eq!(entries[0]["permission"], "read");

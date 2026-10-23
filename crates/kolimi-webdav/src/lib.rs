@@ -81,6 +81,25 @@ async fn handle(
     let vfs_path = kolimi_vfs::path::join(&segments);
     let user_id = user.user_id;
 
+    // WebDAV is a plaintext surface (RFC 0010): it must never write into an
+    // encrypted folder, nor replace encrypted content with plaintext. Reads
+    // of encrypted files are already refused per node.
+    // DELETE and LOCK are metadata-only (trash a node, take a lock), so they
+    // stay available for encrypted content; anything that could introduce
+    // plaintext bytes is refused.
+    let mutating = matches!(
+        method.as_str(),
+        "PUT" | "MKCOL" | "PROPPATCH" | "COPY" | "MOVE"
+    );
+    if mutating {
+        match vfs.path_is_encrypted(user_id, &vfs_path).await {
+            Ok(true) => return encrypted_forbidden(),
+            Ok(false) => {}
+            Err(kolimi_vfs::VfsError::NotFound) => {}
+            Err(e) => return vfs_error(e),
+        }
+    }
+
     match method.as_str() {
         "OPTIONS" => options(),
         "GET" => get(&vfs, user_id, &vfs_path, &headers, false).await,
@@ -921,6 +940,7 @@ fn shared_root_node() -> Node {
         modified_at: 0,
         trashed: false,
         original_path: None,
+        encrypted: false,
     }
 }
 

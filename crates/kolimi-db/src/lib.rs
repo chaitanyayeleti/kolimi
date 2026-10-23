@@ -54,6 +54,19 @@ pub enum DbError {
     InvalidUsername(String),
 }
 
+/// Folders every new account starts with: `(name, encrypted)`.
+///
+/// Media folders stay plaintext so the gallery keeps server-generated
+/// thumbnails and content search. `Vault` is encrypted from birth: the
+/// flag is what every client reads to decide whether to encrypt before
+/// upload, so it must exist before the first file does.
+pub const DEFAULT_FOLDERS: [(&str, bool); 4] = [
+    ("Photos", false),
+    ("Videos", false),
+    ("Images", false),
+    ("Vault", true),
+];
+
 /// A user account.
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct User {
@@ -158,6 +171,13 @@ pub struct Node {
     pub trashed_at: Option<i64>,
     /// Path the node had when it was trashed (for the trash view).
     pub original_path: Option<String>,
+    /// Whether this folder's contents are end-to-end encrypted.
+    ///
+    /// Folders only: the server never holds keys, just the declaration that
+    /// everything below must be ciphertext. Clients encrypt before upload;
+    /// the server refuses plaintext writes into the subtree.
+    #[sqlx(default)]
+    pub encrypted: bool,
 }
 
 /// A historical version of a file.
@@ -482,6 +502,26 @@ impl Db {
         .bind(now)
         .execute(&mut *tx)
         .await?;
+        // Every account starts with a familiar shape: media folders for
+        // normal (readable, fast-preview) content, and a Vault whose
+        // contents are always client-side encrypted. Declaring Vault
+        // encrypted up front is what lets any client — browser, desktop,
+        // phone — know it must encrypt before uploading, even while empty.
+        for (name, encrypted) in DEFAULT_FOLDERS {
+            sqlx::query(
+                "INSERT INTO nodes
+                     (user_id, parent_id, name, kind, size, created_at, modified_at, encrypted)
+                 VALUES (?, (SELECT id FROM nodes WHERE user_id = ? AND parent_id IS NULL), ?, 'dir', 0, ?, ?, ?)",
+            )
+            .bind(user.id)
+            .bind(user.id)
+            .bind(name)
+            .bind(now)
+            .bind(now)
+            .bind(i64::from(encrypted))
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(user)
     }
@@ -1411,6 +1451,42 @@ impl Db {
         Ok(Some(path))
     }
 
+    /// Sets a folder's encryption declaration. Files cannot carry it: the
+    /// flag is a property of a place, not of a blob.
+    pub async fn set_folder_encrypted(
+        &self,
+        user_id: i64,
+        node_id: i64,
+        encrypted: bool,
+    ) -> Result<(), DbError> {
+        let result = sqlx::query(
+            "UPDATE nodes SET encrypted = ?, modified_at = ?
+             WHERE user_id = ? AND id = ? AND kind = 'dir'",
+        )
+        .bind(i64::from(encrypted))
+        .bind(now_millis())
+        .bind(user_id)
+        .bind(node_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("folder {node_id}")));
+        }
+        Ok(())
+    }
+
+    /// Ids of the *folders* the server believes are encrypted, for one user.
+    /// Clients use this to decide whether a path needs client-side
+    /// encryption without trusting a per-request guess.
+    pub async fn encrypted_folder_ids(&self, user_id: i64) -> Result<Vec<i64>, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM nodes WHERE user_id = ? AND kind = 'dir' AND encrypted = 1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Lists every live node of a user (used to build sync tree paths).
     pub async fn all_live_nodes(&self, user_id: i64) -> Result<Vec<Node>, DbError> {
         Ok(sqlx::query_as::<_, Node>(
@@ -1716,7 +1792,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(db.children(user.id, root.id).await.unwrap().len(), 1);
+        // New accounts start with Photos/Videos/Images/Vault, so the root
+        // holds those plus the folder added here.
+        assert_eq!(
+            db.children(user.id, root.id).await.unwrap().len(),
+            1 + DEFAULT_FOLDERS.len()
+        );
         assert_eq!(db.children(user.id, dir.id).await.unwrap().len(), 1);
 
         db.move_node(user.id, file.id, root.id, "renamed.txt", now)

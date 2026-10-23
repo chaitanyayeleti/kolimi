@@ -574,6 +574,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let trash = RwSignal::new(Vec::<TrashItem>::new());
     let share_target = RwSignal::new(Option::<Entry>::None);
     let versions_for = RwSignal::new(Option::<Entry>::None);
+    let vault_setup = RwSignal::new(false);
     let upload_label = RwSignal::new("Upload".to_string());
     let query = RwSignal::new(String::new());
     let results = RwSignal::new(Vec::<SearchHit>::new());
@@ -689,6 +690,27 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         {
             usage.set(r.body);
         }
+    });
+
+    // First login: offer to create the Vault passphrase. Dismissal is
+    // remembered, and Vault prompts again the first time it is used, so
+    // nobody is forced through it before they need encryption.
+    Effect::new(move |_| {
+        if e2ee_master.get_untracked().is_some() || vault_setup.get_untracked() {
+            return;
+        }
+        let dismissed = web_sys::window()
+            .and_then(|window| window.local_storage().ok().flatten())
+            .and_then(|storage| storage.get_item("kolimi.vault.dismissed").ok().flatten())
+            .is_some();
+        if dismissed {
+            return;
+        }
+        spawn_local(async move {
+            if crate::e2ee::keyring_exists().await == Ok(false) {
+                vault_setup.set(true);
+            }
+        });
     });
 
     // Detect session expiry while the app stays open: poll and fall back to
@@ -972,8 +994,17 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             if encrypted {
                 let Some(master) = e2ee_master.get_untracked() else {
                     finish(false, None);
-                    error.set("Unlock encryption first (sidebar → Encryption).".to_string());
-                    e2ee_open.set(true);
+                    // First use of an encrypted folder: create the Vault
+                    // passphrase if none exists, otherwise unlock it.
+                    if crate::e2ee::keyring_exists().await == Ok(false) {
+                        vault_setup.set(true);
+                    } else {
+                        error.set(
+                            "This folder is encrypted — unlock it to upload (Encryption in the sidebar)."
+                                .to_string(),
+                        );
+                        e2ee_open.set(true);
+                    }
                     return;
                 };
                 let bytes = match api::read_file(&file).await {
@@ -1385,6 +1416,47 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     };
 
     let share_entry = move |entry: Entry| share_target.set(Some(entry));
+
+    // Declares a folder encrypted (or plaintext). The server flag is what
+    // every client reads, so this is the only switch that matters.
+    let toggle_encryption = move |entry: Entry| {
+        let path = entry.path.clone();
+        let encrypt = !entry.encrypted;
+        spawn_local(async move {
+            let current = path
+                .rsplit_once('/')
+                .map(|(dir, _)| {
+                    if dir.is_empty() {
+                        "/".to_string()
+                    } else {
+                        dir.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "/".to_string());
+            match api::send_json(
+                "POST",
+                "/api/files/encrypt",
+                &json!({ "path": entry.path, "encrypted": encrypt }),
+            )
+            .await
+            {
+                Ok(r) if r.status == 200 => {
+                    notice.set(if encrypt {
+                        "Folder encrypted — new files are encrypted on your device".to_string()
+                    } else {
+                        "Folder is now plaintext".to_string()
+                    });
+                    load(current);
+                }
+                Ok(r) => error.set(
+                    r.error()
+                        .unwrap_or("Could not change encryption")
+                        .to_string(),
+                ),
+                Err(e) => error.set(e),
+            }
+        });
+    };
 
     let search_submit = move |ev: ev::SubmitEvent| {
         ev.prevent_default();
@@ -2519,6 +2591,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         let rename_e = entry.clone();
                         let delete_e = entry.clone();
                         let versions_e = entry.clone();
+                        let encrypt_e = entry.clone();
+                        // Only top-level folders own their flag; nested
+                        // folders inherit their parent's policy.
+                        let encrypt_toggle =
+                            is_dir && !shared && entry.path.matches('/').count() == 1;
                         view! {
                             <div class="ctx-scrim" on:click=move |_| context_menu.set(None)></div>
                             <div class="ctx-menu" style=format!("left:{}px; top:{}px;", x.max(0), y.max(0))>
@@ -2635,6 +2712,25 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                         </button>
                                                     }
                                                 })}
+                                            {encrypt_toggle
+                                                .then(|| {
+                                                    view! {
+                                                        <button
+                                                            class="ctx-item"
+                                                            on:click=move |_| {
+                                                                context_menu.set(None);
+                                                                toggle_encryption(encrypt_e.clone());
+                                                            }
+                                                        >
+                                                            <Icon name="lock"/>
+                                                            {if encrypted {
+                                                                "Make this folder plaintext"
+                                                            } else {
+                                                                "Encrypt this folder"
+                                                            }}
+                                                        </button>
+                                                    }
+                                                })}
                                         }
                                     })}
                             </div>
@@ -2735,6 +2831,32 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         }
                     })
             }}
+
+            {move || {
+                vault_setup
+                .get()
+                .then(|| {
+                    view! {
+                        <VaultSetupDialog
+                            on_close=Callback::new(move |_| {
+                                if let Some(storage) = web_sys::window()
+                                    .and_then(|window| window.local_storage().ok().flatten())
+                                {
+                                    let _ = storage.set_item("kolimi.vault.dismissed", "1");
+                                }
+                                vault_setup.set(false);
+                            })
+                            on_done=Callback::new(move |master| {
+                                crate::e2ee::remember_master(&master);
+                                e2ee_master.set(Some(master));
+                                vault_setup.set(false);
+                                notice.set("Vault ready — anything you put inside it is encrypted".to_string());
+                                load(path.get_untracked());
+                            })
+                        />
+                    }
+                })
+        }}
 
             {move || {
                 share_target
@@ -3802,6 +3924,113 @@ fn PasskeysDialog(on_close: Callback<()>) -> impl IntoView {
                                 children=|code| view! { <li><code>{code}</code></li> }
                             />
                         </ul>
+                    </div>
+                </Show>
+                <p class="error">{move || error.get()}</p>
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn VaultSetupDialog(on_close: Callback<()>, on_done: Callback<MasterKey>) -> impl IntoView {
+    let pass = RwSignal::new(String::new());
+    let confirm = RwSignal::new(String::new());
+    let phrase = RwSignal::new(Option::<String>::None);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+
+    let create = move |_| {
+        let passphrase = pass.get_untracked();
+        if passphrase.trim().is_empty() {
+            error.set("Choose a passphrase".to_string());
+            return;
+        }
+        if passphrase != confirm.get_untracked() {
+            error.set("Passphrases do not match".to_string());
+            return;
+        }
+        busy.set(true);
+        spawn_local(async move {
+            match crate::e2ee::setup(&passphrase).await {
+                Ok(words) => match crate::e2ee::unlock(&passphrase).await {
+                    Ok(master) => {
+                        busy.set(false);
+                        phrase.set(Some(words));
+                        // Keep the unlocked key so the next step (the first
+                        // upload) works immediately.
+                        on_done.run(master);
+                    }
+                    Err(e) => {
+                        busy.set(false);
+                        error.set(e);
+                    }
+                },
+                Err(e) => {
+                    busy.set(false);
+                    error.set(e);
+                }
+            }
+        });
+    };
+
+    let close = move |_| on_close.run(());
+
+    view! {
+        <div class="backdrop">
+            <div class="card modal">
+                <div class="modal-head">
+                    <h2>"Set up your Vault"</h2>
+                    <button class="icon-btn" aria-label="Close" on:click=close>
+                        <Icon name="x"/>
+                    </button>
+                </div>
+                <Show when=move || phrase.get().is_none()>
+                    <p class="muted">
+                        "Your Vault is encrypted on this device. We can never read it — and if you lose both the passphrase and the recovery phrase, the files inside are gone for good."
+                    </p>
+                    <p class="muted">
+                        "This is separate from your login password."
+                    </p>
+                    <label>
+                        "Passphrase"
+                        <input
+                            type="password"
+                            autocomplete="new-password"
+                            prop:value=move || pass.get()
+                            on:input=move |ev| pass.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <label>
+                        "Repeat passphrase"
+                        <input
+                            type="password"
+                            autocomplete="new-password"
+                            prop:value=move || confirm.get()
+                            on:input=move |ev| confirm.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <div class="row-actions">
+                        <button class="primary" disabled=move || busy.get() on:click=create>
+                            <Icon name="lock"/>
+                            {move || if busy.get() { "Creating…" } else { "Create Vault" }}
+                        </button>
+                        <button class="ghost" on:click=close>"Later"</button>
+                    </div>
+                </Show>
+                <Show when=move || phrase.get().is_some()>
+                    <p class="notice">
+                        "Write down these 24 words. They are the only other way to open your Vault."
+                    </p>
+                    <code class="recovery">{move || phrase.get().unwrap_or_default()}</code>
+                    <div class="row-actions">
+                        <button
+                            on:click=move |_| {
+                                let words = phrase.get_untracked().unwrap_or_default();
+                                spawn_local(async move { crate::api::copy_to_clipboard(&words).await });
+                            }
+                        >"Copy"</button>
+                        <button class="primary" on:click=close>"I saved it"</button>
                     </div>
                 </Show>
                 <p class="error">{move || error.get()}</p>

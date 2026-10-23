@@ -114,6 +114,38 @@ impl E2eeOptions {
     }
 }
 
+/// Which relative paths must be encrypted on this pass.
+///
+/// The authoritative source is the server's per-folder flag, exposed in the
+/// sync tree: a file is encrypted when any ancestor folder is declared
+/// encrypted. `encrypted_roots` from the local config is only a fallback for
+/// servers that predate the flag (and for the CLI's `--e2ee-root`), so an
+/// account can mix encrypted and plaintext folders with no per-pair setting.
+#[derive(Debug, Default)]
+struct EncryptPolicy {
+    /// Relative folder prefixes reported by the server, e.g. `Vault`.
+    prefixes: Vec<String>,
+    /// Local config fallback, used when the server reports no flags.
+    fallback: Vec<String>,
+}
+
+impl EncryptPolicy {
+    fn covers(&self, rel: &str) -> bool {
+        // Union, not replacement: a folder configured locally (older setups
+        // and the CLI's --e2ee-root) must stay encrypted even after the
+        // server starts reporting its own flags. Erring toward encryption is
+        // the only safe direction.
+        self.prefixes.iter().any(|root| is_under(rel, root))
+            || self.fallback.iter().any(|root| is_under(rel, root))
+    }
+}
+
+/// Whether `rel` is `root` itself or lives beneath it.
+fn is_under(rel: &str, root: &str) -> bool {
+    let root = root.trim_matches('/');
+    rel == root || rel.starts_with(&format!("{root}/"))
+}
+
 /// What one sync pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SyncReport {
@@ -287,15 +319,52 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
     let mut state = State::load(&config.local_dir)?;
     cleanup_stale_temp_files(&config.local_dir);
     let e2ee = unlock_e2ee(&http, config).await?;
+    // The server's folder flags are the source of truth; local
+    // `encrypted_roots` is only a fallback for older servers.
+    let mut policy = EncryptPolicy {
+        prefixes: Vec::new(),
+        fallback: config
+            .e2ee
+            .as_ref()
+            .map(|options| options.encrypted_roots.clone())
+            .unwrap_or_default(),
+    };
     let mut report = SyncReport::default();
-    pull(&http, config, &root, e2ee.as_ref(), &mut state, &mut report).await?;
+    pull(
+        &http,
+        config,
+        &root,
+        e2ee.as_ref(),
+        &mut policy,
+        &mut state,
+        &mut report,
+    )
+    .await?;
     // Persist pull progress before push: a push failure must not lose the
     // pulled state and cause false conflicts on the next pass.
     let _ = state.save(&config.local_dir);
-    push(&http, config, &root, e2ee.as_ref(), &mut state, &mut report).await?;
+    push(
+        &http,
+        config,
+        &root,
+        e2ee.as_ref(),
+        &policy,
+        &mut state,
+        &mut report,
+    )
+    .await?;
     if report.conflicts > 0 {
         // Fetch the winning server versions for the conflicted paths.
-        pull(&http, config, &root, e2ee.as_ref(), &mut state, &mut report).await?;
+        pull(
+            &http,
+            config,
+            &root,
+            e2ee.as_ref(),
+            &mut policy,
+            &mut state,
+            &mut report,
+        )
+        .await?;
     }
     state.save(&config.local_dir)?;
     Ok(report)
@@ -406,7 +475,6 @@ fn ensure_parent_dirs(
 struct E2ee {
     master: MasterKey,
     identity: Identity,
-    options: E2eeOptions,
 }
 
 async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, SyncError> {
@@ -494,11 +562,7 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
         write_keyring_epoch(&config.local_dir, keyring.epoch)?;
     }
     let identity = ensure_identity(http, &master).await?;
-    Ok(Some(E2ee {
-        master,
-        identity,
-        options: options.clone(),
-    }))
+    Ok(Some(E2ee { master, identity }))
 }
 
 /// Loads the user's X25519 identity, creating and publishing one on first
@@ -1575,8 +1639,12 @@ struct RemoteFile {
     shared: bool,
 }
 
-async fn remote_files(http: &Http, root: &str) -> Result<BTreeMap<String, RemoteFile>, SyncError> {
+async fn remote_files(
+    http: &Http,
+    root: &str,
+) -> Result<(BTreeMap<String, RemoteFile>, Vec<String>), SyncError> {
     let mut remote = BTreeMap::new();
+    let mut encrypted_dirs: Vec<String> = Vec::new();
     let mut after = 0i64;
     loop {
         let path = format!("/api/sync/tree?after_id={after}&limit=1000");
@@ -1599,6 +1667,21 @@ async fn remote_files(http: &Http, root: &str) -> Result<BTreeMap<String, Remote
             {
                 after = id;
                 advanced = true;
+            }
+            // Folder-level encryption policy comes from the server, so a
+            // mixed account (plaintext media + encrypted Vault) needs no
+            // per-pair configuration.
+            if entry["kind"].as_str() == Some("dir")
+                && entry["encrypted"].as_bool() == Some(true)
+                && let Some(server_path) = entry["path"].as_str()
+            {
+                if let Some(rel) = relative_to_root(server_path, root) {
+                    if !rel.is_empty() {
+                        encrypted_dirs.push(rel);
+                    }
+                } else if root.is_empty() {
+                    encrypted_dirs.push(server_path.trim_matches('/').to_string());
+                }
             }
             if entry["kind"].as_str() != Some("file") {
                 continue;
@@ -1660,7 +1743,7 @@ async fn remote_files(http: &Http, root: &str) -> Result<BTreeMap<String, Remote
             },
         );
     }
-    Ok(remote)
+    Ok((remote, encrypted_dirs))
 }
 
 async fn pull(
@@ -1668,10 +1751,14 @@ async fn pull(
     config: &SyncConfig,
     root: &str,
     e2ee: Option<&E2ee>,
+    policy: &mut EncryptPolicy,
     state: &mut State,
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
-    let remote = remote_files(http, root).await?;
+    let (remote, encrypted_dirs) = remote_files(http, root).await?;
+    if !encrypted_dirs.is_empty() {
+        policy.prefixes = encrypted_dirs;
+    }
 
     for (rel, file) in &remote {
         // One bad file must not abort the whole pass: capture a per-file error
@@ -1682,23 +1769,20 @@ async fn pull(
             safe_rel(rel)?;
             // Validate encryption requirements before touching the local path.
             if file.encrypted {
-                let Some(e2ee) = e2ee else {
+                let Some(_e2ee) = e2ee else {
                     return Err(SyncError::E2ee(format!(
-                        "remote file /{rel} is encrypted but no e2ee roots are configured"
+                        "remote file /{rel} is encrypted but encryption is not configured"
                     )));
                 };
-                // Shared files are encrypted by their owner; local roots only
-                // govern which of *our* files we encrypt.
-                if !file.shared && !e2ee.options.covers(rel) {
+                // Shared files are encrypted by their owner; the policy only
+                // governs which of *our* folders are encrypted.
+                if !file.shared && !policy.covers(rel) {
                     return Err(SyncError::E2ee(format!(
-                        "remote file /{rel} is encrypted but not under a configured e2ee root"
+                        "remote file /{rel} is encrypted but its folder is not marked encrypted"
                     )));
                 }
             }
-            if !file.encrypted
-                && !file.shared
-                && e2ee.is_some_and(|e2ee| e2ee.options.covers(rel))
-            {
+            if !file.encrypted && !file.shared && policy.covers(rel) {
                 return Err(SyncError::E2ee(format!(
                     "remote file /{rel} is not encrypted but is under a configured e2ee root; refusing (possible downgrade)"
                 )));
@@ -2063,6 +2147,7 @@ async fn push(
     config: &SyncConfig,
     root: &str,
     e2ee: Option<&E2ee>,
+    policy: &EncryptPolicy,
     state: &mut State,
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
@@ -2132,7 +2217,14 @@ async fn push(
         let data = std::fs::read(&local_path)?;
         let mut pending_key: Option<Vec<u8>> = None;
         let mut file_key: Option<FileKey> = None;
-        let manifest = if let Some(e2ee) = e2ee.filter(|e2ee| e2ee.options.covers(&rel)) {
+        if policy.covers(&rel) && e2ee.is_none() {
+            // An encrypted folder must never receive plaintext, even as a
+            // fallback: refuse rather than leak.
+            return Err(SyncError::Locked(format!(
+                "/{rel} is in an encrypted folder — unlock encryption (passphrase or device key) before syncing it"
+            )));
+        }
+        let manifest = if let Some(e2ee) = e2ee.filter(|_| policy.covers(&rel)) {
             // Encrypt-then-chunk (RFC 0007): chunk boundaries follow the
             // plaintext so edits stay delta-friendly; the manifest hashes
             // ciphertext chunks.
@@ -2204,9 +2296,14 @@ async fn push(
         if let Some(known) = state.files.get(&rel) {
             path.push_str(&format!("&if_content_id={}", known.content_id));
         }
-        let (status, _) = http
-            .put_json(&path, &serde_json::to_value(&manifest)?)
-            .await?;
+        // Send the wrapped key with the manifest: one request, so a crash
+        // can never leave ciphertext on the server without its key, and the
+        // server can enforce "encrypted folders require a key".
+        let mut body = serde_json::to_value(&manifest)?;
+        if let Some(wrapped) = &pending_key {
+            body["wrapped_key"] = serde_json::json!(STANDARD.encode(wrapped));
+        }
+        let (status, _) = http.put_json(&path, &body).await?;
         match status {
             200 => {
                 if let Some(wrapped) = pending_key {

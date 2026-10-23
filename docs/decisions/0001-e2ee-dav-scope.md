@@ -1,6 +1,6 @@
 # Decision 0001: E2EE scope and WebDAV boundary
 
-Status: **Proposed — pending decision** · Date: 2026-10-12 · Depends on:
+Status: **Accepted (2026-10-26) — option B implemented in 0.1.30** · Date: 2026-10-12 · Depends on:
 RFC 0007 (E2EE), RFC 0008 (device enrollment), RFC 0009 (E2EE
 onboarding), RFC 0010 (WebDAV/E2EE boundary)
 

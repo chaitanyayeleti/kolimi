@@ -288,36 +288,25 @@ async fn api_files_move_and_info_work_on_encrypted_files() {
     assert_eq!(info["kind"], "dir");
     assert_eq!(info["encrypted"], false);
 
-    // A folder holding only encrypted files counts as encrypted.
+    // A folder becomes encrypted because it is declared so — not because of
+    // what it happens to contain. That is what lets an empty Vault work.
     let (status, _, _) = send(&server.app, request("MKCOL", "/dav/vault", Some(&auth))).await;
     assert!(matches!(
         status,
         StatusCode::CREATED | StatusCode::METHOD_NOT_ALLOWED
     ));
-    let (status, _, _) = send(
+    let (status, _, body) = send(
         &server.app,
         request_with_body(
-            "PUT",
-            "/dav/vault/a.bin",
+            "POST",
+            "/api/files/encrypt",
             &auth,
-            "application/octet-stream",
-            b"ciphertext",
+            "application/json",
+            br#"{"path": "/vault", "encrypted": true}"#,
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let (status, _, _) = send(
-        &server.app,
-        request_with_body(
-            "PUT",
-            "/api/files/key?path=/vault/a.bin",
-            &auth,
-            "application/octet-stream",
-            b"wrapped-key-bytes",
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let (status, _, body) = send(
         &server.app,
         request("GET", "/api/files/info?path=/vault", Some(&auth)),
@@ -326,6 +315,63 @@ async fn api_files_move_and_info_work_on_encrypted_files() {
     assert_eq!(status, StatusCode::OK);
     let info: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(info["encrypted"], true);
+
+    // Plaintext WebDAV writes into an encrypted folder are refused, so a
+    // client without keys can never smuggle plaintext in.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/vault/plain.txt", &auth, "text/plain", b"nope"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // And ciphertext cannot be committed without its wrapped key.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/api/files?path=/vault/secret2.bin",
+            &auth,
+            "application/json",
+            serde_json::to_string(&json!({
+                "version": 1,
+                "size": 4,
+                "chunks": [{"hash": "0000000000000000000000000000000000000000000000000000000000000000", "len": 4}]
+            }))
+            .unwrap()
+            .as_bytes(),
+        ),
+    )
+    .await;
+    assert!(
+        status == StatusCode::CONFLICT || status == StatusCode::BAD_REQUEST,
+        "{status}"
+    );
+
+    // A folder holding plaintext files cannot be declared encrypted.
+    let (status, _, _) = send(&server.app, request("MKCOL", "/dav/plainbox", Some(&auth))).await;
+    assert!(matches!(
+        status,
+        StatusCode::CREATED | StatusCode::METHOD_NOT_ALLOWED
+    ));
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/plainbox/x.txt", &auth, "text/plain", b"x"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "POST",
+            "/api/files/encrypt",
+            &auth,
+            "application/json",
+            br#"{"path": "/plainbox", "encrypted": true}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Metadata-only move works on ciphertext (WebDAV MOVE stays 403).
     let (status, _, _) = send(

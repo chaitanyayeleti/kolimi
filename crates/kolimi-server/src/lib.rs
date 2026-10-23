@@ -273,6 +273,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/browse", get(api_browse::browse))
         .route("/api/files/info", get(api_browse::info))
         .route("/api/files/move", post(api_browse::move_node))
+        .route("/api/files/encrypt", post(api_browse::set_encryption))
         .route("/api/search", get(api::search))
         .route("/api/preview", get(preview::handler))
         .route(

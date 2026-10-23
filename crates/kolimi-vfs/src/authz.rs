@@ -111,6 +111,7 @@ impl Mount {
             modified_at: self.modified_at,
             trashed: false,
             original_path: None,
+            encrypted: false,
         }
     }
 }
