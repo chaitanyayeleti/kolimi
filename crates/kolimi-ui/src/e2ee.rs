@@ -55,21 +55,30 @@ pub fn save_bytes(name: &str, bytes: &[u8]) {
 pub async fn unlock(passphrase: &str) -> Result<MasterKey, String> {
     let keyring = load_keyring().await?;
     check_keyring(&keyring)?;
-    let master = match keyring.passphrase_params() {
-        Some((salt, params)) => match derive_kek_off_thread(passphrase, &salt, &params).await {
-            Ok(kek) => keyring
-                .unlock_with_kek(&kek)
-                .map_err(|error| unlock_error(error, "Wrong passphrase"))?,
-            Err(_) => keyring
-                .unlock_with_passphrase(passphrase)
-                .map_err(|error| unlock_error(error, "Wrong passphrase"))?,
-        },
-        None => keyring
-            .unlock_with_passphrase(passphrase)
-            .map_err(|error| unlock_error(error, "Wrong passphrase"))?,
-    };
+    let (salt, params) = keyring
+        .passphrase_params()
+        .ok_or_else(|| "This keyring has no passphrase wrap".to_string())?;
+    let kek = derive_kek(passphrase, &salt, &params).await?;
+    let master = keyring
+        .unlock_with_kek(&kek)
+        .map_err(|error| unlock_error(error, "Wrong passphrase"))?;
     record_epoch(&keyring);
     Ok(master)
+}
+
+/// Derives the passphrase KEK in the KDF worker, falling back to the main
+/// thread only if workers are unavailable. Both setup and rotation use this
+/// so they no longer freeze the tab.
+async fn derive_kek(
+    passphrase: &str,
+    salt: &[u8],
+    params: &kolimi_crypto::Argon2Params,
+) -> Result<[u8; 32], String> {
+    match derive_kek_off_thread(passphrase, salt, params).await {
+        Ok(kek) => Ok(kek),
+        Err(_) => kolimi_crypto::kek_from_passphrase(passphrase, salt, params)
+            .map_err(|_| "could not derive the key".to_string()),
+    }
 }
 
 /// Derives the passphrase KEK in a module Web Worker.
@@ -231,13 +240,11 @@ pub async fn setup(passphrase: &str) -> Result<String, String> {
     let master = MasterKey::generate().map_err(|_| "could not generate the key".to_string())?;
     let recovery = kolimi_crypto::generate_recovery_code()
         .map_err(|_| "could not generate the recovery code".to_string())?;
-    let keyring = Keyring::create(
-        &master,
-        passphrase,
-        &kolimi_crypto::Argon2Params::default(),
-        &recovery,
-    )
-    .map_err(|_| "could not create the keyring".to_string())?;
+    let params = kolimi_crypto::Argon2Params::default();
+    let salt = Keyring::generate_salt().map_err(|_| "could not generate a salt".to_string())?;
+    let kek = derive_kek(passphrase, &salt, &params).await?;
+    let keyring = Keyring::create_with_kek(&master, &kek, &salt, &params, &recovery)
+        .map_err(|_| "could not create the keyring".to_string())?;
     upload_keyring(&keyring).await?;
     let identity = kolimi_crypto::Identity::generate()
         .map_err(|_| "could not generate the identity".to_string())?;
@@ -299,12 +306,11 @@ pub async fn change_passphrase(master: &MasterKey, new_passphrase: &str) -> Resu
     keyring
         .verify(master)
         .map_err(|_| "The keyring on the server does not match this unlocked key".to_string())?;
+    let params = kolimi_crypto::Argon2Params::default();
+    let salt = Keyring::generate_salt().map_err(|_| "could not generate a salt".to_string())?;
+    let kek = derive_kek(new_passphrase, &salt, &params).await?;
     keyring
-        .add_passphrase(
-            master,
-            new_passphrase,
-            &kolimi_crypto::Argon2Params::default(),
-        )
+        .add_passphrase_with_kek(master, &kek, &salt, &params)
         .map_err(|_| "could not wrap the key with the new passphrase".to_string())?;
     upload_keyring(&keyring).await
 }

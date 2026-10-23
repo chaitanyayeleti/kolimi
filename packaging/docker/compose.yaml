@@ -3,14 +3,16 @@
 services:
   kolimi:
     # Prebuilt image from GitHub Container Registry — no local build.
-    image: ghcr.io/chaitanyayeleti/kolimi:0.1.24
+    image: ${KOLIMI_IMAGE:-ghcr.io/chaitanyayeleti/kolimi:0.1.40}
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"
     environment:
       KOLIMI_ORIGIN: http://localhost:8080
       KOLIMI_SECURE_COOKIES: "false"
-      RUST_LOG: info
+      KOLIMI_USER_QUOTA_BYTES: ${KOLIMI_USER_QUOTA_BYTES:-0}
+      KOLIMI_METRICS_PER_USER: ${KOLIMI_METRICS_PER_USER:-0}
+      RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - kolimi-data:/data
 

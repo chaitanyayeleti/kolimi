@@ -15,3 +15,10 @@ apps/kolimi-desktop/target/
 
 # Example plugin build dirs
 examples/*/target/
+
+# Local secrets; keep .env.example committed
+.env
+packaging/docker/.env
+
+# MLS spike build output
+spikes/mls/target/

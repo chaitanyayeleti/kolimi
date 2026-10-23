@@ -172,10 +172,33 @@ impl Keyring {
         passphrase: &str,
         params: &Argon2Params,
     ) -> Result<(), CryptoError> {
-        params.argon2_params()?;
         let salt = random::<16>()?;
         let kek = Zeroizing::new(kek_from_passphrase(passphrase, &salt, params)?);
-        let wrapped = wrap(&kek, master_key.as_bytes(), PASSPHRASE_AAD)?;
+        self.add_passphrase_with_kek(master_key, &kek, &salt, params)
+    }
+
+    /// A random Argon2id salt for callers that derive the KEK elsewhere
+    /// (the browser's Web Worker).
+    pub fn generate_salt() -> Result<[u8; 16], CryptoError> {
+        random::<16>()
+    }
+
+    /// Adds (or replaces) the passphrase wrap using an already-derived KEK.
+    ///
+    /// This performs no Argon2 work; the caller must derive `kek` from the
+    /// passphrase and `salt` with `params`.
+    pub fn add_passphrase_with_kek(
+        &mut self,
+        master_key: &MasterKey,
+        kek: &[u8; KEY_LEN],
+        salt: &[u8],
+        params: &Argon2Params,
+    ) -> Result<(), CryptoError> {
+        params.argon2_params()?;
+        if salt.len() < 8 {
+            return Err(CryptoError::Keyring("salt too short".to_string()));
+        }
+        let wrapped = wrap(kek, master_key.as_bytes(), PASSPHRASE_AAD)?;
         self.wraps.retain(|wrap| wrap.method() != "passphrase");
         self.wraps.push(Wrap::Passphrase {
             salt: salt.to_vec(),
@@ -185,6 +208,28 @@ impl Keyring {
             wrapped,
         });
         self.bump_and_seal(master_key)
+    }
+
+    /// Creates a keyring using an already-derived passphrase KEK.
+    ///
+    /// Used by clients that run Argon2id in a worker. The recovery wrap and
+    /// integrity tag are built exactly as in [`Self::create`].
+    pub fn create_with_kek(
+        master_key: &MasterKey,
+        kek: &[u8; KEY_LEN],
+        salt: &[u8],
+        params: &Argon2Params,
+        recovery_code: &[u8; RECOVERY_CODE_LEN],
+    ) -> Result<Self, CryptoError> {
+        let mut keyring = Self {
+            version: Self::VERSION,
+            epoch: 0,
+            wraps: Vec::new(),
+            mac: None,
+        };
+        keyring.add_passphrase_with_kek(master_key, kek, salt, params)?;
+        keyring.add_recovery(master_key, recovery_code)?;
+        Ok(keyring)
     }
 
     /// Adds (or replaces) the recovery-code wrap.
@@ -490,6 +535,41 @@ mod tests {
             master.as_bytes()
         );
         assert!(keyring.verify(&master).is_ok(), "the new wrap is sealed");
+    }
+
+    #[test]
+    fn prederived_kek_unlocks_and_rotates() {
+        let master = MasterKey::generate().unwrap();
+        let recovery = generate_recovery_code().unwrap();
+        let params = fast_params();
+        let salt = Keyring::generate_salt().unwrap();
+        let kek = kek_from_passphrase("worker horse", &salt, &params).unwrap();
+        let mut keyring =
+            Keyring::create_with_kek(&master, &kek, &salt, &params, &recovery).unwrap();
+        assert_eq!(
+            keyring
+                .unlock_with_passphrase("worker horse")
+                .unwrap()
+                .as_bytes(),
+            master.as_bytes()
+        );
+
+        let new_salt = Keyring::generate_salt().unwrap();
+        let new_kek = kek_from_passphrase("new worker horse", &new_salt, &params).unwrap();
+        keyring
+            .add_passphrase_with_kek(&master, &new_kek, &new_salt, &params)
+            .unwrap();
+        assert!(matches!(
+            keyring.unlock_with_passphrase("worker horse"),
+            Err(CryptoError::Unlock)
+        ));
+        assert_eq!(
+            keyring
+                .unlock_with_passphrase("new worker horse")
+                .unwrap()
+                .as_bytes(),
+            master.as_bytes()
+        );
     }
 
     #[test]

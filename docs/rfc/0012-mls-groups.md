@@ -1,7 +1,13 @@
 # RFC 0012: MLS group E2EE (RFC 9420)
 
-Status: design (not implemented) · Depends on: RFC 0007 (E2EE), RFC 0008
+Status: design + spike (not wired) · Depends on: RFC 0007 (E2EE), RFC 0008
 (device enrollment), RFC 0010 (DAV boundary) · Requires: external audit delta
+
+> **Spike (0.1.40):** `spikes/mls` (package `kolimi-mls`, openmls 0.9)
+> validates device credentials/key packages, Welcome-based adds, application
+> messages, the `kolimi-share-keyring-v1` epoch exporter and epoch rotation.
+> Host tests pass and the crate checks for wasm32. It lives outside the
+> workspace so the audited build does not pull openmls yet.
 
 ## Why
 

@@ -6,6 +6,39 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.40] - 2026-10-24
+
+### Added
+- **Setup and passphrase rotation no longer freeze the tab.** Both derive
+  the Argon2id KEK in the KDF Web Worker; measured max main-thread gaps are
+  27 ms (setup) and 20 ms (rotation), with an in-page fallback if workers
+  are unavailable.
+- **Encrypted-name search in the web UI.** The server index only sees
+  `k1_…` ciphertext, so search now supplements its results with a
+  client-side name search over the sync tree and received-share tree while
+  unlocked. Content search inside encrypted files remains impossible by
+  design; locked sessions fall back to server-only results.
+- **A complete `.env.example`** at the repo root, covering server, sync CLI,
+  desktop, Docker/Traefik and build/test variables. The Docker env example
+  now includes image pinning and quota/metrics/log overrides; `.env` files
+  are git-ignored.
+- **MLS spike** in `spikes/mls` (package `kolimi-mls`, openmls 0.9): group
+  creation, Welcome-based add, application messages, epoch exporter and
+  epoch rotation. Host tests pass and the crate checks for wasm32. It is
+  deliberately outside the audited workspace and not wired into the server.
+
+### Changed
+- Docker Compose defaults to image `0.1.40` and accepts `KOLIMI_IMAGE`,
+  `KOLIMI_USER_QUOTA_BYTES`, `KOLIMI_METRICS_PER_USER` and `RUST_LOG` from
+  `.env`.
+
+### Known limitations
+- Encrypted shares are still read-only. Writer-created files need a shared
+  folder key/epoch so every member can read them; that is the MLS share
+  keyring in RFC 0012, not a per-file UMK wrap. It lands with the MLS
+  milestone rather than as a half-working patch.
+
+## [0.1.39] - 2026-10-24
 ## [0.1.39] - 2026-10-24
 
 ### Added

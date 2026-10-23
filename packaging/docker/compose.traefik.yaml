@@ -37,7 +37,7 @@ services:
 
   kolimi:
     # Prebuilt image from GitHub Container Registry — no local build.
-    image: ghcr.io/chaitanyayeleti/kolimi:0.1.24
+    image: ${KOLIMI_IMAGE:-ghcr.io/chaitanyayeleti/kolimi:0.1.40}
     restart: unless-stopped
     environment:
       KOLIMI_ORIGIN: https://${KOLIMI_DOMAIN:?set KOLIMI_DOMAIN in .env}
@@ -45,7 +45,9 @@ services:
       # Behind Traefik: rate limiting and lockout key on the real client
       # address from X-Forwarded-For, not the proxy's IP.
       KOLIMI_TRUST_PROXY: "true"
-      RUST_LOG: info
+      KOLIMI_USER_QUOTA_BYTES: ${KOLIMI_USER_QUOTA_BYTES:-0}
+      KOLIMI_METRICS_PER_USER: ${KOLIMI_METRICS_PER_USER:-0}
+      RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - kolimi-data:/data
     labels:
