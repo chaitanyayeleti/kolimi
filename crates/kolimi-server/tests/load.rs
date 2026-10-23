@@ -185,7 +185,11 @@ async fn metadata_p95_under_target() {
         let started = Instant::now();
         let (status, body) = get_json(&format!("{}/api/browse?path=/", server.url)).await;
         assert_eq!(status, 200);
-        assert_eq!(body["entries"].as_array().unwrap().len(), 500);
+        // 500 entries plus the four default folders every account has.
+        assert_eq!(
+            body["entries"].as_array().unwrap().len(),
+            500 + kolimi_db::DEFAULT_FOLDERS.len()
+        );
         samples.push(started.elapsed());
     }
     samples.sort();
