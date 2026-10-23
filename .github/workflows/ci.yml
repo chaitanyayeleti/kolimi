@@ -164,7 +164,7 @@ jobs:
       # ~10 minutes), and no separate debug build before the release bundle.
       - uses: taiki-e/install-action@v2
         with:
-          tool: tauri-cli@^2
+          tool: tauri-cli
       - run: cargo test --locked --manifest-path apps/kolimi-desktop/Cargo.toml
       - name: Packaging check (.deb)
         working-directory: apps/kolimi-desktop
