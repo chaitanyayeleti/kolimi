@@ -1273,9 +1273,43 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         });
     };
 
+    let decrypt_entry = move |entry: Entry| {
+        let Some(master) = e2ee_master.get_untracked() else {
+            error.set("Unlock encryption first (sidebar → Encryption).".to_string());
+            e2ee_open.set(true);
+            return;
+        };
+        let path = entry.path.clone();
+        let shared = entry.shared;
+        spawn_local(async move {
+            let result = if shared {
+                crate::e2ee::decrypt_shared_file(&master, &path).await
+            } else {
+                crate::e2ee::decrypt_file(&master, &path).await
+            };
+            match result {
+                Ok((name, bytes)) => {
+                    crate::e2ee::save_bytes(&name, &bytes);
+                    notice.set(format!("Decrypted {name}"));
+                }
+                Err(e) => error.set(e),
+            }
+        });
+    };
+
     let bulk_download = move |_| {
         let paths: Vec<String> = selected.get_untracked().into_iter().collect();
+        let known: std::collections::HashMap<String, Entry> = entries
+            .get_untracked()
+            .into_iter()
+            .map(|entry| (entry.path.clone(), entry))
+            .collect();
         for target in paths {
+            // Encrypted files cannot be fetched as-is: decrypt client-side.
+            if let Some(entry) = known.get(&target).filter(|entry| entry.encrypted) {
+                decrypt_entry(entry.clone());
+                continue;
+            }
             let url = format!("/dav{}", encode_path(&target));
             if let Some(document) = web_sys::window().and_then(|window| window.document())
                 && let Ok(element) = document.create_element("a")
@@ -1326,30 +1360,6 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     };
 
     let share_entry = move |entry: Entry| share_target.set(Some(entry));
-
-    let decrypt_entry = move |entry: Entry| {
-        let Some(master) = e2ee_master.get_untracked() else {
-            error.set("Unlock encryption first (sidebar → Encryption).".to_string());
-            e2ee_open.set(true);
-            return;
-        };
-        let path = entry.path.clone();
-        let shared = entry.shared;
-        spawn_local(async move {
-            let result = if shared {
-                crate::e2ee::decrypt_shared_file(&master, &path).await
-            } else {
-                crate::e2ee::decrypt_file(&master, &path).await
-            };
-            match result {
-                Ok((name, bytes)) => {
-                    crate::e2ee::save_bytes(&name, &bytes);
-                    notice.set(format!("Decrypted {name}"));
-                }
-                Err(e) => error.set(e),
-            }
-        });
-    };
 
     let search_submit = move |ev: ev::SubmitEvent| {
         ev.prevent_default();

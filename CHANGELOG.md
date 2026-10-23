@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.27] - 2026-10-26
+
+### Fixed
+- **Uploads into encrypted folders actually encrypt.** `GET
+  /api/files/info` now reports a folder as encrypted when every file it
+  holds is encrypted (directory nodes never carry keys themselves), so the
+  web UI's client-side-encrypt path is reachable; mixed and empty folders
+  stay plaintext. Without this the new encrypted-upload flow could never
+  trigger.
+- Bulk download decrypts encrypted selections instead of fetching raw
+  ciphertext URLs that 403.
+- Integration coverage for `/api/files/move` + `/api/files/info` on
+  encrypted files (move preserves keys, 409 on clash, 404 on missing).
+
+## [0.1.26] - 2026-10-26
+
 ## [0.1.26] - 2026-10-26
 
 ### Changed

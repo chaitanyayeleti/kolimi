@@ -241,7 +241,34 @@ pub async fn info(
         Err(VfsError::Forbidden) => return api::forbidden("no access"),
         Err(_) => return api::internal_error(),
     };
-    let encrypted = state.db.is_encrypted(access.node.id).await.unwrap_or(true);
+    // A folder counts as encrypted when every file it holds is encrypted:
+    // the server stores keys per file, so a directory node never has one
+    // itself. This is what the web UI checks before deciding whether a new
+    // upload needs client-side encryption. Mixed folders stay plaintext;
+    // an empty folder has nothing to go on, so it stays plaintext too.
+    let encrypted = if access.node.is_dir() {
+        let ids = state
+            .db
+            .encrypted_node_ids(access.owner_id)
+            .await
+            .unwrap_or_default();
+        if ids.is_empty() {
+            false
+        } else {
+            match state.db.children(access.owner_id, access.node.id).await {
+                Ok(children) => {
+                    let files: Vec<_> = children
+                        .iter()
+                        .filter(|child| child.kind == "file")
+                        .collect();
+                    !files.is_empty() && files.iter().all(|file| ids.contains(&file.id))
+                }
+                Err(_) => true,
+            }
+        }
+    } else {
+        state.db.is_encrypted(access.node.id).await.unwrap_or(true)
+    };
     Json(json!({
         "path": query.path,
         "kind": if access.node.is_dir() { "dir" } else { "file" },

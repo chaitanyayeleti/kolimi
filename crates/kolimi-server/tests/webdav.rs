@@ -270,6 +270,14 @@ async fn api_files_move_and_info_work_on_encrypted_files() {
     assert_eq!(info["encrypted"], true);
     assert_eq!(info["kind"], "file");
 
+    // A mixed folder stays plaintext: only a folder holding nothing but
+    // encrypted files counts as encrypted for new uploads.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/plain.txt", &auth, "text/plain", b"plain"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
     let (status, _, body) = send(
         &server.app,
         request("GET", "/api/files/info?path=/", Some(&auth)),
@@ -279,6 +287,45 @@ async fn api_files_move_and_info_work_on_encrypted_files() {
     let info: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(info["kind"], "dir");
     assert_eq!(info["encrypted"], false);
+
+    // A folder holding only encrypted files counts as encrypted.
+    let (status, _, _) = send(&server.app, request("MKCOL", "/dav/vault", Some(&auth))).await;
+    assert!(matches!(
+        status,
+        StatusCode::CREATED | StatusCode::METHOD_NOT_ALLOWED
+    ));
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/dav/vault/a.bin",
+            &auth,
+            "application/octet-stream",
+            b"ciphertext",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/api/files/key?path=/vault/a.bin",
+            &auth,
+            "application/octet-stream",
+            b"wrapped-key-bytes",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/files/info?path=/vault", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["encrypted"], true);
 
     // Metadata-only move works on ciphertext (WebDAV MOVE stays 403).
     let (status, _, _) = send(
