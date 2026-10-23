@@ -68,6 +68,11 @@ jobs:
           test -s target/bindings/kotlin/uniffi/kolimi_ffi/kolimi_ffi.kt
           test -s target/bindings/swift/kolimi_ffi.swift
           test -s target/bindings/python/kolimi_ffi.py
+      # End-to-end HTTP smoke test: login, root upload, Vault inheritance,
+      # plaintext refusal, public link, and sign-out by navigation. These
+      # are the flows unit tests cannot catch (cookies, CSRF, redirects).
+      - name: Smoke test (real server, real HTTP)
+        run: chmod +x scripts/smoke.sh && scripts/smoke.sh
 
   # Advisories, licences, bans and the vet store in a single job: three
   # runners spent more time on setup than on the checks themselves.

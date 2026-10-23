@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.33] - 2026-10-26
+
+### Fixed
+- **Sign out is a navigation, not a fetch.** `GET /logout` revokes the
+  session row, clears both cookies, and 303-redirects to `/app/`. No SPA
+  state, cached response or stale cookie can resurrect the session on
+  refresh. Covered by an integration test and the smoke test.
+- Upload failures now report the HTTP status and what it means instead of
+  a bare "failed", so a rejected CSRF token or oversized file is visible.
+- Added `scripts/smoke.sh` and run it in CI: it boots a real server and
+  exercises login, root upload/download, default folders, Vault
+  inheritance, plaintext refusal, keyless-commit refusal, public links and
+  sign-out. This is the regression gate the last few fixes lacked.
+
+## [0.1.32] - 2026-10-26
+
 ## [0.1.32] - 2026-10-26
 
 ### Fixed

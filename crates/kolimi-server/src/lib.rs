@@ -307,6 +307,9 @@ pub fn build_app(state: AppState) -> Router {
         .route("/app/{*path}", get(ui::asset))
         .route("/s/{token}", get(ui::public_page))
         .route("/api/session", post(api::login))
+        // Navigation logout: works without JS state and always clears the
+        // cookies, so a refresh cannot land back in the app.
+        .route("/logout", any(api::logout_navigate))
         .route("/api/passkeys/login/begin", post(api_passkey::login_begin))
         .route(
             "/api/passkeys/login/finish",

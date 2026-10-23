@@ -120,6 +120,54 @@ async fn unauthenticated_requests_are_rejected_with_basic_challenge() {
 }
 
 #[tokio::test]
+async fn logout_navigation_revokes_the_session_and_clears_cookies() {
+    let server = setup().await;
+    let login = request_with_body(
+        "POST",
+        "/api/session",
+        "",
+        "application/json",
+        format!(r#"{{"username":"{USER}","password":"{PASS}"}}"#).as_bytes(),
+    );
+    let (status, headers, _) = send(&server.app, login).await;
+    assert_eq!(status, StatusCode::OK);
+    let session_cookie = cookie_pair(&headers, "kolimi_session").unwrap();
+
+    // A real browser navigation, with no CSRF header: the server must
+    // revoke the session and redirect to the app.
+    let logout = Request::builder()
+        .method("GET")
+        .uri("/logout")
+        .header(header::COOKIE, &session_cookie)
+        .body(Body::empty())
+        .unwrap();
+    let (status, headers, _) = send(&server.app, logout).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        headers.get(header::LOCATION).unwrap().to_str().unwrap(),
+        "/app/"
+    );
+    // Both cookies are cleared.
+    let cleared: Vec<&str> = headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+    assert!(cleared.iter().any(|c| c.starts_with("kolimi_session=;")));
+    assert!(cleared.iter().any(|c| c.starts_with("kolimi_csrf=;")));
+
+    // The old cookie no longer authenticates: a refresh lands on login.
+    let me = Request::builder()
+        .method("GET")
+        .uri("/api/me")
+        .header(header::COOKIE, &session_cookie)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, me).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn logout_works_without_a_csrf_token() {
     let server = setup().await;
     let login = request_with_body(

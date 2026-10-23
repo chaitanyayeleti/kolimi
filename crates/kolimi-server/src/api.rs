@@ -313,6 +313,62 @@ pub async fn logout(
     response
 }
 
+/// `GET|POST /logout` — end the session and navigate to the login page.
+///
+/// A real navigation, not a fetch: the server deletes the session row,
+/// clears both cookies, and redirects. There is no client state left to get
+/// out of sync, so a refresh can never resurrect the session.
+pub async fn logout_navigate(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some(raw) = crate::auth::cookie_value(&headers, SESSION_COOKIE) else {
+        // No cookie at all: just go to the app, which shows the login form.
+        tracing::info!("logout: no session cookie on the request");
+        return redirect_to_app(&state);
+    };
+    let hash = token::hash_token(&raw);
+    match state.db.find_session(&hash).await {
+        Ok(Some(session)) => {
+            if let Err(error) = state.db.delete_session(&hash).await {
+                tracing::error!(%error, "logout: failed to delete session");
+            } else {
+                tracing::info!(user_id = session.user_id, "logout: session revoked");
+                if let Ok(Some(user)) = state.db.get_user(session.user_id).await {
+                    audit(
+                        &state,
+                        Some(user.id),
+                        Some(&user.username),
+                        "auth.logout",
+                        &user.username,
+                        json!({ "via": "logout" }),
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(None) => tracing::info!("logout: cookie did not match a live session"),
+        Err(error) => tracing::error!(%error, "logout: session lookup failed"),
+    }
+    redirect_to_app(&state)
+}
+
+fn redirect_to_app(state: &AppState) -> Response {
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    if let Ok(location) = HeaderValue::from_str("/app/") {
+        response.headers_mut().insert(header::LOCATION, location);
+    }
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        cookie(SESSION_COOKIE, "", 0, true, state.secure_cookies),
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        cookie(CSRF_COOKIE, "", 0, false, state.secure_cookies),
+    );
+    response
+}
+
 /// `GET /api/me` — information about the authenticated user.
 pub async fn me(Extension(user): Extension<CurrentUser>) -> Json<Value> {
     Json(json!({

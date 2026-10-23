@@ -914,38 +914,13 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     });
 
     let sign_out = move |_| {
-        spawn_local(async move {
-            // Verify the logout: silently dropping to the login screen while
-            // the session is still alive looks exactly like "sign out does
-            // nothing" on the next reload.
-            // A 401 from the revoke call means the session was already
-            // dead: that is a successful sign-out, not a failure. Only a
-            // still-live session (or a network error) is worth reporting.
-            // The revoke call is authoritative: 204 means the session row
-            // is gone, 401 means it was already gone. No second request, so
-            // a cached probe can never make this look broken.
-            let revoked = match api::delete("/api/session").await {
-                Ok(r) if r.status == 204 || r.status == 401 => true,
-                Ok(r) => {
-                    error.set(format!(
-                        "Sign out failed (HTTP {}) — {}. Check your connection and try again.",
-                        r.status,
-                        r.error().unwrap_or("the server refused to end the session"),
-                    ));
-                    false
-                }
-                Err(e) => {
-                    error.set(format!("Sign out failed — {e}"));
-                    false
-                }
-            };
-            if revoked {
-                crate::e2ee::forget_master();
-                view.set(View::Login);
-            } else {
-                error.set("Sign out failed — the server still accepts this session. Check your connection and try again.".to_string());
-            }
-        });
+        // Full navigation, not a fetch: the server deletes the session row,
+        // clears the cookies and redirects to the app. No SPA state, cache
+        // entry or stale cookie can bring the session back on refresh.
+        crate::e2ee::forget_master();
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().assign("/logout");
+        }
     };
 
     let open = move |entry: Entry| {
@@ -1049,6 +1024,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 }
                 return;
             }
+            let file_name = file.name();
             let blob = web_sys::Blob::from(file);
             api::upload_blob(
                 &url,
@@ -1056,8 +1032,31 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 move |pct| progress.set(pct),
                 move |result| {
                     let (ok, warning) = match result {
-                        Ok((code, warning)) => (matches!(code, 201 | 204), warning),
-                        Err(_) => (false, None),
+                        Ok((code, warning)) => {
+                            if !matches!(code, 201 | 204) {
+                                error.set(format!(
+                                    "Upload of “{}” failed (HTTP {code}){}.{}",
+                                    file_name,
+                                    if code == 403 {
+                                        " — the session or CSRF token was rejected"
+                                    } else if code == 413 {
+                                        " — file too large"
+                                    } else {
+                                        ""
+                                    },
+                                    if code == 403 {
+                                        " Try signing out and in again."
+                                    } else {
+                                        ""
+                                    },
+                                ));
+                            }
+                            (matches!(code, 201 | 204), warning)
+                        }
+                        Err(e) => {
+                            error.set(format!("Upload of “{}” failed: {e}", file_name));
+                            (false, None)
+                        }
                     };
                     finish(ok, warning);
                 },
