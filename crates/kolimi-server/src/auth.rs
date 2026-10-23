@@ -46,7 +46,15 @@ pub async fn require_auth(
         method.as_str(),
         "MKCOL" | "MKCALENDAR" | "MOVE" | "COPY" | "PROPPATCH" | "LOCK" | "UNLOCK"
     );
-    if via_cookie && is_mutating && !csrf_ok(&state, &headers, user.session_hash.as_ref()).await {
+    // Signing out is exempt: the worst case without CSRF is that someone
+    // logs you out (no data access), and requiring the token made a
+    // missing/stale cookie turn "log out" into a dead end.
+    let is_logout = method == Method::DELETE && req.uri().path() == "/api/session";
+    if via_cookie
+        && is_mutating
+        && !is_logout
+        && !csrf_ok(&state, &headers, user.session_hash.as_ref()).await
+    {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
 

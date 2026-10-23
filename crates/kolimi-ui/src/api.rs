@@ -43,13 +43,23 @@ async fn to_api(response: gloo_net::http::Response) -> Result<ApiResponse, Strin
 
 /// GET a JSON endpoint.
 pub async fn get(url: &str) -> Result<ApiResponse, String> {
-    let response = Request::get(url).send().await.map_err(|e| e.to_string())?;
+    // Credentials are explicit: relying on the fetch default has bitten us
+    // before (a request without cookies looks like a dead session).
+    let response = Request::get(url)
+        .credentials(RequestCredentials::SameOrigin)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     to_api(response).await
 }
 
 /// GET a raw text endpoint (text previews).
 pub async fn get_text(url: &str) -> Result<String, String> {
-    let response = Request::get(url).send().await.map_err(|e| e.to_string())?;
+    let response = Request::get(url)
+        .credentials(RequestCredentials::SameOrigin)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if response.status() != 200 {
         return Err(format!("HTTP {}", response.status()));
     }
@@ -58,7 +68,11 @@ pub async fn get_text(url: &str) -> Result<String, String> {
 
 /// GET a raw binary endpoint (E2EE ciphertext chunks).
 pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let response = Request::get(url).send().await.map_err(|e| e.to_string())?;
+    let response = Request::get(url)
+        .credentials(RequestCredentials::SameOrigin)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if response.status() != 200 {
         return Err(format!("HTTP {}", response.status()));
     }
@@ -72,6 +86,7 @@ pub async fn send_json(method: &str, url: &str, value: &Value) -> Result<ApiResp
         "PUT" => Request::put(url),
         _ => Request::post(url),
     };
+    builder = builder.credentials(RequestCredentials::SameOrigin);
     if let Some(token) = csrf_token() {
         builder = builder.header("X-CSRF-Token", &token);
     }
@@ -82,7 +97,7 @@ pub async fn send_json(method: &str, url: &str, value: &Value) -> Result<ApiResp
 
 /// DELETE a JSON endpoint with a CSRF token.
 pub async fn delete(url: &str) -> Result<ApiResponse, String> {
-    let mut builder = Request::delete(url);
+    let mut builder = Request::delete(url).credentials(RequestCredentials::SameOrigin);
     if let Some(token) = csrf_token() {
         builder = builder.header("X-CSRF-Token", &token);
     }
@@ -93,7 +108,7 @@ pub async fn delete(url: &str) -> Result<ApiResponse, String> {
 
 /// PUT raw bytes (chunk uploads) with a CSRF token.
 pub async fn put_bytes(url: &str, bytes: &[u8]) -> Result<ApiResponse, String> {
-    let mut builder = Request::put(url);
+    let mut builder = Request::put(url).credentials(RequestCredentials::SameOrigin);
     if let Some(token) = csrf_token() {
         builder = builder.header("X-CSRF-Token", &token);
     }

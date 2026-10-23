@@ -918,14 +918,27 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             // Verify the logout: silently dropping to the login screen while
             // the session is still alive looks exactly like "sign out does
             // nothing" on the next reload.
-            // The cache-buster matters: a cached `/api/me` from before the
-            // logout would report 200 and make a successful sign-out look
-            // broken (the server also marks API responses no-store).
-            let probe = format!("/api/me?after_logout={}", js_sys::Date::now() as u64);
-            let revoked = api::delete("/api/session")
-                .await
-                .is_ok_and(|r| r.status == 204)
-                && api::get(&probe).await.is_ok_and(|r| r.status == 401);
+            // A 401 from the revoke call means the session was already
+            // dead: that is a successful sign-out, not a failure. Only a
+            // still-live session (or a network error) is worth reporting.
+            // The revoke call is authoritative: 204 means the session row
+            // is gone, 401 means it was already gone. No second request, so
+            // a cached probe can never make this look broken.
+            let revoked = match api::delete("/api/session").await {
+                Ok(r) if r.status == 204 || r.status == 401 => true,
+                Ok(r) => {
+                    error.set(format!(
+                        "Sign out failed (HTTP {}) — {}. Check your connection and try again.",
+                        r.status,
+                        r.error().unwrap_or("the server refused to end the session"),
+                    ));
+                    false
+                }
+                Err(e) => {
+                    error.set(format!("Sign out failed — {e}"));
+                    false
+                }
+            };
             if revoked {
                 crate::e2ee::forget_master();
                 view.set(View::Login);
@@ -4018,6 +4031,7 @@ fn VaultSetupDialog(on_close: Callback<()>, on_done: Callback<MasterKey>) -> imp
     let pass = RwSignal::new(String::new());
     let confirm = RwSignal::new(String::new());
     let phrase = RwSignal::new(Option::<String>::None);
+    let unlocked = RwSignal::new(Option::<MasterKey>::None);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
 
@@ -4037,10 +4051,10 @@ fn VaultSetupDialog(on_close: Callback<()>, on_done: Callback<MasterKey>) -> imp
                 Ok(words) => match crate::e2ee::unlock(&passphrase).await {
                     Ok(master) => {
                         busy.set(false);
+                        // Show the phrase first: closing here would skip the
+                        // only chance to save the recovery words.
+                        unlocked.set(Some(master));
                         phrase.set(Some(words));
-                        // Keep the unlocked key so the next step (the first
-                        // upload) works immediately.
-                        on_done.run(master);
                     }
                     Err(e) => {
                         busy.set(false);
@@ -4111,7 +4125,18 @@ fn VaultSetupDialog(on_close: Callback<()>, on_done: Callback<MasterKey>) -> imp
                                 spawn_local(async move { crate::api::copy_to_clipboard(&words).await });
                             }
                         >"Copy"</button>
-                        <button class="primary" on:click=close>"I saved it"</button>
+                        <button
+                            class="primary"
+                            on:click=move |_| {
+                                if let Some(master) = unlocked.get_untracked() {
+                                    // Keep the unlocked key so the first
+                                    // upload works immediately.
+                                    on_done.run(master);
+                                } else {
+                                    on_close.run(());
+                                }
+                            }
+                        >"I saved it"</button>
                     </div>
                 </Show>
                 <p class="error">{move || error.get()}</p>

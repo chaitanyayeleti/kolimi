@@ -6,6 +6,27 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.32] - 2026-10-26
+
+### Fixed
+- **Uploads into a folder created inside Vault work.** `GET
+  /api/files/info` only reported a folder's own flag, so a subfolder of
+  Vault looked plaintext: the uploader sent plaintext and the server
+  (correctly) refused it with 403. The check now walks the ancestors.
+- **Sign out can no longer fail on CSRF.** `DELETE /api/session` is exempt
+  from the token (the worst case without it is being logged out), and the
+  UI acts on the revoke response instead of a follow-up probe, reporting
+  the HTTP code if the server refuses. Requests also send credentials
+  explicitly.
+- **The 24-word recovery phrase is actually shown.** The first-login Vault
+  dialog called `on_done` immediately, closing itself before the words
+  rendered; they now stay until "I saved it".
+- Root listings show the lock on encrypted default folders.
+- New integration tests: sign-out without a CSRF token, nested Vault
+  inheritance, and keyless commits into Vault being refused.
+
+## [0.1.31] - 2026-10-26
+
 ## [0.1.31] - 2026-10-26
 
 ### Fixed

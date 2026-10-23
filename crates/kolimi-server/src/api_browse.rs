@@ -70,7 +70,7 @@ pub async fn browse(
                         false,
                         None,
                         None,
-                        encrypted.contains(&child.id),
+                        encrypted.contains(&child.id) || child.encrypted,
                     ));
                 }
             }
@@ -254,12 +254,17 @@ pub async fn info(
     // `encrypted` means "everything at this path is client-side encrypted".
     // It follows the folder hierarchy: any ancestor folder (including this
     // one) that is declared encrypted makes the path encrypted. No guessing
-    // from the contents — an empty Vault is still a Vault.
-    let encrypted = if access.node.is_dir() {
-        access.node.encrypted
-    } else {
-        state.db.is_encrypted(access.node.id).await.unwrap_or(true)
-    };
+    // from the contents — an empty Vault is still a Vault, and a subfolder
+    // created inside Vault is encrypted too. This is the exact check the
+    // uploader uses before deciding to encrypt.
+    let inherited = state
+        .vfs
+        .path_is_encrypted(user.user_id, &query.path)
+        .await
+        .unwrap_or(true);
+    let encrypted = inherited
+        || access.node.encrypted
+        || (!access.node.is_dir() && state.db.is_encrypted(access.node.id).await.unwrap_or(true));
     Json(json!({
         "path": query.path,
         "kind": if access.node.is_dir() { "dir" } else { "file" },

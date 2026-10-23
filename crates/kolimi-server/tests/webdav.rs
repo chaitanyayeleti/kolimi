@@ -120,6 +120,98 @@ async fn unauthenticated_requests_are_rejected_with_basic_challenge() {
 }
 
 #[tokio::test]
+async fn logout_works_without_a_csrf_token() {
+    let server = setup().await;
+    let login = request_with_body(
+        "POST",
+        "/api/session",
+        "",
+        "application/json",
+        format!(r#"{{"username":"{USER}","password":"{PASS}"}}"#).as_bytes(),
+    );
+    let (status, headers, _) = send(&server.app, login).await;
+    assert_eq!(status, StatusCode::OK);
+    let session_cookie = cookie_pair(&headers, "kolimi_session").unwrap();
+
+    // No CSRF header: a stale or unreadable cookie must not make sign-out
+    // impossible.
+    let logout = Request::builder()
+        .method("DELETE")
+        .uri("/api/session")
+        .header(header::COOKIE, &session_cookie)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, logout).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let me = Request::builder()
+        .method("GET")
+        .uri("/api/me")
+        .header(header::COOKIE, &session_cookie)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, me).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn nested_folder_inside_vault_inherits_encryption() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+
+    let (status, _, _) = send(&server.app, request("MKCOL", "/dav/Vault", Some(&auth))).await;
+    assert!(matches!(
+        status,
+        StatusCode::CREATED | StatusCode::METHOD_NOT_ALLOWED
+    ));
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "POST",
+            "/api/files/encrypt",
+            &auth,
+            "application/json",
+            br#"{"path": "/Vault", "encrypted": true}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A folder created inside Vault carries no flag of its own, but must
+    // report encrypted so uploads into it are encrypted too.
+    let (status, _, _) = send(&server.app, request("MKCOL", "/dav/Vault/sub", Some(&auth))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/files/info?path=/Vault/sub", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["encrypted"], true, "nested folder must inherit Vault");
+
+    // And a file committed there without a wrapped key is refused.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/api/files?path=/Vault/sub/x.bin",
+            &auth,
+            "application/json",
+            serde_json::to_string(&json!({
+                "version": 1,
+                "size": 4,
+                "chunks": [{"hash": "0000000000000000000000000000000000000000000000000000000000000000", "len": 4}]
+            }))
+            .unwrap()
+            .as_bytes(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn put_get_roundtrip_with_conditional_requests() {
     let server = setup().await;
     let auth = basic(USER, PASS);
@@ -1090,13 +1182,15 @@ async fn cookie_mutations_require_csrf_token() {
     let (_, headers, _) = send(&server.app, login).await;
     let session_cookie = cookie_pair(&headers, "kolimi_session").unwrap();
 
-    let logout = Request::builder()
+    // Deleting a file is a destructive cookie mutation and still needs the
+    // token (logout is the one deliberate exemption).
+    let delete = Request::builder()
         .method("DELETE")
-        .uri("/api/session")
+        .uri("/dav/protected.txt")
         .header(header::COOKIE, &session_cookie)
         .body(Body::empty())
         .unwrap();
-    let (status, _, _) = send(&server.app, logout).await;
+    let (status, _, _) = send(&server.app, delete).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
