@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.35] - 2026-10-26
+
+### Security
+- Update `tokio` to 1.54.1 for RUSTSEC-2026-0386 (`AsyncFd::new` and
+  related constructors violate I/O safety). The advisory was published
+  after 0.1.34 was tagged, so this is a dependency-only release.
+
+## [0.1.34] - 2026-10-26
 ## [0.1.34] - 2026-10-26
 
 ### Fixed
