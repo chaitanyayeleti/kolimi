@@ -87,10 +87,10 @@ async fn handle(
     // DELETE and LOCK are metadata-only (trash a node, take a lock), so they
     // stay available for encrypted content; anything that could introduce
     // plaintext bytes is refused.
-    let mutating = matches!(
-        method.as_str(),
-        "PUT" | "MKCOL" | "PROPPATCH" | "COPY" | "MOVE"
-    );
+    // Creating a collection writes no content, so MKCOL is allowed inside
+    // an encrypted folder; everything that could carry plaintext bytes is
+    // refused.
+    let mutating = matches!(method.as_str(), "PUT" | "PROPPATCH" | "COPY" | "MOVE");
     if mutating {
         match vfs.path_is_encrypted(user_id, &vfs_path).await {
             Ok(true) => return encrypted_forbidden(),

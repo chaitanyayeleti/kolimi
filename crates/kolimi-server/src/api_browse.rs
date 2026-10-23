@@ -46,6 +46,7 @@ pub async fn browse(
         };
         return Json(json!({
             "path": format!("/{SHARED_MOUNT}"),
+            "encrypted": false,
             "parent": "/",
             "entries": entries,
         }))
@@ -81,6 +82,7 @@ pub async fn browse(
         }
         return Json(json!({
             "path": "/",
+            "encrypted": false,
             "parent": Value::Null,
             "entries": entries,
         }))
@@ -129,6 +131,7 @@ pub async fn browse(
                 .collect();
             Json(json!({
                 "path": normalized_path(&segments),
+                "encrypted": inherited,
                 "parent": parent,
                 "entries": entries,
             }))

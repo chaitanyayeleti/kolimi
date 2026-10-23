@@ -6,6 +6,28 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.31] - 2026-10-26
+
+### Fixed
+- **Locked Vault is read-only.** While encryption is locked, the UI refuses
+  to share, rename, move, or delete anything inside an encrypted folder
+  (single and bulk actions), and prompts to unlock instead. Vault's
+  contents are hidden behind a "Vault is locked" panel rather than listed.
+- **Sharing requires the key.** Creating a user/group share or a public
+  link for encrypted content is refused before the request is sent when
+  the keyring is locked — previously the share was created but could never
+  be opened.
+- **Sign out no longer reports a false failure.** API responses are marked
+  `Cache-Control: no-store` and the post-logout check is cache-busted, so
+  a cached `/api/me` can't make a successful sign-out look broken.
+- **Creating a folder inside Vault works.** `MKCOL` carries no content, so
+  it is allowed in encrypted folders; `PUT`/`COPY`/`MOVE`/`PROPPATCH` still
+  are not, which is what keeps plaintext out.
+- The redundant per-row "Decrypt" button is now an encryption badge:
+  Download already decrypts, so two buttons did the same thing.
+
+## [0.1.30] - 2026-10-26
+
 ## [0.1.30] - 2026-10-26
 
 ### Changed

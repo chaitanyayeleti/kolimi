@@ -591,6 +591,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let quota_warn = RwSignal::new(Option::<u8>::None);
     let usage = RwSignal::new(Value::Null);
     let loading = RwSignal::new(false);
+    // Whether the folder being shown is encrypted (so it can be hidden while
+    // locked). Comes from the browse response, which inherits the folder flag.
+    let folder_encrypted = RwSignal::new(false);
     let context_menu = RwSignal::new(Option::<(Entry, i32, i32)>::None);
     let lightbox = RwSignal::new(Option::<Entry>::None);
     let lightbox_url = RwSignal::new(String::new());
@@ -793,6 +796,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             }
             match result {
                 Ok(r) if r.status == 200 => {
+                    folder_encrypted.set(r.body["encrypted"].as_bool().unwrap_or(false));
                     entries.set(parse_entries(&r.body));
                     parent.set(
                         r.body
@@ -914,10 +918,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             // Verify the logout: silently dropping to the login screen while
             // the session is still alive looks exactly like "sign out does
             // nothing" on the next reload.
+            // The cache-buster matters: a cached `/api/me` from before the
+            // logout would report 200 and make a successful sign-out look
+            // broken (the server also marks API responses no-store).
+            let probe = format!("/api/me?after_logout={}", js_sys::Date::now() as u64);
             let revoked = api::delete("/api/session")
                 .await
                 .is_ok_and(|r| r.status == 204)
-                && api::get("/api/me").await.is_ok_and(|r| r.status == 401);
+                && api::get(&probe).await.is_ok_and(|r| r.status == 401);
             if revoked {
                 crate::e2ee::forget_master();
                 view.set(View::Login);
@@ -1141,7 +1149,23 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         });
     };
 
+    // Encrypted content must be unlocked before it can be shared, renamed,
+    // moved, or deleted: while locked, Vault is read-only. (The server
+    // cannot verify key possession, so this guard is client-side — but it
+    // stops the accidental "I deleted my Vault while it was locked".)
+    let require_unlock = move |entry: &Entry| -> bool {
+        if !entry.encrypted || e2ee_master.get_untracked().is_some() {
+            return true;
+        }
+        error.set("Vault is locked — unlock encryption first (sidebar → Encryption).".to_string());
+        e2ee_open.set(true);
+        false
+    };
+
     let delete_entry = move |entry: Entry| {
+        if !require_unlock(&entry) {
+            return;
+        }
         if !api::confirm(&format!("Move “{}” to trash?", entry.name)) {
             return;
         }
@@ -1175,6 +1199,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     };
 
     let rename_entry = move |entry: Entry| {
+        if !require_unlock(&entry) {
+            return;
+        }
         let Some(name) = api::prompt("New name", &entry.name) else {
             return;
         };
@@ -1209,6 +1236,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
 
     // Moves `entry` into `dest_dir` (drag-to-move onto a folder or crumb).
     let move_into = move |entry: Entry, dest_dir: String| {
+        if !require_unlock(&entry) {
+            return;
+        }
         let source = entry.path.clone();
         let destination = format!("{}/{}", dest_dir.trim_end_matches('/'), entry.name);
         if destination == source {
@@ -1251,6 +1281,18 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
 
     let bulk_trash = move |_| {
         let paths: Vec<String> = selected.get_untracked().into_iter().collect();
+        // Encrypted selections need an unlock, exactly like single delete.
+        let encrypted_selected = entries
+            .get_untracked()
+            .into_iter()
+            .any(|entry| entry.encrypted && paths.contains(&entry.path));
+        if encrypted_selected && e2ee_master.get_untracked().is_none() {
+            error.set(
+                "Vault is locked — unlock encryption first (sidebar → Encryption).".to_string(),
+            );
+            e2ee_open.set(true);
+            return;
+        }
         let current = path.get_untracked();
         let count = paths.len();
         spawn_local(async move {
@@ -1291,6 +1333,15 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             .filter(|e| e.encrypted && !e.shared)
             .map(|e| e.path)
             .collect();
+        if encrypted.iter().any(|path| paths.contains(path))
+            && e2ee_master.get_untracked().is_none()
+        {
+            error.set(
+                "Vault is locked — unlock encryption first (sidebar → Encryption).".to_string(),
+            );
+            e2ee_open.set(true);
+            return;
+        }
         let count = paths.len();
         spawn_local(async move {
             let mut failed = 0usize;
@@ -1415,7 +1466,17 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         });
     };
 
-    let share_entry = move |entry: Entry| share_target.set(Some(entry));
+    let share_entry = move |entry: Entry| {
+        if entry.encrypted && e2ee_master.get_untracked().is_none() {
+            error.set(
+                "Vault is locked — unlock encryption before sharing, or the recipient gets no key."
+                    .to_string(),
+            );
+            e2ee_open.set(true);
+            return;
+        }
+        share_target.set(Some(entry));
+    };
 
     // Declares a folder encrypted (or plaintext). The server flag is what
     // every client reads, so this is the only switch that matters.
@@ -1910,6 +1971,26 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                 }
                                     .into_any();
                             }
+                            // A locked encrypted folder shows no names: the
+                            // client hides them until the key is available.
+                            if folder_encrypted.get() && e2ee_master.get().is_none() {
+                                return view! {
+                                    <div class="empty">
+                                        <Icon name="lock"/>
+                                        <p>"Vault is locked"</p>
+                                        <small class="muted">
+                                            "Unlock encryption to see what's inside."
+                                        </small>
+                                        <button
+                                            class="primary"
+                                            on:click=move |_| e2ee_open.set(true)
+                                        >
+                                            "Unlock"
+                                        </button>
+                                    </div>
+                                }
+                                    .into_any();
+                            }
                             if entries.get().is_empty() {
                                 return view! {
                                     <div class="empty">
@@ -1957,7 +2038,6 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let preview = entry.path.clone();
                                                 let download = entry.path.clone();
                                                 let encrypted = entry.encrypted;
-                                                let decrypt_copy = entry.clone();
                                                 let download_copy = entry.clone();
                                                 let ctx_copy = entry.clone();
                                                 let lightbox_copy = entry.clone();
@@ -2046,14 +2126,16 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                         <div class="tile-actions">
                                                             {encrypted
                                                                 .then(|| {
+                                                                    // Informational only: Download already
+                                                                    // decrypts, so a second button would just
+                                                                    // do the same thing twice.
                                                                     view! {
-                                                                        <button
+                                                                        <span
                                                                             class="icon-btn"
-                                                                            title="Decrypt"
-                                                                            on:click=move |_| decrypt_entry(decrypt_copy.clone())
+                                                                            title="Encrypted — downloads decrypt in your browser"
                                                                         >
                                                                             <Icon name="lock"/>
-                                                                        </button>
+                                                                        </span>
                                                                     }
                                                                 })}
                                                             {(!is_dir)
@@ -2162,7 +2244,6 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let preview = entry.path.clone();
                                                 let download = entry.path.clone();
                                                 let encrypted = entry.encrypted;
-                                                let decrypt_copy = entry.clone();
                                                 let download_copy = entry.clone();
                                                 let ctx_copy = entry.clone();
                                                 let drag_copy = entry.clone();
@@ -2264,14 +2345,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                         <span class="file-actions">
                                                             {encrypted
                                                                 .then(|| {
+                                                                    // Informational: Download decrypts.
                                                                     view! {
-                                                                        <button
+                                                                        <span
                                                                             class="icon-btn"
-                                                                            title="Decrypt"
-                                                                            on:click=move |_| decrypt_entry(decrypt_copy.clone())
+                                                                            title="Encrypted — downloads decrypt in your browser"
                                                                         >
                                                                             <Icon name="lock"/>
-                                                                        </button>
+                                                                        </span>
                                                                     }
                                                                 })}
                                                             {(!is_dir)
@@ -4206,6 +4287,13 @@ fn ShareDialog(
                     return;
                 }
                 payload["recipient"] = json!(target);
+            }
+            if encrypted && master.is_none() {
+                error.set(
+                    "Unlock encryption first — without the key a share or link cannot be opened."
+                        .to_string(),
+                );
+                return;
             }
             let path = path.clone();
             let master = master.clone();

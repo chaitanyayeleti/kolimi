@@ -179,8 +179,15 @@ const REFERRER_POLICY: HeaderName = HeaderName::from_static("referrer-policy");
 /// `Strict-Transport-Security` is only sent when cookies are marked
 /// secure (i.e. the deployment is expected to sit behind TLS).
 pub async fn security_headers(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    // API and session responses must never be cached: a cached `/api/me`
+    // after logout makes a signed-out browser look signed in, and a cached
+    // browse listing hides changes.
+    let is_api = req.uri().path().starts_with("/api/");
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
+    if is_api {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     headers
         .entry(header::X_CONTENT_TYPE_OPTIONS)
         .or_insert(HeaderValue::from_static("nosniff"));
