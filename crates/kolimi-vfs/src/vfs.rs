@@ -608,6 +608,13 @@ impl Vfs {
             }));
         }
         let current = self.stat(user_id, raw).await?;
+        // Whether the file already had a wrapped key decides whether its old
+        // version history is ciphertext (safe to keep) or plaintext (must be
+        // purged below).
+        let was_encrypted = match &current {
+            Some(node) => self.db.file_key(node.id).await?.is_some(),
+            None => false,
+        };
         let current_id = current
             .as_ref()
             .and_then(|node| node.content_id)
@@ -641,6 +648,14 @@ impl Vfs {
             .await?;
         if let Some(wrapped) = wrapped_key {
             self.db.set_file_key(user_id, node.id, wrapped).await?;
+            if !was_encrypted {
+                // The file just became encrypted. The commit above archived
+                // its previous plaintext content, and older plaintext
+                // versions may exist: deleting them is what makes the
+                // "everything in this folder is encrypted" promise true for
+                // version history too.
+                self.db.delete_versions(user_id, node.id).await?;
+            }
         }
         Ok(Some(node))
     }
@@ -1387,6 +1402,60 @@ mod tests {
             .expect("commit with fresh chunks must succeed");
         assert_eq!(vfs.read(user, "/a.txt").await.unwrap().1, edited);
         assert_eq!(node.size, edited.len() as u64);
+        assert_eq!(vfs.versions(user, "/a.txt").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn encrypting_a_plaintext_file_purges_plaintext_versions() {
+        let (_dir, vfs, user) = setup().await;
+        vfs.put_bytes(user, "/a.txt", b"one").await.unwrap();
+        vfs.put_bytes(user, "/a.txt", b"two").await.unwrap();
+        assert_eq!(vfs.versions(user, "/a.txt").await.unwrap().len(), 1);
+
+        // The browser re-uploads the file as ciphertext and commits it with
+        // a wrapped key: this is the plaintext -> encrypted transition.
+        let node = vfs.resolve(user, "/a.txt").await.unwrap();
+        let current = node.content_id.unwrap().to_hex();
+        let (ciphertext, _) = vfs
+            .store
+            .ingest_bytes(user, b"ciphertext-one")
+            .await
+            .unwrap();
+        vfs.commit_manifest(
+            user,
+            "/a.txt",
+            &ciphertext,
+            Some(&current),
+            Some(b"wrapped-key"),
+        )
+        .await
+        .unwrap()
+        .expect("encrypted commit succeeds");
+
+        // The plaintext version (and the one just archived) must be gone.
+        assert!(
+            vfs.versions(user, "/a.txt").await.unwrap().is_empty(),
+            "plaintext history must not survive encryption"
+        );
+
+        // Later versions are ciphertext, so they are kept normally.
+        let node = vfs.resolve(user, "/a.txt").await.unwrap();
+        let current = node.content_id.unwrap().to_hex();
+        let (next, _) = vfs
+            .store
+            .ingest_bytes(user, b"ciphertext-two")
+            .await
+            .unwrap();
+        vfs.commit_manifest(
+            user,
+            "/a.txt",
+            &next,
+            Some(&current),
+            Some(b"wrapped-key-2"),
+        )
+        .await
+        .unwrap()
+        .expect("second encrypted commit succeeds");
         assert_eq!(vfs.versions(user, "/a.txt").await.unwrap().len(), 1);
     }
 

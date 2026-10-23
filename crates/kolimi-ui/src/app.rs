@@ -252,6 +252,9 @@ fn icon_svg(name: &str) -> String {
             r#"<circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8"/><path d="M17 20a5.5 5.5 0 0 0-3-4.9"/>"#
         }
         "key" => r#"<circle cx="8" cy="15" r="4"/><path d="m11 12 8-8 2 2-2 2 2 2-3 3-2-2-3 3"/>"#,
+        "settings" => {
+            r#"<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>"#
+        }
         "sun" => {
             r#"<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>"#
         }
@@ -616,7 +619,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         let preview_text = is_text_name(&entry.name);
         if entry.encrypted {
             let Some(master) = master else {
-                error.set("Unlock encryption first (sidebar → Encryption).".to_string());
+                error.set("Unlock encryption first (Settings → Encryption).".to_string());
                 e2ee_open.set(true);
                 lightbox.set(None);
                 return;
@@ -1169,7 +1172,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         if !entry.encrypted || e2ee_master.get_untracked().is_some() {
             return true;
         }
-        error.set("Vault is locked — unlock encryption first (sidebar → Encryption).".to_string());
+        error.set("Vault is locked — unlock encryption first (Settings → Encryption).".to_string());
         e2ee_open.set(true);
         false
     };
@@ -1300,7 +1303,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             .any(|entry| entry.encrypted && paths.contains(&entry.path));
         if encrypted_selected && e2ee_master.get_untracked().is_none() {
             error.set(
-                "Vault is locked — unlock encryption first (sidebar → Encryption).".to_string(),
+                "Vault is locked — unlock encryption first (Settings → Encryption).".to_string(),
             );
             e2ee_open.set(true);
             return;
@@ -1349,7 +1352,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             && e2ee_master.get_untracked().is_none()
         {
             error.set(
-                "Vault is locked — unlock encryption first (sidebar → Encryption).".to_string(),
+                "Vault is locked — unlock encryption first (Settings → Encryption).".to_string(),
             );
             e2ee_open.set(true);
             return;
@@ -1394,7 +1397,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
 
     let decrypt_entry = move |entry: Entry| {
         let Some(master) = e2ee_master.get_untracked() else {
-            error.set("Unlock encryption first (sidebar → Encryption).".to_string());
+            error.set("Unlock encryption first (Settings → Encryption).".to_string());
             e2ee_open.set(true);
             return;
         };
@@ -1491,35 +1494,125 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     };
 
     // Declares a folder encrypted (or plaintext). The server flag is what
-    // every client reads, so this is the only switch that matters.
+    // every client reads, so this is the only switch that matters. Making a
+    // non-empty folder encrypted first re-uploads every plaintext file
+    // encrypted, then flips the flag: the server refuses a mixed folder, and
+    // leaving plaintext behind would break the "anything inside is encrypted"
+    // promise. Already-encrypted files are skipped, so an interrupted run can
+    // simply be retried.
+    let encrypting = RwSignal::new(false);
     let toggle_encryption = move |entry: Entry| {
+        if encrypting.get_untracked() {
+            return;
+        }
         let path = entry.path.clone();
-        let encrypt = !entry.encrypted;
-        spawn_local(async move {
-            let current = path
-                .rsplit_once('/')
-                .map(|(dir, _)| {
-                    if dir.is_empty() {
-                        "/".to_string()
-                    } else {
-                        dir.to_string()
+        let parent = path
+            .rsplit_once('/')
+            .map(|(dir, _)| {
+                if dir.is_empty() {
+                    "/".to_string()
+                } else {
+                    dir.to_string()
+                }
+            })
+            .unwrap_or_else(|| "/".to_string());
+        if entry.encrypted {
+            spawn_local(async move {
+                match api::send_json(
+                    "POST",
+                    "/api/files/encrypt",
+                    &json!({ "path": path, "encrypted": false }),
+                )
+                .await
+                {
+                    Ok(r) if r.status == 200 => {
+                        notice.set("Folder is now plaintext".to_string());
+                        load(parent);
                     }
-                })
-                .unwrap_or_else(|| "/".to_string());
+                    Ok(r) => error.set(
+                        r.error()
+                            .unwrap_or("Could not change encryption")
+                            .to_string(),
+                    ),
+                    Err(e) => error.set(e),
+                }
+            });
+            return;
+        }
+        let Some(master) = e2ee_master.get_untracked() else {
+            error.set("Unlock encryption first (Settings → Encryption).".to_string());
+            e2ee_open.set(true);
+            return;
+        };
+        encrypting.set(true);
+        spawn_local(async move {
+            let files = match crate::e2ee::plaintext_files_under(&path).await {
+                Ok(files) => files,
+                Err(e) => {
+                    error.set(e);
+                    encrypting.set(false);
+                    return;
+                }
+            };
+            if !files.is_empty() {
+                let message = format!(
+                    "Encrypt {} existing file{} in this folder now? They will be re-uploaded encrypted — keep this tab open until it finishes.",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" }
+                );
+                let confirmed = web_sys::window()
+                    .and_then(|window| window.confirm_with_message(&message).ok())
+                    .unwrap_or(false);
+                if !confirmed {
+                    encrypting.set(false);
+                    return;
+                }
+            }
+            let total = files.len();
+            for (index, file) in files.iter().enumerate() {
+                let name = file.path.rsplit('/').next().unwrap_or(&file.path);
+                notice.set(format!("Encrypting {} of {}: {name}", index + 1, total));
+                let bytes = match api::get_bytes(&format!("/dav{}", encode_path(&file.path))).await
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        error.set(format!("Could not read “{}”: {e}", file.path));
+                        load(parent.clone());
+                        encrypting.set(false);
+                        return;
+                    }
+                };
+                if let Err(e) = crate::e2ee::upload_encrypted_versioned(
+                    &master,
+                    &file.path,
+                    &bytes,
+                    file.content_id.as_deref(),
+                )
+                .await
+                {
+                    error.set(format!("Encrypting “{}” failed: {e}", file.path));
+                    load(parent.clone());
+                    encrypting.set(false);
+                    return;
+                }
+            }
             match api::send_json(
                 "POST",
                 "/api/files/encrypt",
-                &json!({ "path": entry.path, "encrypted": encrypt }),
+                &json!({ "path": path, "encrypted": true }),
             )
             .await
             {
                 Ok(r) if r.status == 200 => {
-                    notice.set(if encrypt {
+                    notice.set(if total == 0 {
                         "Folder encrypted — new files are encrypted on your device".to_string()
                     } else {
-                        "Folder is now plaintext".to_string()
+                        format!(
+                            "Folder encrypted — {total} file{} encrypted on your device",
+                            if total == 1 { "" } else { "s" }
+                        )
                     });
-                    load(current);
+                    load(parent);
                 }
                 Ok(r) => error.set(
                     r.error()
@@ -1528,6 +1621,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 ),
                 Err(e) => error.set(e),
             }
+            encrypting.set(false);
         });
     };
 
@@ -1613,14 +1707,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         "Passkeys"
                     </button>
                     <button class="nav-item" on:click=move |_| e2ee_open.set(true)>
-                        <Icon name="lock"/>
-                        {move || {
-                            if e2ee_master.get().is_some() {
-                                "Encryption (unlocked)"
-                            } else {
-                                "Encryption"
-                            }
-                        }}
+                        <Icon name="settings"/>
+                        "Settings"
                     </button>
                     {move || {
                         is_admin
@@ -3343,6 +3431,9 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     });
     let setup_pass = RwSignal::new(String::new());
     let setup_confirm = RwSignal::new(String::new());
+    let change_open = RwSignal::new(false);
+    let new_pass = RwSignal::new(String::new());
+    let new_confirm = RwSignal::new(String::new());
     let recovery = RwSignal::new(Option::<String>::None);
     let close = move |_| on_close.run(());
 
@@ -3423,6 +3514,35 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
         });
     };
 
+    let change_pass = move |_| {
+        let Some(unlocked) = master.get_untracked() else {
+            return;
+        };
+        let pass = new_pass.get_untracked();
+        if pass.is_empty() {
+            error.set("Enter a new passphrase".to_string());
+            return;
+        }
+        if pass != new_confirm.get_untracked() {
+            error.set("Passphrases do not match".to_string());
+            return;
+        }
+        busy.set(true);
+        spawn_local(async move {
+            match crate::e2ee::change_passphrase(&unlocked, &pass).await {
+                Ok(()) => {
+                    error.set(String::new());
+                    notice.set("Passphrase changed — use the new one next time".to_string());
+                    change_open.set(false);
+                    new_pass.set(String::new());
+                    new_confirm.set(String::new());
+                }
+                Err(e) => error.set(e),
+            }
+            busy.set(false);
+        });
+    };
+
     let approve = move |id: i64, key: String, code: Option<String>| {
         let Some(unlocked) = master.get_untracked() else {
             return;
@@ -3497,11 +3617,12 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
         <div class="backdrop">
             <div class="card modal">
                 <div class="modal-head">
-                    <h2>"End-to-end encryption"</h2>
+                    <h2>"Settings"</h2>
                     <button class="icon-btn" aria-label="Close" on:click=close>
                         <Icon name="x"/>
                     </button>
                 </div>
+                <h3>"Encryption"</h3>
                 <p class="muted">
                     "Your passphrase is used locally and is never sent to the server."
                 </p>
@@ -3616,6 +3737,60 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                             "Lock again"
                         </button>
                     </div>
+
+                    <h3>"Passphrase"</h3>
+                    <p class="muted">
+                        "Change the passphrase that wraps this account's master key. Nothing is re-uploaded, and your recovery phrase and other devices keep working."
+                    </p>
+                    <Show when=move || !change_open.get()>
+                        <div class="row-actions">
+                            <button
+                                class="ghost"
+                                on:click=move |_| {
+                                    error.set(String::new());
+                                    change_open.set(true);
+                                }
+                            >
+                                "Change passphrase"
+                            </button>
+                        </div>
+                    </Show>
+                    <Show when=move || change_open.get()>
+                        <label>
+                            "New passphrase"
+                            <input
+                                type="password"
+                                autocomplete="new-password"
+                                prop:value=move || new_pass.get()
+                                on:input=move |ev| new_pass.set(event_target_value(&ev))
+                            />
+                        </label>
+                        <label>
+                            "Repeat new passphrase"
+                            <input
+                                type="password"
+                                autocomplete="new-password"
+                                prop:value=move || new_confirm.get()
+                                on:input=move |ev| new_confirm.set(event_target_value(&ev))
+                            />
+                        </label>
+                        <div class="row-actions">
+                            <button class="primary" disabled=move || busy.get() on:click=change_pass>
+                                {move || if busy.get() { "Saving…" } else { "Save new passphrase" }}
+                            </button>
+                            <button
+                                class="ghost"
+                                on:click=move |_| {
+                                    change_open.set(false);
+                                    new_pass.set(String::new());
+                                    new_confirm.set(String::new());
+                                    error.set(String::new());
+                                }
+                            >
+                                "Cancel"
+                            </button>
+                        </div>
+                    </Show>
 
                     <h3>"Pending enrollments"</h3>
                     <p class="muted">

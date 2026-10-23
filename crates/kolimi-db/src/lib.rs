@@ -1124,6 +1124,21 @@ impl Db {
         .await?)
     }
 
+    /// Deletes every stored version of a node.
+    ///
+    /// Used when a file transitions from plaintext to encrypted: the commit
+    /// archives the old plaintext content, and older plaintext versions may
+    /// exist. Keeping them would let `/api/versions` expose the content the
+    /// user just chose to encrypt.
+    pub async fn delete_versions(&self, user_id: i64, node_id: i64) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM versions WHERE user_id = ? AND node_id = ?")
+            .bind(user_id)
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Updates a file's content, pushing the old content into the version
     /// history first. Touching identical content only bumps `modified_at`.
     pub async fn update_file_versioned(

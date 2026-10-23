@@ -416,6 +416,38 @@ mod tests {
     }
 
     #[test]
+    fn passphrase_rotation_keeps_the_master_key() {
+        let master = MasterKey::generate().unwrap();
+        let recovery = generate_recovery_code().unwrap();
+        let mut keyring = Keyring::create(&master, "old horse", &fast_params(), &recovery).unwrap();
+        let epoch = keyring.epoch;
+
+        keyring
+            .add_passphrase(&master, "new horse", &fast_params())
+            .unwrap();
+
+        assert_eq!(keyring.epoch, epoch + 1, "rotation bumps the epoch");
+        assert!(matches!(
+            keyring.unlock_with_passphrase("old horse"),
+            Err(CryptoError::Unlock)
+        ));
+        assert_eq!(
+            keyring
+                .unlock_with_passphrase("new horse")
+                .unwrap()
+                .as_bytes(),
+            master.as_bytes(),
+            "same master key, new wrap"
+        );
+        // The recovery phrase and any device wraps keep working.
+        assert_eq!(
+            keyring.unlock_with_recovery(&recovery).unwrap().as_bytes(),
+            master.as_bytes()
+        );
+        assert!(keyring.verify(&master).is_ok(), "the new wrap is sealed");
+    }
+
+    #[test]
     fn json_roundtrip_and_methods() {
         let master = MasterKey::generate().unwrap();
         let recovery = generate_recovery_code().unwrap();

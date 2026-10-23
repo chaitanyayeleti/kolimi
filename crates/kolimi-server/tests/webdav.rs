@@ -120,6 +120,121 @@ async fn unauthenticated_requests_are_rejected_with_basic_challenge() {
 }
 
 #[tokio::test]
+async fn plaintext_file_can_be_encrypted_in_place_then_the_folder_flips() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(&server.app, request("MKCOL", "/dav/Enc", Some(&auth))).await;
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/Enc/a.txt", &auth, "text/plain", b"one"),
+    )
+    .await;
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/Enc/a.txt", &auth, "text/plain", b"two"),
+    )
+    .await;
+
+    // The browser lists the tree to find the file and its optimistic-lock id.
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/sync/tree?limit=1000", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let tree: Value = serde_json::from_slice(&body).unwrap();
+    let entry = tree["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == "/Enc/a.txt")
+        .unwrap();
+    let content_id = entry["content_id"].as_str().unwrap().to_string();
+    assert_eq!(entry["encrypted"].as_bool(), Some(false));
+
+    // Re-upload as ciphertext, then commit manifest + wrapped key in one call.
+    let ciphertext = b"encrypted-two";
+    let hash = kolimi_chunk::Hash::of(ciphertext);
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            &format!("/api/chunks/{}", hash.to_hex()),
+            &auth,
+            "application/octet-stream",
+            ciphertext,
+        ),
+    )
+    .await;
+    assert!(matches!(
+        status,
+        StatusCode::CREATED | StatusCode::NO_CONTENT
+    ));
+    let manifest = json!({
+        "version": 1,
+        "size": ciphertext.len(),
+        "chunks": [{ "hash": hash.to_hex(), "len": ciphertext.len() }],
+        "wrapped_key": STANDARD.encode(b"wrapped file key"),
+    });
+    let body = serde_json::to_vec(&manifest).unwrap();
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            &format!("/api/files?path=/Enc/a.txt&if_content_id={content_id}"),
+            &auth,
+            "application/json",
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The commit archived the old plaintext content; encryption must purge it.
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/versions?path=/Enc/a.txt", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let versions: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        versions.as_array().unwrap().len(),
+        0,
+        "plaintext version history must not survive encryption"
+    );
+
+    // Every file is now ciphertext, so the folder flag can flip.
+    let body = serde_json::to_vec(&json!({ "path": "/Enc", "encrypted": true })).unwrap();
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "POST",
+            "/api/files/encrypt",
+            &auth,
+            "application/json",
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = send(
+        &server.app,
+        request("GET", "/api/files/key?path=/Enc/a.txt", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _, body) = send(
+        &server.app,
+        request("GET", "/api/files/info?path=/Enc", Some(&auth)),
+    )
+    .await;
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["encrypted"].as_bool(), Some(true));
+}
+
+#[tokio::test]
 async fn api_session_probe_ignores_basic_credentials() {
     // A browser that once received a Basic challenge caches the password and
     // sends it on every same-origin request. If `/api/me` accepted it, the

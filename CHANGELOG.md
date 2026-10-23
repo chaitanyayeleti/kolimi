@@ -6,6 +6,27 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-10-26
+
+### Added
+- **Encrypting a folder now encrypts the files already inside it.** The
+  browser re-uploads each plaintext file encrypted (with an `if_content_id`
+  guard so a concurrently edited file is not overwritten), then flips the
+  folder flag. Progress is shown, an interrupted run is resumable (already
+  encrypted files are skipped), and a plaintext file's version history is
+  purged when it becomes encrypted.
+- **Change the E2EE passphrase** from Settings → Encryption. Only the
+  passphrase wrap of the master key changes; files are not re-uploaded and
+  the recovery phrase and other devices keep working. The keyring integrity
+  tag is verified before re-wrapping.
+- The sidebar **Encryption** item is now **Settings**, with encryption and
+  devices inside it.
+
+### Fixed
+- Version history is purged when a plaintext file transitions to
+  encrypted, so `/api/versions` cannot expose the old plaintext content.
+
+## [0.1.35] - 2026-10-26
 ## [0.1.35] - 2026-10-26
 
 ### Security

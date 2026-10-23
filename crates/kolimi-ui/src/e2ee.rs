@@ -153,22 +153,7 @@ pub async fn setup(passphrase: &str) -> Result<String, String> {
         &recovery,
     )
     .map_err(|_| "could not create the keyring".to_string())?;
-    let json = keyring
-        .to_json()
-        .map_err(|_| "could not serialize the keyring".to_string())?;
-    let response = api::dav(
-        "PUT",
-        "/api/e2ee/keyring",
-        Some(json.into_bytes()),
-        &[("Content-Type", "application/json")],
-    )
-    .await?;
-    if response.status != 204 {
-        return Err(format!(
-            "could not upload the keyring (HTTP {})",
-            response.status
-        ));
-    }
+    upload_keyring(&keyring).await?;
     let identity = kolimi_crypto::Identity::generate()
         .map_err(|_| "could not generate the identity".to_string())?;
     let wrapped = master
@@ -190,6 +175,118 @@ pub async fn setup(passphrase: &str) -> Result<String, String> {
         ));
     }
     Ok(kolimi_crypto::recovery_code_display(&recovery))
+}
+
+/// Stores an updated keyring on the server.
+async fn upload_keyring(keyring: &Keyring) -> Result<(), String> {
+    let json = keyring
+        .to_json()
+        .map_err(|_| "could not serialize the keyring".to_string())?;
+    let response = api::dav(
+        "PUT",
+        "/api/e2ee/keyring",
+        Some(json.into_bytes()),
+        &[("Content-Type", "application/json")],
+    )
+    .await?;
+    if response.status != 204 {
+        return Err(format!(
+            "could not upload the keyring (HTTP {})",
+            response.status
+        ));
+    }
+    record_epoch(keyring);
+    Ok(())
+}
+
+/// Re-wraps the unlocked master key under a new passphrase.
+///
+/// Only the passphrase wrap changes: the master key, every file key, the
+/// recovery phrase and device wraps are untouched, so nothing is re-uploaded
+/// and other devices keep working. We verify the keyring's integrity tag
+/// against the unlocked key first, so a server cannot feed us a spliced
+/// keyring to re-wrap.
+pub async fn change_passphrase(master: &MasterKey, new_passphrase: &str) -> Result<(), String> {
+    if new_passphrase.is_empty() {
+        return Err("Enter a new passphrase".to_string());
+    }
+    let mut keyring = load_keyring().await?;
+    keyring
+        .verify(master)
+        .map_err(|_| "The keyring on the server does not match this unlocked key".to_string())?;
+    keyring
+        .add_passphrase(
+            master,
+            new_passphrase,
+            &kolimi_crypto::Argon2Params::default(),
+        )
+        .map_err(|_| "could not wrap the key with the new passphrase".to_string())?;
+    upload_keyring(&keyring).await
+}
+
+/// A plaintext file that still needs encrypting before its folder can be
+/// declared encrypted.
+pub struct ReencryptFile {
+    pub path: String,
+    /// Content id at listing time, used as an optimistic-concurrency guard so
+    /// a file edited mid-run is not silently overwritten.
+    pub content_id: Option<String>,
+}
+
+/// Every plaintext file below `path`, from the server's tree snapshot.
+///
+/// `encrypted` in the tree is true when a file has a wrapped key (or lives
+/// in an encrypted folder), so this is exactly the set that still needs
+/// client-side encryption before a folder can be declared encrypted.
+pub async fn plaintext_files_under(path: &str) -> Result<Vec<ReencryptFile>, String> {
+    let mut files = Vec::new();
+    let mut after = 0i64;
+    loop {
+        let response = api::get(&format!("/api/sync/tree?after_id={after}&limit=1000")).await?;
+        if response.status != 200 {
+            return Err(response
+                .error()
+                .unwrap_or("could not list the folder")
+                .to_string());
+        }
+        let entries = response.body["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for entry in &entries {
+            let entry_path = entry["path"].as_str().unwrap_or_default();
+            let is_file = entry["kind"].as_str() == Some("file");
+            // Missing `encrypted` means "unknown": treat it as encrypted so
+            // we never upload plaintext over ciphertext.
+            let encrypted = entry["encrypted"].as_bool().unwrap_or(true);
+            if is_file && !encrypted && is_under(entry_path, path) {
+                files.push(ReencryptFile {
+                    path: entry_path.to_string(),
+                    content_id: entry["content_id"].as_str().map(str::to_string),
+                });
+            }
+        }
+        if !response.body["has_more"].as_bool().unwrap_or(false) {
+            break;
+        }
+        let last = response.body["last_id"].as_i64().unwrap_or(after);
+        if last <= after {
+            break;
+        }
+        after = last;
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+/// Whether `child` is inside the folder `parent` (not the folder itself).
+fn is_under(child: &str, parent: &str) -> bool {
+    if parent == "/" {
+        return child.starts_with('/') && child != "/";
+    }
+    child
+        .strip_prefix(parent)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Loads the account's keyring from the server.
@@ -549,6 +646,17 @@ pub async fn move_file(from: &str, to: &str) -> Result<(), String> {
 /// chunks are encrypted client-side, uploaded, committed, and the wrapped
 /// file key is stored — mirroring the sync client.
 pub async fn upload_encrypted(master: &MasterKey, path: &str, data: &[u8]) -> Result<(), String> {
+    upload_encrypted_versioned(master, path, data, None).await
+}
+
+/// Like [`upload_encrypted`], but refuses to overwrite a file whose
+/// `content_id` changed since the caller read it (`if_content_id` guard).
+pub async fn upload_encrypted_versioned(
+    master: &MasterKey,
+    path: &str,
+    data: &[u8],
+    if_content_id: Option<&str>,
+) -> Result<(), String> {
     let file_key =
         FileKey::generate().map_err(|_| "could not generate the file key".to_string())?;
     let mut chunks = Vec::new();
@@ -585,19 +693,21 @@ pub async fn upload_encrypted(master: &MasterKey, path: &str, data: &[u8]) -> Re
     })
     .map_err(|_| "could not build the file manifest".to_string())?;
     manifest["wrapped_key"] = serde_json::json!(STANDARD.encode(&wrapped));
-    let response = api::send_json(
-        "PUT",
-        &format!("/api/files?path={}", encode(path)),
-        &manifest,
-    )
-    .await?;
-    if response.status != 200 {
-        return Err(response
+    let mut url = format!("/api/files?path={}", encode(path));
+    if let Some(content_id) = if_content_id {
+        url.push_str(&format!("&if_content_id={}", encode(content_id)));
+    }
+    let response = api::send_json("PUT", &url, &manifest).await?;
+    match response.status {
+        200 => Ok(()),
+        409 => Err(
+            "the file changed on the server since it was read — refresh and try again".to_string(),
+        ),
+        _ => Err(response
             .error()
             .unwrap_or("could not save the file")
-            .to_string());
+            .to_string()),
     }
-    Ok(())
 }
 
 /// The caller's X25519 identity, unwrapped with the master key.
