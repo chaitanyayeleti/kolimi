@@ -6,10 +6,33 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push supersedes the previous run instead of both burning runners.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The desktop job dominates runtime (Tauri/WebKit). Run it only when
+  # desktop code changed, or on demand; every tag still builds it in the
+  # release workflow.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      desktop: ${{ steps.filter.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            desktop:
+              - 'apps/kolimi-desktop/**'
+              - 'crates/kolimi-sync/**'
+              - 'crates/kolimi-crypto/**'
+
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
@@ -32,23 +55,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
+      # Bindings are generated here rather than on a separate runner: that
+      # job spent most of its ~70 s on checkout, toolchain and cache setup.
+      - name: Generate bindings (Kotlin, Swift, Python)
+        run: |
+          cargo build -p kolimi-ffi
+          for lang in kotlin swift python; do
+            cargo run -q -p kolimi-ffi --bin uniffi-bindgen -- generate \
+              --library target/debug/libkolimi_ffi.so --language "$lang" \
+              --out-dir "target/bindings/$lang"
+          done
+          test -s target/bindings/kotlin/uniffi/kolimi_ffi/kolimi_ffi.kt
+          test -s target/bindings/swift/kolimi_ffi.swift
+          test -s target/bindings/python/kolimi_ffi.py
 
-  deny:
-    name: cargo-deny
+  # Advisories, licences, bans and the vet store in a single job: three
+  # runners spent more time on setup than on the checks themselves.
+  supply-chain:
+    name: supply-chain (deny, audit, vet)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
-
-  audit:
-    name: cargo-audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit
+          tool: cargo-audit,cargo-vet
       - run: cargo audit
+      - run: cargo vet --locked
 
   fuzz:
     name: fuzz (30s smoke)
@@ -107,28 +140,10 @@ jobs:
           curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/s/sometoken | grep -q 200
           kill %1
 
-  ffi:
-    name: ffi (bindings)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p kolimi-ffi
-      - name: Generate bindings (Kotlin, Swift, Python)
-        run: |
-          cargo build -p kolimi-ffi
-          for lang in kotlin swift python; do
-            cargo run -q -p kolimi-ffi --bin uniffi-bindgen -- generate \
-              --library target/debug/libkolimi_ffi.so --language "$lang" \
-              --out-dir "target/bindings/$lang"
-          done
-          test -s target/bindings/kotlin/uniffi/kolimi_ffi/kolimi_ffi.kt
-          test -s target/bindings/swift/kolimi_ffi.swift
-          test -s target/bindings/python/kolimi_ffi.py
-
   desktop:
     name: desktop (Tauri)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -140,16 +155,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - run: cargo build --locked --manifest-path apps/kolimi-desktop/Cargo.toml
+      # Prebuilt CLI instead of `cargo install tauri-cli` (which compiled for
+      # ~10 minutes), and no separate debug build before the release bundle.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@^2
       - run: cargo test --locked --manifest-path apps/kolimi-desktop/Cargo.toml
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
       - name: Packaging check (.deb)
         working-directory: apps/kolimi-desktop
         run: cargo tauri build --bundles deb
 
   packaging:
     name: packaging (deb, helm, install smoke)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -205,6 +223,7 @@ jobs:
 
   perf:
     name: perf (load gates)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -225,17 +244,6 @@ jobs:
           size=$(stat -c%s target/release/kolimi-server)
           echo "kolimi-server: $((size / 1024 / 1024)) MiB"
           test "$size" -lt 52428800
-
-  vet:
-    name: cargo-vet
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: true
-      - run: cargo install cargo-vet --locked
-      - run: cargo vet --locked
 
   litmus:
     name: litmus (WebDAV compliance)
