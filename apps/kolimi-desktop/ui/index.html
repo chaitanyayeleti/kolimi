@@ -266,7 +266,7 @@
                 // Do not refresh yet: that would wipe the recovery code.
                 // Only refresh once the user acknowledges having saved it.
                 recoveryOut.replaceChildren(
-                  el("div", {}, "Recovery code — save it now, it is shown once:"),
+                  el("div", {}, "Recovery phrase — 24 words, save them now, shown once:"),
                   el("code", {}, code),
                   el("div", { class: "row", style: "margin-top:8px" },
                     el("button", { onclick: async () => {
@@ -274,7 +274,7 @@
                       setMsg("Encryption set up", "ok");
                       refresh();
                     } }, "I saved it")));
-                setMsg("Save your recovery code, then click “I saved it”.", "ok");
+                setMsg("Save your recovery phrase (24 words), then click “I saved it”.", "ok");
               } catch (e) { setMsg(String(e), "err"); }
             } }, "Set up encryption")),
           recoveryOut
@@ -294,9 +294,18 @@
               } catch (e) { setMsg(String(e), "err"); }
             } }, "Unlock")));
       } else if (status === "unlocked") {
+        const autoApprove = el("input", { type: "checkbox", style: "width:auto" });
+        autoApprove.checked = account.auto_approve_devices !== false;
+        autoApprove.addEventListener("change", async () => {
+          try {
+            await invoke("set_auto_approve", { server: account.server, username: account.username, enabled: autoApprove.checked });
+            setMsg(autoApprove.checked ? "New devices will be approved automatically" : "New devices need manual approval", "ok");
+          } catch (e) { setMsg(String(e), "err"); }
+        });
         children.push(
           el("p", { class: "muted", style: "margin:8px 0" },
             "Encryption is unlocked — encrypted folders sync, and you can approve new devices."),
+          el("label", { class: "muted" }, autoApprove, " Automatically approve new devices (uncheck if you don't fully trust the server)"),
           el("div", { class: "row", style: "margin-top:8px" },
             el("button", { class: "ghost", onclick: async () => {
               try {
@@ -332,20 +341,19 @@
           pendingList.replaceChildren(el("li", {}, el("span", { class: "empty" }, "No pending enrollments")));
         } else {
           pendingList.replaceChildren(...list.map((enrollment) => {
-            const codeInput = el("input", { placeholder: "Type the code shown on the new device", style: "margin-top:6px" });
+            const codeInput = el("input", { placeholder: "Optional: type the code shown on the new device to verify it", style: "margin-top:6px" });
             return el("li", {},
               el("span", { class: "path" },
                 enrollment.name, " ",
-                el("span", { class: "remote" }, "enrollment " + enrollment.id),
-                el("div", { class: "muted" }, "code " + enrollment.code + " · key " + enrollment.fingerprint)),
+                el("span", { class: "remote" }, "enrollment " + enrollment.id)),
               codeInput,
               el("div", { class: "row", style: "margin-top:6px" },
-                el("button", { onclick: async () => {
+                el("button", { class: "primary", onclick: async () => {
                   try {
                     const name = await invoke("approve_device", {
                       server: account.server, username: account.username, id: enrollment.id, code: codeInput.value
                     });
-                    setMsg("Approved " + name, "ok");
+                    setMsg("Approved " + name + (codeInput.value.trim() ? " (code verified)" : ""), "ok");
                     refreshDevices();
                   } catch (e) { setMsg(String(e), "err"); }
                 } }, "Approve")));

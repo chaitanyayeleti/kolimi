@@ -253,7 +253,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         publish_identity(&identity_config).await?;
         println!("identity published");
         println!();
-        println!("Recovery code (store it somewhere safe, it is shown once):");
+        println!("Recovery phrase — 24 words (write them down, shown once):");
         println!("  {}", recovery_code_display(&recovery));
         println!();
         println!("Losing the passphrase and the recovery code means the data is unrecoverable.");

@@ -18,6 +18,7 @@ base64.workspace = true
 console_error_panic_hook = "0.1"
 gloo-net = { version = "0.7", default-features = false, features = ["http", "json"] }
 js-sys = "0.3"
+kolimi-chunk.workspace = true
 kolimi-crypto.workspace = true
 leptos = { version = "0.8", features = ["csr"] }
 percent-encoding.workspace = true

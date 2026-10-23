@@ -46,7 +46,7 @@ SBOM, signatures), the **container image on GHCR**, **Arch (AUR)**, and
 
 - Published for **`linux/amd64` and `linux/arm64`** (distroless base; the
   build embeds the WASM UI). arm64 is built on a native `ubuntu-24.04-arm`
-  runner — building the wasmtime tree under QEMU is far too slow.
+  runner — cross-compiling the heaviest trees under QEMU is far too slow.
 - The Helm chart's `image.repository` points at
   `ghcr.io/chaitanyayeleti/kolimi` (tag defaults to the chart appVersion);
   `docker run ghcr.io/…` works without a local build.

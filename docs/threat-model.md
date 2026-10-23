@@ -19,7 +19,7 @@
 | A1 | Remote unauthenticated | Full network access, can scan/brute-force/exploit parser bugs |
 | A2 | Authenticated user (attacker's own account) | Can probe authorization boundaries, upload hostile files |
 | A3 | Malicious share recipient | Legitimately given access to a subset; tries to pivot |
-| A4 | Malicious plugin/app | Runs inside the process today (PHP-model); in Kolimi: WASM sandbox with declared capabilities |
+| A4 | Malicious third-party app | No plugin model: third parties use the authenticated API/DAV surfaces |
 | A5 | Malicious/curious server operator | Full access to server, DB, and raw blobs (defeated by E2EE for content) |
 | A6 | Network attacker | Passive/active MITM (defeated by TLS 1.3) |
 | A7 | Local attacker | On the server host; can read memory/disk |
@@ -36,14 +36,14 @@ client ──(TLS, untrusted network)──> kolimi-server
                   (disk/S3)        (SQLite)        (append-only)
                                         │
                                         ▼
-                                 WASM sandbox (plugins)
+                                 sandboxed preview worker
 ```
 
 - Everything crossing the TLS boundary is untrusted input: paths, manifests,
   chunks, filenames, shares, headers.
 - The blob store and index are *trusted but verifiable*: on-disk corruption
   must be detected (BLAKE3 verify-on-read + scrub), not trusted.
-- Plugins are untrusted code: sandboxed, capability-scoped, resource-limited.
+- There is no plugin model: third-party integrations use the authenticated API/DAV surfaces.
 
 ## Key scenarios and mitigations
 
@@ -60,7 +60,7 @@ client ──(TLS, untrusted network)──> kolimi-server
 | A3 link password guessing | argon2id, same lockout machinery as logins, HttpOnly unlock cookies | M3 |
 | A2 DAV object injection | iCalendar parsed + UID rules enforced; vCards structurally validated; raw payloads stored byte-for-byte (no re-serialization); 10 MiB cap; XML parsers size-capped | M4 |
 | A2 DAV namespace shadowing | `principals`/`calendars`/`addressbooks` reserved at the root; principals/homes are owner-only and 404 for everyone else | M4 |
-| A4 plugin root | WASM component model, explicit capabilities (no ambient FS/net), fuel metering | M7 |
+| A4 third-party app | Authenticated API/DAV only, per-user permission checks | M7 |
 | A5 operator reads content | optional client-side E2EE (per-file keys; MLS groups in v2); metadata remains visible in v1 — documented honestly (RFC 0007) | M6 |
 | Operator tampers with or deletes audit records | BLAKE3 hash-chained append-only audit log; `audit verify` detects edits, deletions, and reordering (`audit_log` rows are only ever inserted) | landed (M6) |
 | A6 MITM | rustls, TLS 1.3 only, HSTS, no mixed content in UI | M1 |

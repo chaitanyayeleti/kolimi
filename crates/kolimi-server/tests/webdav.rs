@@ -229,6 +229,117 @@ async fn encrypted_files_are_refused_over_dav() {
 }
 
 #[tokio::test]
+async fn api_files_move_and_info_work_on_encrypted_files() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+
+    // Create a file, then mark it encrypted the way the sync client does.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/dav/secret.bin",
+            &auth,
+            "application/octet-stream",
+            b"ciphertext",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/api/files/key?path=/secret.bin",
+            &auth,
+            "application/octet-stream",
+            b"wrapped-key-bytes",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Info reports the encryption state.
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/files/info?path=/secret.bin", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["encrypted"], true);
+    assert_eq!(info["kind"], "file");
+
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/files/info?path=/", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["kind"], "dir");
+    assert_eq!(info["encrypted"], false);
+
+    // Metadata-only move works on ciphertext (WebDAV MOVE stays 403).
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "POST",
+            "/api/files/move",
+            &auth,
+            "application/json",
+            br#"{"from": "/secret.bin", "to": "/renamed.bin"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/files/info?path=/renamed.bin", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["encrypted"], true);
+    let (status, _, _) = send(&server.app, request("GET", "/dav/secret.bin", Some(&auth))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Moving onto an existing name conflicts instead of overwriting.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/taken.bin", &auth, "text/plain", b"taken"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "POST",
+            "/api/files/move",
+            &auth,
+            "application/json",
+            br#"{"from": "/renamed.bin", "to": "/taken.bin"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Moving a missing source is a 404.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "POST",
+            "/api/files/move",
+            &auth,
+            "application/json",
+            br#"{"from": "/nope.bin", "to": "/elsewhere.bin"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn range_requests_serve_partial_content() {
     let server = setup().await;
     let auth = basic(USER, PASS);

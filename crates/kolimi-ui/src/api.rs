@@ -47,6 +47,15 @@ pub async fn get(url: &str) -> Result<ApiResponse, String> {
     to_api(response).await
 }
 
+/// GET a raw text endpoint (text previews).
+pub async fn get_text(url: &str) -> Result<String, String> {
+    let response = Request::get(url).send().await.map_err(|e| e.to_string())?;
+    if response.status() != 200 {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    response.text().await.map_err(|e| e.to_string())
+}
+
 /// GET a raw binary endpoint (E2EE ciphertext chunks).
 pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
     let response = Request::get(url).send().await.map_err(|e| e.to_string())?;
@@ -78,6 +87,17 @@ pub async fn delete(url: &str) -> Result<ApiResponse, String> {
         builder = builder.header("X-CSRF-Token", &token);
     }
     let request = builder.build().map_err(|e| e.to_string())?;
+    let response = request.send().await.map_err(|e| e.to_string())?;
+    to_api(response).await
+}
+
+/// PUT raw bytes (chunk uploads) with a CSRF token.
+pub async fn put_bytes(url: &str, bytes: &[u8]) -> Result<ApiResponse, String> {
+    let mut builder = Request::put(url);
+    if let Some(token) = csrf_token() {
+        builder = builder.header("X-CSRF-Token", &token);
+    }
+    let request = builder.body(bytes.to_vec()).map_err(|e| e.to_string())?;
     let response = request.send().await.map_err(|e| e.to_string())?;
     to_api(response).await
 }
@@ -124,12 +144,28 @@ pub async fn dav(
     })
 }
 
-/// Uploads `bytes` to `url` via `XMLHttpRequest`, reporting upload progress
-/// (0..=100) and then the HTTP status. Used for the upload tray, where
-/// `fetch` cannot report upload progress.
-pub fn upload(
+/// Uploads a `Blob` directly, streaming from disk with no WASM-side copy.
+/// Prefer this for plaintext uploads of large files.
+pub fn upload_blob(
     url: &str,
-    bytes: Vec<u8>,
+    blob: &web_sys::Blob,
+    on_progress: impl Fn(u8) + 'static,
+    on_done: impl FnOnce(Result<(u16, Option<u8>), String>) + 'static,
+) {
+    let blob = blob.clone();
+    upload_inner(
+        url,
+        move |xhr| {
+            let _ = xhr.send_with_opt_blob(Some(&blob));
+        },
+        on_progress,
+        on_done,
+    );
+}
+
+fn upload_inner(
+    url: &str,
+    send: impl FnOnce(&web_sys::XmlHttpRequest) + 'static,
     on_progress: impl Fn(u8) + 'static,
     on_done: impl FnOnce(Result<(u16, Option<u8>), String>) + 'static,
 ) {
@@ -210,8 +246,7 @@ pub fn upload(
     xhr.set_ontimeout(Some(ontimeout.as_ref().unchecked_ref()));
     ontimeout.forget();
 
-    let array = js_sys::Uint8Array::from(bytes.as_slice());
-    let _ = xhr.send_with_opt_buffer_source(Some(array.as_ref()));
+    send(&xhr);
 }
 
 /// Reads a file input's bytes.

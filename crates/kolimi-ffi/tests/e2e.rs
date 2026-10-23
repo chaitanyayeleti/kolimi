@@ -61,7 +61,11 @@ async fn e2ee_setup_and_encrypted_sync_through_the_ffi() {
     // Setup: returns a formatted recovery code.
     let client = KolimiSync::new(config(&server, &local, None, None));
     let recovery = client.e2ee_setup(E2EE_PASS.to_string()).await.unwrap();
-    assert_eq!(recovery.len(), 71, "formatted recovery code");
+    assert_eq!(
+        recovery.split_whitespace().count(),
+        24,
+        "formatted recovery phrase"
+    );
 
     // Push with the passphrase.
     let client = KolimiSync::new(config(&server, &local, Some(E2EE_PASS), None));

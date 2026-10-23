@@ -27,6 +27,7 @@ mod file;
 mod identity;
 mod keyring;
 mod keys;
+pub mod mnemonic;
 
 pub use error::CryptoError;
 pub use file::FileKey;

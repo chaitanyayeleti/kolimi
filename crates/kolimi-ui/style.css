@@ -1522,6 +1522,22 @@ textarea:focus {
   box-shadow: var(--shadow-lg);
 }
 
+.lightbox-text {
+  max-width: 92vw;
+  max-height: 78vh;
+  overflow: auto;
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  padding: 16px 20px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: left;
+}
+
 .lightbox-bar {
   position: absolute;
   bottom: 22px;

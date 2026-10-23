@@ -148,6 +148,15 @@ struct Account {
     username: String,
     #[serde(default)]
     pairs: Vec<SyncPair>,
+    /// Automatically approve pending device enrollments when this machine
+    /// is unlocked (default on). Turn off if you don't fully trust the
+    /// server, and approve each device by comparing codes instead.
+    #[serde(default = "default_true")]
+    auto_approve_devices: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One local directory mirrored to a remote subpath.
@@ -529,6 +538,7 @@ fn migrated_settings(v1: &V1Config) -> Settings {
         accounts: vec![Account {
             server: v1.server.clone(),
             username: v1.username.clone(),
+            auto_approve_devices: true,
             pairs: vec![SyncPair {
                 local_dir: v1.local_dir.clone(),
                 remote: "/".to_string(),
@@ -833,6 +843,7 @@ fn run_sync(app: AppHandle) {
     let _ = status_item.set_text("Syncing…");
     set_tray_icon(&app, "syncing");
     let app_handle = app.clone();
+    let accounts = settings.accounts.clone();
     tauri::async_runtime::spawn(async move {
         let total = jobs.len();
         let (mut pushed, mut pulled, mut conflicts, mut failed) = (0u64, 0u64, 0u64, 0u64);
@@ -849,6 +860,47 @@ fn run_sync(app: AppHandle) {
                 // Encryption locked: a state to resolve, not a failure.
                 Err(error) if error.is_locked() => locked.push(label),
                 Err(error) => errors.push(format!("{label}: {error}")),
+            }
+        }
+        // Keep multi-pair accounts consistent: epoch and device files updated
+        // in one pair's `.kolimi` are shared with the others.
+        for account in &accounts {
+            if account.pairs.len() > 1 {
+                propagate_account_files(account);
+            }
+        }
+        // Auto-approve pending device enrollments for accounts that opt in
+        // (on by default): a new device becomes usable without comparing
+        // codes. Only runs while this machine is unlocked; failures are
+        // silent (the manual flow in Accounts & Sync still works).
+        let mut approved: Vec<String> = Vec::new();
+        for account in &accounts {
+            if !account.auto_approve_devices {
+                continue;
+            }
+            let Some(secrets) = keyring_get(&account_key(&account.server, &account.username))
+                .filter(|secrets| !secrets.password.is_empty())
+            else {
+                continue;
+            };
+            let local = account
+                .pairs
+                .first()
+                .map(|pair| PathBuf::from(&pair.local_dir))
+                .unwrap_or_else(|| account_state_dir(&account.server, &account.username));
+            let config = account_config(account, &secrets, local);
+            let Ok(pending) = kolimi_sync::list_enrollments(&config).await else {
+                continue;
+            };
+            for enrollment in pending {
+                match kolimi_sync::approve_device_unverified(&config, enrollment.id).await {
+                    Ok(name) => approved.push(format!("{} ({})", name, account.username)),
+                    Err(kolimi_sync::SyncError::Locked(_)) => break,
+                    Err(_) => {}
+                }
+            }
+            if !approved.is_empty() {
+                propagate_account_files(account);
             }
         }
         let state = app_handle.state::<DesktopState>();
@@ -878,6 +930,16 @@ fn run_sync(app: AppHandle) {
             let _ = state.status_item.set_text(format!(
                 "Synced {total} dir(s): ↑{pushed} ↓{pulled} ⚠{conflicts}{failed_note}"
             ));
+            if !approved.is_empty() {
+                // The "wasn't you?" notice for automatic approvals.
+                notify_user(
+                    "Kolimi",
+                    &format!(
+                        "Approved new device(s): {}. If that wasn't you, remove them under Accounts & Sync → Encryption.",
+                        approved.join(", ")
+                    ),
+                );
+            }
             if conflicts > 0 {
                 set_tray_icon(&app_handle, "error");
                 notify_user(
@@ -911,6 +973,8 @@ struct AccountView {
     has_e2ee: bool,
     /// Whether an E2EE passphrase is stored for this account.
     e2ee_unlocked: bool,
+    /// Whether new devices are approved automatically while unlocked.
+    auto_approve_devices: bool,
     pairs: Vec<PairView>,
 }
 
@@ -945,6 +1009,7 @@ fn get_settings(app: AppHandle) -> SettingsView {
                 e2ee_unlocked: secrets
                     .as_ref()
                     .is_some_and(|secrets| secrets.e2ee_passphrase.is_some()),
+                auto_approve_devices: account.auto_approve_devices,
                 server: account.server.clone(),
                 username: account.username.clone(),
                 pairs: account
@@ -1005,6 +1070,7 @@ async fn sign_in(
                 server: server.clone(),
                 username: username.clone(),
                 pairs: Vec::new(),
+                auto_approve_devices: true,
             });
         }
         settings.clone()
@@ -1194,7 +1260,7 @@ async fn set_e2ee_passphrase(
             .pairs
             .first()
             .map(|pair| PathBuf::from(&pair.local_dir))
-            .unwrap_or_else(std::env::temp_dir);
+            .unwrap_or_else(|| account_state_dir(&account.server, &account.username));
         let mut config = account_config(&account, &secrets, local);
         config.e2ee = Some(kolimi_sync::E2eeOptions {
             passphrase: Some(passphrase.clone()),
@@ -1243,15 +1309,24 @@ async fn e2ee_status(app: AppHandle, server: String, username: String) -> Result
         .pairs
         .first()
         .map(|pair| PathBuf::from(&pair.local_dir))
-        .unwrap_or_else(std::env::temp_dir);
+        .unwrap_or_else(|| account_state_dir(&account.server, &account.username));
     let config = account_config(&account, &secrets, local);
     match kolimi_sync::keyring_exists(&config).await {
-        Ok(true) => Ok(if secrets.e2ee_passphrase.is_some() {
-            "unlocked"
-        } else {
-            "locked"
+        Ok(true) => {
+            // Unlocked = passphrase on hand, or an enrolled device key in any
+            // pair (passwordless devices must not report "locked").
+            let enrolled = account.pairs.iter().any(|pair| {
+                PathBuf::from(&pair.local_dir)
+                    .join(".kolimi/device.json")
+                    .exists()
+            });
+            Ok(if secrets.e2ee_passphrase.is_some() || enrolled {
+                "unlocked"
+            } else {
+                "locked"
+            }
+            .to_string())
         }
-        .to_string()),
         Ok(false) => Ok("none".to_string()),
         Err(error) => Err(error.to_string()),
     }
@@ -1285,6 +1360,32 @@ async fn setup_e2ee(
     store_secrets(&account_key(&server, &username), &secrets);
     run_sync(app);
     Ok(recovery)
+}
+
+/// Toggle automatic approval of new device enrollments for an account.
+#[tauri::command]
+fn set_auto_approve(
+    app: AppHandle,
+    server: String,
+    username: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let settings = {
+        let state = app.state::<DesktopState>();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let account = settings
+            .accounts
+            .iter_mut()
+            .find(|account| account.server == server && account.username == username)
+            .ok_or_else(|| "account not found".to_string())?;
+        account.auto_approve_devices = enabled;
+        settings.clone()
+    };
+    save_settings_file(&settings)?;
+    Ok(())
 }
 
 /// Toggle the "start on login" autostart entry.
@@ -1382,6 +1483,72 @@ fn first_pair_dir(account: &Account) -> Result<PathBuf, String> {
         .ok_or_else(|| "Add a sync folder for this account first".to_string())
 }
 
+/// Private per-account dir for account-level operations when the account has
+/// no sync folder yet. Never the shared `/tmp`: epoch and state files live
+/// under the user's config dir.
+fn account_state_dir(server: &str, username: &str) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    server.hash(&mut hasher);
+    username.hash(&mut hasher);
+    let dir = config_base()
+        .join("kolimi")
+        .join("accounts")
+        .join(format!("{:016x}", hasher.finish()));
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    dir
+}
+
+/// Copies account-level sync state (`device.json`, `keyring.epoch`,
+/// `known_keys.json`) from whichever pair has it to every pair, so a second
+/// sync folder does not stay locked after enrollment on the first.
+fn propagate_account_files(account: &Account) {
+    const FILES: [&str; 3] = ["device.json", "keyring.epoch", "known_keys.json"];
+    let dirs: Vec<PathBuf> = account
+        .pairs
+        .iter()
+        .map(|pair| PathBuf::from(&pair.local_dir).join(".kolimi"))
+        .collect();
+    for name in FILES {
+        // Newest copy wins.
+        let mut source: Option<(std::time::SystemTime, PathBuf)> = None;
+        for dir in &dirs {
+            let path = dir.join(name);
+            if let Ok(meta) = std::fs::metadata(&path)
+                && let Ok(modified) = meta.modified()
+                && source.as_ref().is_none_or(|(time, _)| modified > *time)
+            {
+                source = Some((modified, path));
+            }
+        }
+        let Some((_, source)) = source else {
+            continue;
+        };
+        if let Ok(bytes) = std::fs::read(&source) {
+            for dir in &dirs {
+                let dest = dir.join(name);
+                if dest == source {
+                    continue;
+                }
+                if std::fs::read(&dest).ok().as_deref() == Some(bytes.as_slice()) {
+                    continue;
+                }
+                let _ = std::fs::create_dir_all(dir);
+                let tmp = dir.join(format!("{name}.tmp"));
+                if std::fs::write(&tmp, &bytes).is_ok() {
+                    let _ = std::fs::rename(&tmp, &dest);
+                }
+            }
+        }
+    }
+}
+
 /// A config for account-level E2EE operations (no encrypted roots).
 fn account_config(
     account: &Account,
@@ -1442,9 +1609,13 @@ async fn finish_enrollment(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
         .ok_or_else(|| "no enrollment in progress".to_string())?;
-    kolimi_sync::finish_enrollment(&config, &pending)
+    let id = kolimi_sync::finish_enrollment(&config, &pending)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // The device key landed in the first pair's `.kolimi`; share it with
+    // every other pair so they unlock too.
+    propagate_account_files(&account);
+    Ok(id)
 }
 
 /// Pending device enrollments awaiting approval.
@@ -1459,7 +1630,7 @@ async fn list_enrollments(
         .pairs
         .first()
         .map(|pair| PathBuf::from(&pair.local_dir))
-        .unwrap_or_else(std::env::temp_dir);
+        .unwrap_or_else(|| account_state_dir(&account.server, &account.username));
     let config = account_config(&account, &secrets, local);
     kolimi_sync::list_enrollments(&config)
         .await
@@ -1478,9 +1649,20 @@ async fn approve_device(
 ) -> Result<String, String> {
     let (account, secrets) = find_account(&app, &server, &username)?;
     let config = account_config(&account, &secrets, first_pair_dir(&account)?);
-    kolimi_sync::approve_device(&config, id, &code)
-        .await
-        .map_err(|error| error.to_string())
+    // Empty code = one-click trust-on-first-use; a typed code is verified
+    // against the device key (refuses on mismatch).
+    let result = if code.trim().is_empty() {
+        kolimi_sync::approve_device_unverified(&config, id).await
+    } else {
+        kolimi_sync::approve_device(&config, id, &code).await
+    }
+    .map_err(|error| error.to_string());
+    // Approvals pin recipient keys (TOFU) in the first pair's `.kolimi`;
+    // share them with every other pair.
+    if result.is_ok() {
+        propagate_account_files(&account);
+    }
+    result
 }
 
 /// The recipient keys pinned on this machine (member -> fingerprint).
@@ -1541,6 +1723,7 @@ fn main() {
             e2ee_status,
             setup_e2ee,
             set_autostart_enabled,
+            set_auto_approve,
             sync_now,
             open_account,
             enroll_device,

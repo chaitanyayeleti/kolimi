@@ -1350,6 +1350,34 @@ pub async fn approve_device(
     id: i64,
     expected_code: &str,
 ) -> Result<String, SyncError> {
+    let (http, e2ee, name, public) = approvable_device(config, id).await?;
+    let code = enrollment_code(&public, id);
+    if normalize_code(&code) != normalize_code(expected_code) {
+        return Err(SyncError::E2ee(format!(
+            "enrollment code mismatch for “{name}”: the server offered key {} but you confirmed a \
+             different code. This may mean the server substituted the device key — refusing to approve.",
+            fingerprint(&public),
+        )));
+    }
+    finish_approval(&http, id, &e2ee.master, &public).await?;
+    Ok(name)
+}
+
+/// Approves a pending enrollment without comparing codes (trust-on-first-use).
+///
+/// Convenient on a server you operate yourself; weaker against a malicious
+/// server, which could substitute the device key. Prefer [`approve_device`]
+/// with a compared code when you don't fully trust the server.
+pub async fn approve_device_unverified(config: &SyncConfig, id: i64) -> Result<String, SyncError> {
+    let (http, e2ee, name, public) = approvable_device(config, id).await?;
+    finish_approval(&http, id, &e2ee.master, &public).await?;
+    Ok(name)
+}
+
+async fn approvable_device(
+    config: &SyncConfig,
+    id: i64,
+) -> Result<(Http, E2ee, String, [u8; 32]), SyncError> {
     let http = Http::new(config)?;
     let e2ee = match unlock_e2ee(&http, config).await {
         Ok(Some(e2ee)) => e2ee,
@@ -1363,15 +1391,16 @@ pub async fn approve_device(
     };
 
     let (name, public) = fetch_pending(&http, id).await?;
-    let code = enrollment_code(&public, id);
-    if normalize_code(&code) != normalize_code(expected_code) {
-        return Err(SyncError::E2ee(format!(
-            "enrollment code mismatch for “{name}”: the server offered key {} but you confirmed a \
-             different code. This may mean the server substituted the device key — refusing to approve.",
-            fingerprint(&public),
-        )));
-    }
-    let wrapped = kolimi_crypto::wrap_secret_for(&public, e2ee.master.as_bytes())?;
+    Ok((http, e2ee, name, public))
+}
+
+async fn finish_approval(
+    http: &Http,
+    id: i64,
+    master: &MasterKey,
+    public: &[u8; 32],
+) -> Result<(), SyncError> {
+    let wrapped = kolimi_crypto::wrap_secret_for(public, master.as_bytes())?;
 
     let approve = format!("/api/e2ee/enrollments/{id}/approve");
     let (status, _) = http
@@ -1386,7 +1415,7 @@ pub async fn approve_device(
             path: approve,
         });
     }
-    Ok(name)
+    Ok(())
 }
 
 struct Http {

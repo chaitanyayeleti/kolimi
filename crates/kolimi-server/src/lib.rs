@@ -15,7 +15,6 @@ pub mod auth;
 pub mod hardening;
 pub mod janitor;
 pub mod metrics;
-pub mod plugins;
 pub mod preview;
 pub mod search_indexer;
 pub mod ui;
@@ -71,9 +70,6 @@ pub enum InitError {
     /// Metrics registration failure.
     #[error("metrics: {0}")]
     Metrics(#[from] prometheus::Error),
-    /// Plugin host initialization failure.
-    #[error("plugins: {0}")]
-    Plugins(#[from] kolimi_plugins::PluginError),
 }
 
 /// Shared application state.
@@ -105,8 +101,6 @@ pub struct AppState {
     pub sse_permits: Arc<tokio::sync::Semaphore>,
     /// Prometheus metrics.
     pub metrics: Arc<metrics::Metrics>,
-    /// Sandboxed WebAssembly plugins.
-    pub plugins: Arc<kolimi_plugins::PluginHost>,
     /// Per-client rate limiter for sensitive endpoints.
     pub rate_limiter: Arc<hardening::RateLimiter>,
     /// Fixed password hash verified when a user has none, so login timing
@@ -161,7 +155,6 @@ impl AppState {
             preview_permits: Arc::new(tokio::sync::Semaphore::new(preview::MAX_CONCURRENT_WORKERS)),
             sse_permits: Arc::new(tokio::sync::Semaphore::new(SSE_MAX_CONNECTIONS)),
             metrics: Arc::new(metrics::Metrics::new()?),
-            plugins: Arc::new(kolimi_plugins::PluginHost::load(&data_dir.join("plugins"))?),
             rate_limiter: Arc::new(hardening::RateLimiter::new()),
             dummy_password_hash,
             trust_proxy,
@@ -238,15 +231,6 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/e2ee/devices", get(api_e2ee::list_devices))
         .route("/api/e2ee/devices/{id}", delete(api_e2ee::delete_device))
         .route("/api/sync/shared-tree", get(api_sync::shared_tree))
-        .route("/api/plugins", get(plugins::list))
-        .route(
-            "/plugins/{name}",
-            get(plugins::handle_root).post(plugins::handle_root),
-        )
-        .route(
-            "/plugins/{name}/{*rest}",
-            get(plugins::handle_path).post(plugins::handle_path),
-        )
         .route("/api/files", axum::routing::put(api_sync::commit_file))
         .route("/api/chunks/exist", post(api_sync::chunks_exist))
         .route(
@@ -262,6 +246,8 @@ pub fn build_app(state: AppState) -> Router {
             post(api_sync::restore_version),
         )
         .route("/api/browse", get(api_browse::browse))
+        .route("/api/files/info", get(api_browse::info))
+        .route("/api/files/move", post(api_browse::move_node))
         .route("/api/search", get(api::search))
         .route("/api/preview", get(preview::handler))
         .route(

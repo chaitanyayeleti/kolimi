@@ -146,7 +146,7 @@ kolimi-server audit verify             # exits 1 and names the first bad entry
 
 Events cover logins and failures, logouts, passkeys, TOTP, file
 mutations (via the change feed), shares, link unlocks/downloads, E2EE
-key operations, plugin traps, and CLI changes. Content and file bytes
+key operations, preview-worker failures, and CLI changes. Content and file bytes
 are never logged.
 
 ## Metrics
@@ -299,15 +299,6 @@ as needed); the user then re-enrolls 2FA.
 the encrypted files unrecoverable — the server holds no keys and cannot help.
 A password reset never affects encrypted content (it is wrapped under the E2EE
 keyring, not the login password).
-
-## Plugins
-
-Drop a component plus metadata into `<data>/plugins/` (see
-`examples/README.md`) and restart. Plugins serve
-`/plugins/<name>/…` for signed-in users; `GET /api/plugins` lists them.
-The sandbox grants logging, a plugin-private KV store, and the clock —
-no filesystem, network, or environment. Each call has a fuel budget and
-a 16 MiB memory cap; traps are contained and audited (`plugin.error`).
 
 ## Desktop and mobile clients
 

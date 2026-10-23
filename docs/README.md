@@ -13,7 +13,7 @@ Kolimi's docs fall into four kinds:
 | --- | --- |
 | [../README.md](../README.md) | What Kolimi is, feature highlights, quick start |
 | [install.md](install.md) | Every way to install and run the server (script, AUR, `.deb`, Docker/Podman, Helm, systemd), Docker Compose with Traefik, TLS, Caddy/nginx/Traefik proxies, first-run |
-| [operations.md](operations.md) | Day-2 administration: users, groups, TOTP, passkeys, backups, scrub/verify, audit, E2EE operations, plugins, metrics/tracing, quota warnings, upgrades, troubleshooting |
+| [operations.md](operations.md) | Day-2 administration: users, groups, TOTP, passkeys, backups, scrub/verify, audit, E2EE operations, metrics/tracing, quota warnings, upgrades, troubleshooting |
 
 ## Design & security
 

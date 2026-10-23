@@ -299,18 +299,17 @@ pub fn generate_recovery_code() -> Result<[u8; RECOVERY_CODE_LEN], CryptoError> 
     random::<RECOVERY_CODE_LEN>()
 }
 
-/// Formats a recovery code as eight groups of eight hex characters.
+/// Formats a recovery code as a 24-word phrase (shown once — write it down).
 pub fn recovery_code_display(code: &[u8; RECOVERY_CODE_LEN]) -> String {
-    let hex = hex_encode(code);
-    hex.as_bytes()
-        .chunks(8)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
-        .collect::<Vec<_>>()
-        .join("-")
+    crate::mnemonic::phrase_from_bytes(code)
 }
 
-/// Parses a recovery code in any hex grouping (dashes/spaces optional).
+/// Parses a recovery phrase (any spacing/casing), or a legacy hex grouping
+/// (dashes/spaces optional) saved by older versions.
 pub fn recovery_code_parse(text: &str) -> Result<[u8; RECOVERY_CODE_LEN], CryptoError> {
+    if text.split_whitespace().count() > 1 {
+        return crate::mnemonic::parse_phrase(text);
+    }
     let cleaned: String = text
         .chars()
         .filter(|c| !matches!(c, '-' | ' ' | '\t'))
@@ -439,12 +438,20 @@ mod tests {
     fn recovery_code_format_roundtrips() {
         let code = generate_recovery_code().unwrap();
         let display = recovery_code_display(&code);
-        assert_eq!(display.len(), 71);
+        // 24 plain words, not 71 hex characters.
+        assert_eq!(display.split_whitespace().count(), 24);
         assert_eq!(recovery_code_parse(&display).unwrap(), code);
-        assert_eq!(
-            recovery_code_parse(&display.replace('-', "")).unwrap(),
-            code
-        );
+        assert_eq!(recovery_code_parse(&display.to_uppercase()).unwrap(), code);
+        // Legacy hex groupings saved by older versions still parse.
+        let hex = hex_encode(&code);
+        let grouped = hex
+            .as_bytes()
+            .chunks(8)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("-");
+        assert_eq!(recovery_code_parse(&grouped).unwrap(), code);
+        assert_eq!(recovery_code_parse(&hex).unwrap(), code);
         assert!(recovery_code_parse("nope").is_err());
     }
 

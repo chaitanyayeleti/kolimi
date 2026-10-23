@@ -341,23 +341,27 @@ pub async fn revoke_device(id: i64) -> Result<(), String> {
 
 /// Approves a pending enrollment by wrapping the master key for its device.
 ///
-/// `expected_code` must be the code shown on the new device: it commits to the
-/// device's public key, so a server that substituted the key produces a
-/// mismatch here and the approval is refused.
+/// `expected_code` is the code shown on the new device when the approver
+/// wants verification: it commits to the device's public key, so a server
+/// that substituted the key produces a mismatch and the approval is refused.
+/// `None` skips the comparison (one-click, trust-on-first-use): convenient
+/// on a server you operate yourself, weaker against a malicious server.
 pub async fn approve_enrollment(
     id: i64,
     device_public_key_b64: &str,
-    expected_code: &str,
+    expected_code: Option<&str>,
     master: &MasterKey,
 ) -> Result<(), String> {
     let public = decode_public(device_public_key_b64)?;
-    let code = kolimi_crypto::enrollment_code(&public, id);
-    if kolimi_crypto::normalize_code(&code) != kolimi_crypto::normalize_code(expected_code) {
-        return Err(format!(
-            "Code mismatch: the server offered key {}, which does not match the code shown on the \
-             new device. Refusing to approve.",
-            kolimi_crypto::fingerprint(&public)
-        ));
+    if let Some(expected) = expected_code {
+        let code = kolimi_crypto::enrollment_code(&public, id);
+        if kolimi_crypto::normalize_code(&code) != kolimi_crypto::normalize_code(expected) {
+            return Err(format!(
+                "Code mismatch: the server offered key {}, which does not match the code shown on the \
+                 new device. Refusing to approve.",
+                kolimi_crypto::fingerprint(&public)
+            ));
+        }
     }
     let wrapped = kolimi_crypto::wrap_secret_for(&public, master.as_bytes())
         .map_err(|_| "could not wrap the master key".to_string())?;
@@ -455,10 +459,371 @@ pub async fn poll_enrollment(id: i64, secret: &[u8; 32]) -> Result<Option<Master
     Ok(Some(MasterKey::from_bytes(umk)))
 }
 
+/// sessionStorage key holding the unlocked master key (base64) for the
+/// lifetime of the tab. This is what "remember me" means in the browser:
+/// a reload keeps you unlocked, closing the tab (or Lock / sign out)
+/// forgets the key. sessionStorage is origin-scoped and never leaves the
+/// browser, so the server still never sees key material.
+const SESSION_MASTER_KEY: &str = "kolimi.session.master";
+
+/// Remembers an unlocked master key for this tab session.
+pub fn remember_master(master: &MasterKey) {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+    {
+        let _ = storage.set_item(SESSION_MASTER_KEY, &STANDARD.encode(master.as_bytes()));
+    }
+}
+
+/// Forgets the tab-session master key (Lock, sign out, expired session).
+pub fn forget_master() {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+    {
+        let _ = storage.remove_item(SESSION_MASTER_KEY);
+    }
+}
+
+/// Restores the tab-session master key after a reload, if the tab is still
+/// the one that unlocked.
+pub fn recalled_master() -> Option<MasterKey> {
+    let bytes = web_sys::window()?
+        .session_storage()
+        .ok()??
+        .get_item(SESSION_MASTER_KEY)
+        .ok()??;
+    let raw: [u8; 32] = STANDARD.decode(&bytes).ok()?.try_into().ok()?;
+    Some(MasterKey::from_bytes(raw))
+}
+
 /// Renders `data` as an inline SVG QR code (empty string on failure).
 pub fn qr_svg(data: &str) -> String {
     match qrcode::QrCode::new(data.as_bytes()) {
         Ok(code) => code.render::<qrcode::render::svg::Color>().build(),
         Err(_) => String::new(),
     }
+}
+
+/// Metadata for one node: kind and encryption state.
+pub async fn file_info(path: &str) -> Result<Value, String> {
+    let response = api::get(&format!("/api/files/info?path={}", encode(path))).await?;
+    if response.status == 200 {
+        Ok(response.body)
+    } else {
+        Err(response
+            .error()
+            .unwrap_or("Could not load file info")
+            .to_string())
+    }
+}
+
+/// Metadata-only rename/move. Works for encrypted files too (moving
+/// ciphertext pointers never exposes plaintext to the server).
+pub async fn move_file(from: &str, to: &str) -> Result<(), String> {
+    let response = api::send_json(
+        "POST",
+        "/api/files/move",
+        &serde_json::json!({ "from": from, "to": to }),
+    )
+    .await?;
+    match response.status {
+        200 => Ok(()),
+        404 => Err("That file no longer exists.".to_string()),
+        409 => Err("A file with that name already exists.".to_string()),
+        _ => Err(response
+            .error()
+            .unwrap_or("Could not move the file")
+            .to_string()),
+    }
+}
+
+/// Uploads `data` as a new encrypted file at `path` (parent must exist):
+/// chunks are encrypted client-side, uploaded, committed, and the wrapped
+/// file key is stored — mirroring the sync client.
+pub async fn upload_encrypted(master: &MasterKey, path: &str, data: &[u8]) -> Result<(), String> {
+    let file_key =
+        FileKey::generate().map_err(|_| "could not generate the file key".to_string())?;
+    let mut chunks = Vec::new();
+    let mut total = 0u64;
+    for chunk in kolimi_chunk::chunker::split(data) {
+        let ciphertext = file_key
+            .encrypt_chunk(chunk.data)
+            .map_err(|_| "could not encrypt the file".to_string())?;
+        total += ciphertext.len() as u64;
+        let hash = kolimi_chunk::Hash::of(&ciphertext);
+        chunks.push(kolimi_chunk::ChunkRef {
+            hash,
+            len: ciphertext.len() as u32,
+        });
+        let url = format!("/api/chunks/{}", hash.to_hex());
+        let response = api::put_bytes(&url, &ciphertext).await?;
+        if response.status != 201 && response.status != 204 {
+            return Err(response
+                .error()
+                .unwrap_or("could not upload the file")
+                .to_string());
+        }
+    }
+    let manifest = serde_json::to_value(&kolimi_chunk::Manifest {
+        version: kolimi_chunk::Manifest::VERSION,
+        size: total,
+        chunks,
+    })
+    .map_err(|_| "could not build the file manifest".to_string())?;
+    let response = api::send_json(
+        "PUT",
+        &format!("/api/files?path={}", encode(path)),
+        &manifest,
+    )
+    .await?;
+    if response.status != 200 {
+        return Err(response
+            .error()
+            .unwrap_or("could not save the file")
+            .to_string());
+    }
+    let wrapped = master
+        .wrap_file_key(&file_key)
+        .map_err(|_| "could not wrap the file key".to_string())?;
+    let response =
+        api::put_bytes(&format!("/api/files/key?path={}", encode(path)), &wrapped).await?;
+    if response.status != 204 {
+        // Roll back: ciphertext without a key would be unreadable.
+        let _ = api::dav("DELETE", &format!("/dav{}", encode(path)), None, &[]).await;
+        return Err(response
+            .error()
+            .unwrap_or("could not store the file key")
+            .to_string());
+    }
+    Ok(())
+}
+
+/// The caller's X25519 identity, unwrapped with the master key.
+async fn own_identity(master: &MasterKey) -> Result<kolimi_crypto::Identity, String> {
+    let response = api::get("/api/e2ee/identity").await?;
+    if response.status != 200 {
+        return Err("No E2EE identity on this account yet.".to_string());
+    }
+    let wrapped = STANDARD
+        .decode(
+            response.body["wrapped_private"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+        .map_err(|_| "Malformed identity".to_string())?;
+    master
+        .unwrap_identity(&wrapped)
+        .map_err(|_| "Could not unwrap the identity".to_string())
+}
+
+/// Decrypts a file shared with the caller (`/Shared with me/...`): unwraps
+/// the recipient share key with the caller's identity instead of the master
+/// key, then decrypts the chunks.
+pub async fn decrypt_shared_file(
+    master: &MasterKey,
+    server_path: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let identity = own_identity(master).await?;
+    let response = api::get(&format!("/api/e2ee/share-key?path={}", encode(server_path))).await?;
+    if response.status != 200 {
+        return Err(response
+            .error()
+            .unwrap_or("No share key for this file — ask the owner to re-share it")
+            .to_string());
+    }
+    let wrapped = STANDARD
+        .decode(response.body["wrapped_key"].as_str().unwrap_or_default())
+        .map_err(|_| "Malformed share key".to_string())?;
+    let secret = identity.private_bytes();
+    let raw = kolimi_crypto::unwrap_secret(&secret, &wrapped)
+        .map_err(|_| "Could not unwrap the share key".to_string())?;
+    let file_key = FileKey::from_bytes(raw);
+    let name = server_path.rsplit('/').next().unwrap_or("file").to_string();
+    let manifest = api::get(&format!("/api/files/manifest?path={}", encode(server_path))).await?;
+    if manifest.status != 200 {
+        return Err("Could not load the file manifest".to_string());
+    }
+    decrypt_manifest(&file_key, server_path, &manifest.body, &name).await
+}
+
+/// Shared chunk-decryption core for owned and shared files.
+async fn decrypt_manifest(
+    file_key: &FileKey,
+    path: &str,
+    manifest: &Value,
+    name: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let Some(chunks) = manifest["chunks"].as_array() else {
+        return Ok((name.to_string(), Vec::new()));
+    };
+    let mut out = Vec::new();
+    for chunk in chunks {
+        let hash = chunk["hash"].as_str().unwrap_or_default();
+        let ciphertext =
+            api::get_bytes(&format!("/api/chunks/{hash}?path={}", encode(path))).await?;
+        let plaintext = file_key
+            .decrypt_chunk(&ciphertext)
+            .map_err(|_| "Decryption failed (wrong key or corrupt data)".to_string())?;
+        out.extend_from_slice(plaintext.as_slice());
+    }
+    Ok((name.to_string(), out))
+}
+
+/// Decrypts a file to an in-memory blob URL for image preview (lightbox).
+/// The caller should revoke the URL when done.
+pub fn blob_url(name: &str, bytes: &[u8]) -> String {
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(array.as_ref());
+    let lower = name.to_ascii_lowercase();
+    let mime = if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".bmp") {
+        "image/bmp"
+    } else {
+        "image/jpeg"
+    };
+    let bag = web_sys::BlobPropertyBag::new();
+    bag.set_type(mime);
+    let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(parts.as_ref(), &bag)
+    else {
+        return String::new();
+    };
+    web_sys::Url::create_object_url_with_blob(&blob).unwrap_or_default()
+}
+
+/// A recipient's published X25519 public key.
+async fn recipient_public(username: &str) -> Result<[u8; 32], String> {
+    let response = api::get(&format!("/api/e2ee/identity/{}", encode(username))).await?;
+    if response.status != 200 {
+        return Err(format!("{username} has not set up encryption yet."));
+    }
+    STANDARD
+        .decode(response.body["public_key"].as_str().unwrap_or_default())
+        .map_err(|_| "Malformed public key".to_string())?
+        .try_into()
+        .map_err(|_| "Malformed public key".to_string())
+}
+
+/// Wraps the file key of an encrypted file (or every encrypted file under
+/// an encrypted directory) for one recipient and stores it. Plaintext
+/// paths are a no-op. Returns the number of keys wrapped.
+pub async fn share_encrypted_with(
+    master: &MasterKey,
+    path: &str,
+    username: &str,
+) -> Result<usize, String> {
+    let info = file_info(path).await?;
+    if info["kind"].as_str() == Some("dir") {
+        share_encrypted_dir(master, path, username).await
+    } else if info["encrypted"].as_bool() == Some(true) {
+        let wrapped = wrap_share_key(master, path, username).await?;
+        put_share_key(path, username, &wrapped).await?;
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+/// Recursive directory half of [`share_encrypted_with`] (iterative, so no
+/// async boxing is needed).
+async fn share_encrypted_dir(
+    master: &MasterKey,
+    dir: &str,
+    username: &str,
+) -> Result<usize, String> {
+    let mut wrapped = 0usize;
+    let mut stack = vec![dir.to_string()];
+    while let Some(current) = stack.pop() {
+        let response = api::get(&format!("/api/browse?path={}", encode(&current))).await?;
+        if response.status != 200 {
+            return Err(response
+                .error()
+                .unwrap_or("Could not list the shared folder")
+                .to_string());
+        }
+        let entries = response.body["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for entry in &entries {
+            let Some(path) = entry["path"].as_str() else {
+                continue;
+            };
+            if entry["kind"].as_str() == Some("dir") {
+                stack.push(path.to_string());
+            } else if entry["encrypted"].as_bool() == Some(true) {
+                let key = wrap_share_key(master, path, username).await?;
+                put_share_key(path, username, &key).await?;
+                wrapped += 1;
+            }
+        }
+    }
+    Ok(wrapped)
+}
+
+/// Wraps the file key of an owned encrypted file for one recipient.
+pub async fn wrap_share_key(
+    master: &MasterKey,
+    file_path: &str,
+    username: &str,
+) -> Result<Vec<u8>, String> {
+    let key_response = api::get(&format!("/api/files/key?path={}", encode(file_path))).await?;
+    if key_response.status != 200 {
+        return Err("This file has no key to share.".to_string());
+    }
+    let wrapped = STANDARD
+        .decode(
+            key_response.body["wrapped_key"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+        .map_err(|_| "Malformed wrapped key".to_string())?;
+    let file_key = master
+        .unwrap_file_key(&wrapped)
+        .map_err(|_| "Could not unwrap the file key".to_string())?;
+    let public = recipient_public(username).await?;
+    let identity = kolimi_crypto::Identity::generate()
+        .map_err(|_| "could not generate a wrapping key".to_string())?;
+    identity
+        .wrap_file_key_for(&public, &file_key)
+        .map_err(|_| format!("Could not wrap the key for {username}"))
+}
+
+/// Stores a wrapped file key for one recipient on the server.
+pub async fn put_share_key(file_path: &str, username: &str, wrapped: &[u8]) -> Result<(), String> {
+    let response = api::put_bytes(
+        &format!(
+            "/api/e2ee/share-key?path={}&recipient={}",
+            encode(file_path),
+            encode(username)
+        ),
+        wrapped,
+    )
+    .await?;
+    if response.status == 204 {
+        Ok(())
+    } else {
+        Err(response
+            .error()
+            .unwrap_or("Could not share the key")
+            .to_string())
+    }
+}
+
+/// Usernames of a group's members (for per-member key wrapping).
+pub async fn group_members(group: &str) -> Result<Vec<String>, String> {
+    let response = api::get(&format!("/api/groups/{}/members", encode(group))).await?;
+    if response.status != 200 {
+        return Err("Could not load group members".to_string());
+    }
+    Ok(response.body["members"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| m.as_str().map(str::to_string))
+        .collect())
 }

@@ -31,9 +31,9 @@ pub struct FfiSyncConfig {
     pub local_dir: String,
     /// Relative paths whose files are encrypted end-to-end.
     pub encrypted_roots: Vec<String>,
-    /// E2EE passphrase (one of passphrase / recovery code / PRF).
+    /// E2EE passphrase (one of passphrase / recovery phrase / PRF).
     pub e2ee_passphrase: Option<String>,
-    /// E2EE recovery code.
+    /// E2EE recovery phrase (24 words; legacy hex also accepted).
     pub e2ee_recovery_code: Option<String>,
     /// WebAuthn PRF output (exactly 32 bytes) from the platform ceremony.
     pub e2ee_prf_secret: Option<Vec<u8>>,
@@ -127,7 +127,7 @@ pub enum FfiError {
         /// Human-readable description.
         message: String,
     },
-    /// E2EE needs unlocking (passphrase, recovery code, or an enrolled
+    /// E2EE needs unlocking (passphrase, recovery phrase, or an enrolled
     /// device) before this sync can run.
     #[error("locked: {message}")]
     Locked {
@@ -255,7 +255,7 @@ impl KolimiSync {
         })
     }
 
-    /// Creates and uploads an E2EE keyring; returns the recovery code
+    /// Creates and uploads an E2EE keyring; returns the recovery phrase
     /// (show it to the user once, then store it in the OS keychain).
     pub async fn e2ee_setup(&self, passphrase: String) -> Result<String, FfiError> {
         if passphrase.is_empty() {

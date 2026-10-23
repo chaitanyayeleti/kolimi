@@ -11,7 +11,7 @@
 
 - **One static binary.** No PHP-FPM, nginx, Redis, MySQL chain. Embedded SQLite (WAL) by default, optional Postgres. Target: ~50 MB binary, <100 MB idle RSS, <200 ms cold start.
 - **Zero telemetry, zero phone-home.** All network egress is opt-in. File content is never logged.
-- **No unsandboxed server-side code.** Third-party apps run in a WASM sandbox (wasmtime) with capability-scoped access, not as PHP plugins with full filesystem access.
+- **No unsandboxed server-side code.** Previews decode in a re-executed, sandboxed worker; there is no PHP-style plugin model.
 - **Protocol-first.** Standard WebDAV/CalDAV/CardDAV from day one, so existing clients (rclone, davfs, Thunderbird, iOS, macOS) work immediately. First-party clients get a faster native delta-sync protocol.
 
 ## 2. Stack
@@ -27,7 +27,7 @@
 | Calendars / Contacts | `icalendar`, `vcard` + own CalDAV/CardDAV REPORT layers |
 | Search | tantivy |
 | Frontend | Leptos (WASM) + Tailwind — no Node in the critical path |
-| Plugins | wasmtime component model, capability-scoped |
+| Plugins | removed in 0.1.26 (was unused; wasmtime dead weight) |
 | Desktop / Mobile | Rust sync core + Tauri (tray) / `uniffi` bindings |
 | Push | UnifiedPush / ntfy (no Google FCM dependency) |
 | P2P / LAN (later) | iroh (QUIC, hole punching) for LAN-fast sync |
@@ -70,7 +70,7 @@
 | ↳ *metrics + load gates (ship-blockers)* | Prometheus `/metrics` (request counts/latency by route template, uploads, preview outcomes, login failures; no content labels) via a metrics middleware + app counters; release-mode load gates in CI: 10k changed-metadata files tree walk + delta feed < 5 s, metadata p95 within a CI budget (target 10 ms), release binary < 50 MB | metrics endpoint test; load tests print measured numbers (tree walk ~0.6 s, delta ~0.12 s, p95 ~12 ms on a laptop) and gate CI; perf job added |
 | ↳ *TOTP + recovery codes (ship-blocker)* | RFC 6238 TOTP (HMAC-SHA-1, 6 digits, ±1 step, constant-time compare, consumed-step replay guard) with RFC 6238 test vectors; 10 one-time recovery codes (SHA-256 hashed at rest); `/api/totp` status/begin/enable/disable; login accepts code or recovery code; CLI `user totp-disable` escape hatch; UI: code field on login + QR/secret enrollment and one-time recovery display in the security dialog | unit vectors + full server flow test (enroll, two-step login, replay, recovery single-use, disable, CLI, audit) |
 | ↳ *packaging landed* | `scripts/install.sh` (download + checksum/cosign verify, systemd, admin bootstrap; `--binary` for local/CI), AUR PKGBUILD, cargo-deb metadata + postinst, distroless Dockerfile (nonroot, volume ownership) + compose, hardened systemd unit + sysusers/tmpfiles, Helm chart (PVC/probes/ingress/nonroot); release workflow on tags: gnu + musl + aarch64 tarballs, `.deb`, Helm, sha256, cosign keyless signatures, CycloneDX SBOM, GHCR image, automated AUR; `cargo-vet` initialized (659 exemptions to burn down) | CI proves install → admin → serve → DAV upload → password-protected link → public download on every push; deb + helm lint in CI; docker build on the release runner |
-| ↳ *plugin host landed* | `kolimi-plugins`: wasmtime component model host with the WIT ABI in `wit/plugin.wit`; capabilities are the import list (logging, plugin-private KV, clock); WASI linked with an empty context (no preopens/sockets/env); fuel budget per call (runaway loops trap), 16 MiB memory cap, broken components skipped at load; routes `/plugins/{name}/{*path}` + `GET /api/plugins`; traps audited; `examples/hello-plugin` + `spin-plugin` with committed fixtures and `scripts/build-plugins.sh` | host tests (greeting/echo/KV, fuel kill, filesystem denial, sandbox surface, reload persistence, broken-plugin skip) + server integration test over HTTP incl. audit |
+| ↳ *plugin host landed, removed in 0.1.26 as unused* | `kolimi-plugins`: wasmtime component model host with the WIT ABI in `wit/plugin.wit`; capabilities are the import list (logging, plugin-private KV, clock); WASI linked with an empty context (no preopens/sockets/env); fuel budget per call (runaway loops trap), 16 MiB memory cap, broken components skipped at load; routes `/plugins/{name}/{*path}` + `GET /api/plugins`; traps audited; `examples/hello-plugin` + `spin-plugin` with committed fixtures and `scripts/build-plugins.sh` | host tests (greeting/echo/KV, fuel kill, filesystem denial, sandbox surface, reload persistence, broken-plugin skip) + server integration test over HTTP incl. audit |
 | **M8** (next week) | MLS group messaging (RFC 9420) for group E2EE | a 3-member group syncs across add/remove; a removed member cannot read new epochs; vectors + audit delta |
 | ↳ *plan* | Replace pre-MLS per-member X25519 wrapping (documented tradeoff: no FS/PCS) with `openmls`: Ed25519 credentials, key packages published to the server, group create/add via commit + welcome, epoch exporter derived group key wrapping file keys, re-wrap on membership change; migrate existing group shares by re-sharing under the MLS group. The audit package already flags this as the open item; land it *with* the external review, not before. | exit criteria above; `e2ee_decrypt`-style fuzz for the MLS decoders; vectors committed |
 

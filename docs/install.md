@@ -199,7 +199,7 @@ password. Non-admins get `403`. No proxy middleware is required.
 
 Requirements: DNS for `KOLIMI_DOMAIN` already pointing at the host, and
 ports 80/443 reachable (the TLS challenge needs port 443). WebDAV,
-CalDAV, the JSON API, `/app`, `/plugins`, and public links all share the
+CalDAV, the JSON API, `/app`, and public links all share the
 same host rule — no extra routing needed.
 
 Running Traefik outside Compose works the same way; point its Docker

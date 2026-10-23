@@ -15,7 +15,7 @@ existing Rust core (`kolimi-sync` + `kolimi-crypto`) through `kolimi-ffi`.
 E2EE, with no Google Play Services and no trackers.
 
 **Non-goals (v1):** iOS, passkeys (WebAuthn on Android usually needs GMS),
-CalDAV/CardDAV UI, plugin UI, sharing-UI beyond read-only "Shared with me",
+CalDAV/CardDAV UI, sharing-UI beyond read-only "Shared with me",
 arbitrary SAF folders, and a full offline metadata cache.
 
 ## 2. Architecture — one core, a thin shell

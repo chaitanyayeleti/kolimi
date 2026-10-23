@@ -6,6 +6,50 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.26] - 2026-10-26
+
+### Changed
+- **Phase 2: encrypted files work in the web UI.** Downloads decrypt
+  (grid, list, search, context menu, lightbox); rename/move/bulk-move go
+  through a new metadata-only `POST /api/files/move` that works on
+  ciphertext; uploads into encrypted folders are encrypted client-side
+  (chunk + commit + wrap key, like the sync client) while plaintext
+  uploads stream from disk with no WASM-side copy; image and text previews
+  decrypt to the lightbox; files shared with you decrypt via the share-key
+  flow; sharing an encrypted file wraps its key per recipient (recursive
+  for directories); public links carry the `#k=` fragment from a
+  session-local map; shared mounts report their `encrypted` state.
+  Desktop: account E2EE files propagate to every pair, passwordless
+  devices report unlocked, per-account state lives under `~/.config`
+  (no more `/tmp` fallback), and the recovery copy is no longer wiped.
+
+### Fixed
+- Shared-folder permission gating: Upload/New folder hidden in read-only
+  shares; Rename/Delete allowed with write permission; single `Entry`
+  `can_edit` gate in grid, list, and context menu.
+- Versions UI: per-file version history with one-click restore; text
+  previews in the lightbox; images and text files open the lightbox from
+  grid and list views.
+- Browser device enrollment survives reloads (pending id + secret in
+  sessionStorage); toasts (undo, quota) auto-dismiss; passkey removal and
+  share revocation surface errors; storage-usage refreshes after
+  upload/trash/restore; selection clears on navigation.
+
+### Changed
+- **Phase 3 (simplification, I):** the recovery code is a 24-word phrase
+  (BIP39 wordlist, checksum-verified; legacy hex still parses); the
+  unlock persists for the tab session via sessionStorage; approving a
+  device is one click (code comparison moved behind "Verify code");
+  desktop auto-approves pending enrollments while unlocked (opt-out,
+  with a "wasn't you?" notice).
+- **Removed the WebAssembly plugin host** (`kolimi-plugins`, examples,
+  `/plugins/*` + `/api/plugins` routes, build script): unused dead
+  weight — an entire wasmtime tree for a KV toy with no file/user/event
+  hooks. This also drops the wasmtime/cranelift advisory treadmill;
+  `cargo vet` is down to 635 exemptions.
+
+## [0.1.25] - 2026-10-23
+
 ## [0.1.25] - 2026-10-23
 
 ### Fixed

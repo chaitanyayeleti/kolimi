@@ -113,6 +113,42 @@ fn is_image_name(name: &str) -> bool {
     matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp")
 }
 
+fn is_text_name(name: &str) -> bool {
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(
+        extension.as_str(),
+        "txt"
+            | "md"
+            | "markdown"
+            | "log"
+            | "json"
+            | "xml"
+            | "html"
+            | "htm"
+            | "css"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "rs"
+            | "py"
+            | "sh"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "csv"
+            | "ini"
+            | "conf"
+            | "c"
+            | "h"
+            | "go"
+            | "java"
+    )
+}
+
 /// Sanitizes SVG content to prevent XSS via `inner_html`.
 fn sanitize_svg(svg: &str) -> String {
     svg.replace("<script", "<!-script")
@@ -237,6 +273,9 @@ fn icon_svg(name: &str) -> String {
             r#"<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#
         }
         "refresh" => r#"<path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/>"#,
+        "history" => {
+            r#"<path d="M4 5v5h5"/><path d="M4.5 10a8 8 0 1 1-.6 5"/><path d="M12 8v4l3 2"/>"#
+        }
         "link" => {
             r#"<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>"#
         }
@@ -534,6 +573,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let tab = RwSignal::new(Tab::Files);
     let trash = RwSignal::new(Vec::<TrashItem>::new());
     let share_target = RwSignal::new(Option::<Entry>::None);
+    let versions_for = RwSignal::new(Option::<Entry>::None);
     let upload_label = RwSignal::new("Upload".to_string());
     let query = RwSignal::new(String::new());
     let results = RwSignal::new(Vec::<SearchHit>::new());
@@ -552,7 +592,86 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let loading = RwSignal::new(false);
     let context_menu = RwSignal::new(Option::<(Entry, i32, i32)>::None);
     let lightbox = RwSignal::new(Option::<Entry>::None);
+    let lightbox_url = RwSignal::new(String::new());
+    let lightbox_text = RwSignal::new(String::new());
+    // Decrypts the lightbox file client-side when it is encrypted, fetches
+    // text previews, and revokes the previous blob URL whenever the
+    // lightbox changes.
+    Effect::new(move |_| {
+        let old = lightbox_url.get_untracked();
+        if old.starts_with("blob:") {
+            let _ = web_sys::Url::revoke_object_url(&old);
+        }
+        lightbox_url.set(String::new());
+        lightbox_text.set(String::new());
+        let current = lightbox.get();
+        let master = e2ee_master.get();
+        let Some(entry) = current else {
+            return;
+        };
+        let preview_text = is_text_name(&entry.name);
+        if entry.encrypted {
+            let Some(master) = master else {
+                error.set("Unlock encryption first (sidebar → Encryption).".to_string());
+                e2ee_open.set(true);
+                lightbox.set(None);
+                return;
+            };
+            // Previews decrypt in memory: refuse absurd sizes instead of
+            // OOMing the tab (the server preview caps at 20 MiB too).
+            let cap = if preview_text {
+                5 * 1024 * 1024
+            } else {
+                20 * 1024 * 1024
+            };
+            if entry.size > cap {
+                error.set("This file is too large to preview — download it instead.".to_string());
+                lightbox.set(None);
+                return;
+            }
+            let path = entry.path.clone();
+            let shared = entry.shared;
+            spawn_local(async move {
+                let result = if shared {
+                    crate::e2ee::decrypt_shared_file(&master, &path).await
+                } else {
+                    crate::e2ee::decrypt_file(&master, &path).await
+                };
+                match result {
+                    Ok((name, bytes)) => {
+                        if preview_text {
+                            lightbox_text.set(String::from_utf8_lossy(&bytes).into_owned());
+                        } else {
+                            lightbox_url.set(crate::e2ee::blob_url(&name, &bytes));
+                        }
+                    }
+                    Err(e) => {
+                        error.set(e);
+                        lightbox.set(None);
+                    }
+                }
+            });
+        } else if preview_text {
+            let path = entry.path.clone();
+            spawn_local(async move {
+                match api::get_text(&format!("/api/preview?path={}", encode(&path))).await {
+                    Ok(text) => lightbox_text.set(text),
+                    Err(e) => {
+                        error.set(e);
+                        lightbox.set(None);
+                    }
+                }
+            });
+        }
+    });
     let move_drag = RwSignal::new(Option::<Entry>::None);
+    // A reload in the same tab keeps the unlock: the master key lives in
+    // sessionStorage until the tab closes, Lock, or sign out.
+    if e2ee_master.get_untracked().is_none()
+        && let Some(recalled) = crate::e2ee::recalled_master()
+    {
+        e2ee_master.set(Some(recalled));
+    }
     let undo = RwSignal::new(Option::<(String, i64)>::None);
     let uploads = RwSignal::new(Vec::<UploadItem>::new());
     let upload_seq = RwSignal::new(0u32);
@@ -598,8 +717,47 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let nav = RwSignal::new("/".to_string());
     let load = move |next: String| nav.set(next);
     let load_seq = RwSignal::new(0u32);
+    // Mounts received from others, with their permissions: gates Upload /
+    // New folder inside read-only shared folders.
+    let received = RwSignal::new(Vec::<Value>::new());
+    let refresh_received = move || {
+        spawn_local(async move {
+            if let Ok(r) = api::get("/api/shares/received").await
+                && r.status == 200
+            {
+                received.set(r.body["mounts"].as_array().cloned().unwrap_or_default());
+            }
+        });
+    };
+    // Whether the current folder accepts writes: the own tree always does;
+    // a received mount only with "write" permission.
+    let can_write_here = move |current: &str| {
+        let current = current.trim_end_matches('/');
+        if current.is_empty() || current == "/Shared with me" {
+            return current.is_empty();
+        }
+        if let Some(rest) = current.strip_prefix("/Shared with me/") {
+            let mount = format!("/Shared with me/{}", rest.split('/').next().unwrap_or(""));
+            return received.get_untracked().iter().any(|m| {
+                m["mount"].as_str() == Some(mount.as_str()) && m["permission"] == "write"
+            });
+        }
+        true
+    };
+    let refresh_usage = move || {
+        spawn_local(async move {
+            if let Ok(r) = api::get("/api/me/usage").await
+                && r.status == 200
+            {
+                usage.set(r.body);
+            }
+        });
+    };
     Effect::new(move |_| {
         let requested = nav.get();
+        // Navigating leaves any multi-select behind.
+        selected.set(std::collections::HashSet::new());
+        refresh_received();
         loading.set(true);
         let seq = load_seq.get_untracked().wrapping_add(1);
         load_seq.set(seq);
@@ -630,6 +788,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     error.set(String::new());
                 }
                 Ok(r) if r.status == 401 => {
+                    crate::e2ee::forget_master();
                     mark_session_expired();
                     view.set(View::Login);
                 }
@@ -699,8 +858,37 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             }
         }
     });
+    // Undo and quota toasts dismiss themselves too, so they never cover
+    // the screen until clicked.
+    Effect::new(move |_| {
+        if undo.get().is_some() {
+            let clear = Closure::once_into_js(move || {
+                undo.set(None);
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    clear.unchecked_ref::<js_sys::Function>(),
+                    15000,
+                );
+            }
+        }
+    });
+    Effect::new(move |_| {
+        if quota_warn.get().is_some() {
+            let clear = Closure::once_into_js(move || {
+                quota_warn.set(None);
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    clear.unchecked_ref::<js_sys::Function>(),
+                    15000,
+                );
+            }
+        }
+    });
 
     let sign_out = move |_| {
+        crate::e2ee::forget_master();
         spawn_local(async move {
             let _ = api::delete("/api/session").await;
             view.set(View::Login);
@@ -710,74 +898,106 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     let open = move |entry: Entry| {
         if entry.kind == "dir" {
             load(entry.path);
+        } else if is_image_name(&entry.name) || is_text_name(&entry.name) {
+            lightbox.set(Some(entry));
         }
     };
 
     // Uploads one file, tracking it in the tray via its own signals.
+    // Encrypted destinations are encrypted client-side first (chunks +
+    // manifest + wrapped key, like the sync client); plaintext uploads
+    // stream the Blob straight from disk with no WASM-side copy.
     let start_upload = move |file: web_sys::File,
                              dir: String,
                              progress: RwSignal<u8>,
                              status: RwSignal<UploadStatus>| {
-        let url = format!(
-            "/dav{}",
-            encode_path(&format!("{}/{}", dir.trim_end_matches('/'), file.name()))
-        );
+        let target = format!("{}/{}", dir.trim_end_matches('/'), file.name());
+        let url = format!("/dav{}", encode_path(&target));
         let tray = uploads;
         spawn_local(async move {
-            let bytes = match api::read_file(&file).await {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    status.set(UploadStatus::Failed);
-                    error.set(e);
-                    return;
+            // Shared helper: mark this row done/failed and refresh when the
+            // tray has no in-flight uploads left.
+            let finish = move |ok: bool, warning: Option<u8>| {
+                if let Some(percent) = warning {
+                    quota_warn.set(Some(percent));
+                }
+                status.set(if ok {
+                    UploadStatus::Done
+                } else {
+                    UploadStatus::Failed
+                });
+                if !tray
+                    .get_untracked()
+                    .iter()
+                    .any(|item| item.status.get_untracked() == UploadStatus::Uploading)
+                {
+                    let snapshot = tray.get_untracked();
+                    let done = snapshot
+                        .iter()
+                        .filter(|item| item.status.get_untracked() == UploadStatus::Done)
+                        .count();
+                    let failed = snapshot
+                        .iter()
+                        .filter(|item| item.status.get_untracked() == UploadStatus::Failed)
+                        .count();
+                    if failed == 0 {
+                        notice.set(format!(
+                            "Uploaded {done} file{}",
+                            if done == 1 { "" } else { "s" }
+                        ));
+                    } else {
+                        error.set(format!("Uploaded {done}, {failed} failed"));
+                    }
+                    tray.update(|list| {
+                        list.retain(|item| item.status.get_untracked() != UploadStatus::Done);
+                    });
+                    load(path.get_untracked());
+                    refresh_usage();
                 }
             };
-            api::upload(
+            let encrypted = crate::e2ee::file_info(&dir)
+                .await
+                .map(|info| info["encrypted"].as_bool().unwrap_or(false))
+                .unwrap_or(false);
+            if encrypted {
+                let Some(master) = e2ee_master.get_untracked() else {
+                    finish(false, None);
+                    error.set("Unlock encryption first (sidebar → Encryption).".to_string());
+                    e2ee_open.set(true);
+                    return;
+                };
+                let bytes = match api::read_file(&file).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        finish(false, None);
+                        error.set(e);
+                        return;
+                    }
+                };
+                progress.set(50);
+                match crate::e2ee::upload_encrypted(&master, &target, &bytes).await {
+                    Ok(()) => {
+                        progress.set(100);
+                        finish(true, None);
+                    }
+                    Err(e) => {
+                        finish(false, None);
+                        error.set(e);
+                    }
+                }
+                return;
+            }
+            let blob = web_sys::Blob::from(file);
+            api::upload_blob(
                 &url,
-                bytes,
+                &blob,
                 move |pct| progress.set(pct),
                 move |result| {
                     let (ok, warning) = match result {
                         Ok((code, warning)) => (matches!(code, 201 | 204), warning),
                         Err(_) => (false, None),
                     };
-                    if let Some(percent) = warning {
-                        quota_warn.set(Some(percent));
-                    }
-                    status.set(if ok {
-                        UploadStatus::Done
-                    } else {
-                        UploadStatus::Failed
-                    });
-                    if !tray
-                        .get_untracked()
-                        .iter()
-                        .any(|item| item.status.get_untracked() == UploadStatus::Uploading)
-                    {
-                        let snapshot = tray.get_untracked();
-                        let done = snapshot
-                            .iter()
-                            .filter(|item| item.status.get_untracked() == UploadStatus::Done)
-                            .count();
-                        let failed = snapshot
-                            .iter()
-                            .filter(|item| item.status.get_untracked() == UploadStatus::Failed)
-                            .count();
-                        if failed == 0 {
-                            notice.set(format!(
-                                "Uploaded {done} file{}",
-                                if done == 1 { "" } else { "s" }
-                            ));
-                        } else {
-                            error.set(format!("Uploaded {done}, {failed} failed"));
-                        }
-                        // Drop completed rows to release their file handles;
-                        // failures stay so they can be retried.
-                        tray.update(|list| {
-                            list.retain(|item| item.status.get_untracked() != UploadStatus::Done);
-                        });
-                        load(path.get_untracked());
-                    }
+                    finish(ok, warning);
                 },
             );
         });
@@ -890,6 +1110,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         undo.set(Some((entry_name.clone(), id)));
                     }
                     load(current);
+                    refresh_usage();
                 }
                 Ok(r) => error.set(format!("Delete failed (HTTP {})", r.status)),
                 Err(e) => error.set(e),
@@ -898,12 +1119,6 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     };
 
     let rename_entry = move |entry: Entry| {
-        // Encrypted files are opaque blobs on the server: WebDAV MOVE
-        // returns 403. There is no server rename API, so refuse early.
-        if entry.encrypted {
-            error.set("Unlock encryption and use sync client to move encrypted files".to_string());
-            return;
-        }
         let Some(name) = api::prompt("New name", &entry.name) else {
             return;
         };
@@ -911,12 +1126,23 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             return;
         }
         let current = path.get_untracked();
+        let encrypted = entry.encrypted && !entry.shared;
+        let source = entry.path.clone();
         spawn_local(async move {
+            if encrypted {
+                // Metadata-only server move: works on ciphertext.
+                let destination = format!("{}/{}", current.trim_end_matches('/'), name);
+                match crate::e2ee::move_file(&source, &destination).await {
+                    Ok(()) => load(current),
+                    Err(e) => error.set(e),
+                }
+                return;
+            }
             let destination = format!(
                 "/dav{}",
                 encode_path(&format!("{}/{}", current.trim_end_matches('/'), name))
             );
-            let url = format!("/dav{}", encode_path(&entry.path));
+            let url = format!("/dav{}", encode_path(&source));
             match api::dav("MOVE", &url, None, &[("destination", &destination)]).await {
                 Ok(r) if matches!(r.status, 201 | 204) => load(current),
                 Ok(r) => error.set(format!("Rename failed (HTTP {})", r.status)),
@@ -927,23 +1153,29 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
 
     // Moves `entry` into `dest_dir` (drag-to-move onto a folder or crumb).
     let move_into = move |entry: Entry, dest_dir: String| {
-        // Encrypted files are opaque blobs on the server: WebDAV MOVE
-        // returns 403. There is no server move API, so refuse early.
-        if entry.encrypted {
-            error.set("Unlock encryption and use sync client to move encrypted files".to_string());
-            return;
-        }
         let source = entry.path.clone();
         let destination = format!("{}/{}", dest_dir.trim_end_matches('/'), entry.name);
         if destination == source {
             return;
         }
+        let encrypted = entry.encrypted && !entry.shared;
+        let name = entry.name.clone();
         spawn_local(async move {
+            if encrypted {
+                match crate::e2ee::move_file(&source, &destination).await {
+                    Ok(()) => {
+                        notice.set(format!("Moved {name}"));
+                        load(path.get_untracked());
+                    }
+                    Err(e) => error.set(e),
+                }
+                return;
+            }
             let dav_source = format!("/dav{}", encode_path(&source));
             let dav_dest = format!("/dav{}", encode_path(&destination));
             match api::dav("MOVE", &dav_source, None, &[("destination", &dav_dest)]).await {
                 Ok(r) if matches!(r.status, 201 | 204) => {
-                    notice.set(format!("Moved {}", entry.name));
+                    notice.set(format!("Moved {name}"));
                     load(path.get_untracked());
                 }
                 Ok(r) => error.set(format!("Move failed (HTTP {})", r.status)),
@@ -986,6 +1218,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 notice.set(format!("Moved {count} item(s) to trash"));
             }
             load(current);
+            refresh_usage();
         });
     };
 
@@ -994,24 +1227,30 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             return;
         };
         let paths: Vec<String> = selected.get_untracked().into_iter().collect();
-        // Encrypted files are opaque blobs on the server: WebDAV MOVE
-        // returns 403 and there is no server move API, so refuse early.
+        // Encrypted entries go through the metadata-only API move; the
+        // rest keep using WebDAV.
         let encrypted: std::collections::HashSet<String> = entries
             .get_untracked()
             .into_iter()
-            .filter(|e| e.encrypted)
+            .filter(|e| e.encrypted && !e.shared)
             .map(|e| e.path)
             .collect();
-        if paths.iter().any(|p| encrypted.contains(p)) {
-            error.set("Unlock encryption and use sync client to move encrypted files".to_string());
-            return;
-        }
         let count = paths.len();
         spawn_local(async move {
             let mut failed = 0usize;
             for target in &paths {
                 let name = target.rsplit('/').next().unwrap_or("file");
                 let destination = format!("{}/{}", dest.trim_end_matches('/'), name);
+                if encrypted.contains(target) {
+                    match crate::e2ee::move_file(target, &destination).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            failed += 1;
+                            error.set(e);
+                        }
+                    }
+                    continue;
+                }
                 let source = format!("/dav{}", encode_path(target));
                 let dav_dest = format!("/dav{}", encode_path(&destination));
                 match api::dav("MOVE", &source, None, &[("destination", &dav_dest)]).await {
@@ -1062,6 +1301,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 Ok(r) if r.status == 200 => {
                     notice.set(format!("Restored {}", item.name));
                     load_trash();
+                    refresh_usage();
                 }
                 Ok(r) => error.set(r.error().unwrap_or("Restore failed").to_string()),
                 Err(e) => error.set(e),
@@ -1075,7 +1315,10 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         }
         spawn_local(async move {
             match api::delete(&format!("/api/trash/{}", item.id)).await {
-                Ok(r) if r.status == 204 => load_trash(),
+                Ok(r) if r.status == 204 => {
+                    load_trash();
+                    refresh_usage();
+                }
                 Ok(r) => error.set(r.error().unwrap_or("Delete failed").to_string()),
                 Err(e) => error.set(e),
             }
@@ -1091,8 +1334,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             return;
         };
         let path = entry.path.clone();
+        let shared = entry.shared;
         spawn_local(async move {
-            match crate::e2ee::decrypt_file(&master, &path).await {
+            let result = if shared {
+                crate::e2ee::decrypt_shared_file(&master, &path).await
+            } else {
+                crate::e2ee::decrypt_file(&master, &path).await
+            };
+            match result {
                 Ok((name, bytes)) => {
                     crate::e2ee::save_bytes(&name, &bytes);
                     notice.set(format!("Decrypted {name}"));
@@ -1370,15 +1619,17 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                 on:input=move |ev| query.set(event_target_value(&ev))
                             />
                         </form>
-                        <label class="button primary">
-                            <Icon name="upload"/>
-                            <span>{move || upload_label.get()}</span>
-                            <input type="file" class="hidden" multiple on:change=upload/>
-                        </label>
-                        <button on:click=mkdir title="New folder">
-                            <Icon name="folder-plus"/>
-                            <span class="hide-sm">"New folder"</span>
-                        </button>
+                        <Show when=move || can_write_here(&path.get())>
+                            <label class="button primary" title="Upload files">
+                                <Icon name="upload"/>
+                                <span>{move || upload_label.get()}</span>
+                                <input type="file" class="hidden" multiple on:change=upload/>
+                            </label>
+                            <button on:click=mkdir title="New folder">
+                                <Icon name="folder-plus"/>
+                                <span class="hide-sm">"New folder"</span>
+                            </button>
+                        </Show>
                         <div class="segmented" role="group" aria-label="View">
                             <button
                                 class="icon-btn"
@@ -1470,12 +1721,23 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                         {(!is_dir)
                                             .then(|| {
                                                 if encrypted {
+                                                    let dl = Entry {
+                                                        name: name.clone(),
+                                                        path: download_path.clone(),
+                                                        kind: kind.clone(),
+                                                        size: 0,
+                                                        modified_at: 0,
+                                                        shared: false,
+                                                        owner: None,
+                                                        permission: None,
+                                                        encrypted: true,
+                                                    };
                                                     view! {
                                                         <span class="file-actions">
                                                             <button
                                                                 class="icon-btn"
-                                                                title="Unlock encryption to download"
-                                                                disabled
+                                                                title="Download (decrypt)"
+                                                                on:click=move |_| decrypt_entry(dl.clone())
                                                             >
                                                                 <Icon name="download"/>
                                                             </button>
@@ -1561,8 +1823,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                             key=|entry| entry.path.clone()
                                             children=move |entry| {
                                                 let is_dir = entry.kind == "dir";
-                                                let is_img = !is_dir && is_image_name(&entry.name);
+                                                let is_img = !is_dir
+                                                    && !entry.encrypted
+                                                    && is_image_name(&entry.name);
                                                 let shared = entry.shared;
+                                                // Rename/Delete need ownership or a "write"
+                                                // share; Share stays owner-only.
+                                                let can_edit = !shared
+                                                    || entry.permission.as_deref() == Some("write");
                                                 let name = entry.name.clone();
                                                 let kind = entry.kind.clone();
                                                 let meta = if is_dir {
@@ -1583,6 +1851,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let download = entry.path.clone();
                                                 let encrypted = entry.encrypted;
                                                 let decrypt_copy = entry.clone();
+                                                let download_copy = entry.clone();
                                                 let ctx_copy = entry.clone();
                                                 let lightbox_copy = entry.clone();
                                                 let drag_copy = entry.clone();
@@ -1686,8 +1955,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                                         view! {
                                                                             <button
                                                                                 class="icon-btn"
-                                                                                title="Unlock encryption to download"
-                                                                                disabled
+                                                                                title="Download (decrypt)"
+                                                                                on:click=move |_| decrypt_entry(download_copy.clone())
                                                                             >
                                                                                 <Icon name="download"/>
                                                                             </button>
@@ -1707,16 +1976,21 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                                             .into_any()
                                                                     }
                                                                 })}
-                                                            {(!shared)
+                                                            {can_edit
                                                                 .then(|| {
                                                                     view! {
-                                                                        <button
-                                                                            class="icon-btn"
-                                                                            title="Share"
-                                                                            on:click=move |_| share_entry(share_copy.clone())
-                                                                        >
-                                                                            <Icon name="share"/>
-                                                                        </button>
+                                                                        {(!shared)
+                                                                            .then(|| {
+                                                                                view! {
+                                                                                    <button
+                                                                                        class="icon-btn"
+                                                                                        title="Share"
+                                                                                        on:click=move |_| share_entry(share_copy.clone())
+                                                                                    >
+                                                                                        <Icon name="share"/>
+                                                                                    </button>
+                                                                                }
+                                                                            })}
                                                                         <button
                                                                             class="icon-btn"
                                                                             title="Rename"
@@ -1749,8 +2023,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                             key=|entry| entry.path.clone()
                                             children=move |entry| {
                                                 let is_dir = entry.kind == "dir";
-                                                let is_img = !is_dir && is_image_name(&entry.name);
+                                                let is_img = !is_dir
+                                                    && !entry.encrypted
+                                                    && is_image_name(&entry.name);
                                                 let shared = entry.shared;
+                                                // Rename/Delete need ownership or a "write"
+                                                // share; Share stays owner-only.
+                                                let can_edit = !shared
+                                                    || entry.permission.as_deref() == Some("write");
                                                 let owner = entry.owner.clone().unwrap_or_default();
                                                 let permission = entry
                                                     .permission
@@ -1776,6 +2056,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let download = entry.path.clone();
                                                 let encrypted = entry.encrypted;
                                                 let decrypt_copy = entry.clone();
+                                                let download_copy = entry.clone();
                                                 let ctx_copy = entry.clone();
                                                 let drag_copy = entry.clone();
                                                 let drop_copy = entry.clone();
@@ -1892,8 +2173,8 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                                         view! {
                                                                             <button
                                                                                 class="icon-btn"
-                                                                                title="Unlock encryption to download"
-                                                                                disabled
+                                                                                title="Download (decrypt)"
+                                                                                on:click=move |_| decrypt_entry(download_copy.clone())
                                                                             >
                                                                                 <Icon name="download"/>
                                                                             </button>
@@ -1913,16 +2194,21 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                                             .into_any()
                                                                     }
                                                                 })}
-                                                            {(!shared)
+                                                            {can_edit
                                                                 .then(|| {
                                                                     view! {
-                                                                        <button
-                                                                            class="icon-btn"
-                                                                            title="Share"
-                                                                            on:click=move |_| share_entry(share_copy.clone())
-                                                                        >
-                                                                            <Icon name="share"/>
-                                                                        </button>
+                                                                        {(!shared)
+                                                                            .then(|| {
+                                                                                view! {
+                                                                                    <button
+                                                                                        class="icon-btn"
+                                                                                        title="Share"
+                                                                                        on:click=move |_| share_entry(share_copy.clone())
+                                                                                    >
+                                                                                        <Icon name="share"/>
+                                                                                    </button>
+                                                                                }
+                                                                            })}
                                                                         <button
                                                                             class="icon-btn"
                                                                             title="Rename"
@@ -2187,6 +2473,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     .map(|(entry, x, y)| {
                         let is_dir = entry.kind == "dir";
                         let shared = entry.shared;
+                        // Rename/Delete need ownership or a "write" share.
+                        let ctx_edit = !shared
+                            || entry.permission.as_deref() == Some("write");
                         let encrypted = entry.encrypted;
                         let open_e = entry.clone();
                         let download = entry.path.clone();
@@ -2194,6 +2483,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         let share_e = entry.clone();
                         let rename_e = entry.clone();
                         let delete_e = entry.clone();
+                        let versions_e = entry.clone();
                         view! {
                             <div class="ctx-scrim" on:click=move |_| context_menu.set(None)></div>
                             <div class="ctx-menu" style=format!("left:{}px; top:{}px;", x.max(0), y.max(0))>
@@ -2218,8 +2508,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                             view! {
                                                 <button
                                                     class="ctx-item"
-                                                    title="Unlock encryption to download"
-                                                    disabled
+                                                    title="Download (decrypt)"
+                                                    on:click=move |_| {
+                                                        context_menu.set(None);
+                                                        decrypt_entry(entry.clone());
+                                                    }
                                                 >
                                                     <Icon name="download"/>
                                                     "Download"
@@ -2254,19 +2547,24 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                     <Icon name="link"/>
                                     "Copy path"
                                 </button>
-                                {(!shared)
+                                {ctx_edit
                                     .then(|| {
                                         view! {
-                                            <button
-                                                class="ctx-item"
-                                                on:click=move |_| {
-                                                    context_menu.set(None);
-                                                    share_entry(share_e.clone());
-                                                }
-                                            >
-                                                <Icon name="share"/>
-                                                "Share"
-                                            </button>
+                                            {(!shared)
+                                                .then(|| {
+                                                    view! {
+                                                        <button
+                                                            class="ctx-item"
+                                                            on:click=move |_| {
+                                                                context_menu.set(None);
+                                                                share_entry(share_e.clone());
+                                                            }
+                                                        >
+                                                            <Icon name="share"/>
+                                                            "Share"
+                                                        </button>
+                                                    }
+                                                })}
                                             <button
                                                 class="ctx-item"
                                                 on:click=move |_| {
@@ -2287,6 +2585,21 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 <Icon name="trash"/>
                                                 "Move to trash"
                                             </button>
+                                            {(!is_dir && !shared)
+                                                .then(|| {
+                                                    view! {
+                                                        <button
+                                                            class="ctx-item"
+                                                            on:click=move |_| {
+                                                                context_menu.set(None);
+                                                                versions_for.set(Some(versions_e.clone()));
+                                                            }
+                                                        >
+                                                            <Icon name="history"/>
+                                                            "Versions"
+                                                        </button>
+                                                    }
+                                                })}
                                         }
                                     })}
                             </div>
@@ -2299,24 +2612,82 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     .get()
                     .map(|entry| {
                         let name = entry.name.clone();
-                        let src = format!("/api/preview?path={}&size=1024", encode(&entry.path));
+                        let name2 = name.clone();
+                        let name3 = name.clone();
+                        let encrypted = entry.encrypted;
+                        let preview_text = is_text_name(&entry.name);
+                        let src = if encrypted {
+                            lightbox_url.get()
+                        } else {
+                            format!("/api/preview?path={}&size=1024", encode(&entry.path))
+                        };
                         let download = entry.path.clone();
+                        let dl_entry = entry.clone();
                         view! {
                             <div class="lightbox" on:click=move |_| lightbox.set(None)>
-                                <img src=src alt=name.clone()/>
+                                {preview_text
+                                    .then(|| {
+                                        view! {
+                                            <Show
+                                                when=move || !lightbox_text.get().is_empty()
+                                                fallback=|| view! { <p class="muted">"Loading preview…"</p> }
+                                            >
+                                                <pre class="lightbox-text">{move || lightbox_text.get()}</pre>
+                                            </Show>
+                                        }
+                                    })}
+                                {(!preview_text)
+                                    .then(|| {
+                                        view! {
+                                            {encrypted
+                                                .then(|| {
+                                                    view! {
+                                                        <Show
+                                                            when=move || !lightbox_url.get().is_empty()
+                                                            fallback=|| view! { <p class="muted">"Decrypting…"</p> }
+                                                        >
+                                                            <img src=move || lightbox_url.get() alt=name2.clone()/>
+                                                        </Show>
+                                                    }
+                                                })}
+                                            {(!encrypted)
+                                                .then(|| {
+                                                    view! { <img src=src alt=name3.clone()/> }
+                                                })}
+                                        }
+                                    })}
                                 <div
                                     class="lightbox-bar"
                                     on:click=move |ev: ev::MouseEvent| ev.stop_propagation()
                                 >
                                     <span class="lightbox-name">{name.clone()}</span>
-                                    <a
-                                        class="icon-btn"
-                                        title="Download"
-                                        href=format!("/dav{}", encode_path(&download))
-                                        download
-                                    >
-                                        <Icon name="download"/>
-                                    </a>
+                                    {if encrypted {
+                                        view! {
+                                            <button
+                                                class="icon-btn"
+                                                title="Download (decrypt)"
+                                                on:click=move |_| {
+                                                    lightbox.set(None);
+                                                    decrypt_entry(dl_entry.clone());
+                                                }
+                                            >
+                                                <Icon name="download"/>
+                                            </button>
+                                        }
+                                            .into_any()
+                                    } else {
+                                        view! {
+                                            <a
+                                                class="icon-btn"
+                                                title="Download"
+                                                href=format!("/dav{}", encode_path(&download))
+                                                download
+                                            >
+                                                <Icon name="download"/>
+                                            </a>
+                                        }
+                                            .into_any()
+                                    }}
                                     <button
                                         class="icon-btn"
                                         aria-label="Close"
@@ -2341,6 +2712,22 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                             encrypted=entry.encrypted
                             master=e2ee_master.get()
                             on_close=Callback::new(move |_| share_target.set(None))
+                        />
+                    }
+                })
+        }}
+
+            {move || {
+                versions_for
+                .get()
+                .map(|entry| {
+                    let current = path.get();
+                    view! {
+                        <VersionsDialog
+                            path=entry.path.clone()
+                            name=entry.name.clone()
+                            on_close=Callback::new(move |_| versions_for.set(None))
+                            on_restored=Callback::new(move |_| load(current.clone()))
                         />
                     }
                 })
@@ -2641,6 +3028,51 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let devices = RwSignal::new(Vec::<Value>::new());
     let device_name = RwSignal::new(String::new());
     let enrolling = RwSignal::new(Option::<(i64, [u8; 32], String)>::None);
+    // An in-progress enrollment survives a reload: the pending id + device
+    // secret live in sessionStorage until the enrollment finishes.
+    const PENDING_KEY: &str = "kolimi.enrollment.pending";
+    fn store_pending(id: i64, secret: &[u8; 32], code: &str) {
+        if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
+            let value = serde_json::json!({
+                "id": id,
+                "secret": URL_SAFE_NO_PAD.encode(secret),
+                "code": code,
+            })
+            .to_string();
+            let _ = storage.set_item(PENDING_KEY, &value);
+        }
+    }
+    fn clear_pending() {
+        if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
+            let _ = storage.remove_item(PENDING_KEY);
+        }
+    }
+    Effect::new(move |_| {
+        if enrolling.get_untracked().is_some() {
+            return;
+        }
+        let restored: Option<(i64, [u8; 32], String)> = web_sys::window()
+            .and_then(|w| w.session_storage().ok().flatten())
+            .and_then(|storage| storage.get_item(PENDING_KEY).ok().flatten())
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+            .and_then(|value| {
+                let id = value["id"].as_i64()?;
+                let secret = URL_SAFE_NO_PAD
+                    .decode(value["secret"].as_str()?)
+                    .ok()?
+                    .try_into()
+                    .ok()?;
+                let code = value["code"].as_str()?.to_string();
+                Some((id, secret, code))
+            });
+        if let Some(pending) = restored {
+            enrolling.set(Some(pending));
+            notice.set(
+                "Resumed your pending enrollment — approve it on another device, then unlock."
+                    .to_string(),
+            );
+        }
+    });
     let use_recovery = RwSignal::new(false);
     let has_keyring = RwSignal::new(Option::<bool>::None);
     let setup_pass = RwSignal::new(String::new());
@@ -2687,6 +3119,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
             };
             match result {
                 Ok(key) => {
+                    crate::e2ee::remember_master(&key);
                     master.set(Some(key));
                     busy.set(false);
                 }
@@ -2713,7 +3146,10 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
             match crate::e2ee::setup(&passphrase).await {
                 Ok(code) => {
                     match crate::e2ee::unlock(&passphrase).await {
-                        Ok(key) => master.set(Some(key)),
+                        Ok(key) => {
+                            crate::e2ee::remember_master(&key);
+                            master.set(Some(key));
+                        }
                         Err(e) => error.set(e),
                     }
                     has_keyring.set(Some(true));
@@ -2728,16 +3164,12 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
         });
     };
 
-    let approve = move |id: i64, key: String, code: String| {
-        if code.trim().is_empty() {
-            error.set("Type the code shown on the new device".to_string());
-            return;
-        }
+    let approve = move |id: i64, key: String, code: Option<String>| {
         let Some(unlocked) = master.get_untracked() else {
             return;
         };
         spawn_local(async move {
-            match crate::e2ee::approve_enrollment(id, &key, &code, &unlocked).await {
+            match crate::e2ee::approve_enrollment(id, &key, code.as_deref(), &unlocked).await {
                 Ok(()) => {
                     error.set(String::new());
                     notice.set("Device approved".to_string());
@@ -2774,6 +3206,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                     notice.set(format!(
                         "Compare code {code} on the approving device, then approve it there."
                     ));
+                    store_pending(id, &secret, &code);
                     enrolling.set(Some((id, secret, code)));
                 }
                 Err(e) => error.set(e),
@@ -2788,8 +3221,10 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
         spawn_local(async move {
             match crate::e2ee::poll_enrollment(id, &secret).await {
                 Ok(Some(key)) => {
+                    crate::e2ee::remember_master(&key);
                     master.set(Some(key));
                     enrolling.set(None);
+                    clear_pending();
                     notice.set("This browser is now enrolled".to_string());
                 }
                 Ok(None) => notice
@@ -2813,7 +3248,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                 </p>
                 <Show when=move || recovery.get().is_some()>
                     <p class="notice">
-                        "Save this recovery code now — it is shown once and is the only other way to unlock."
+                        "Write down these 24 words now — they are shown once and are the only other way to unlock."
                     </p>
                     <code class="recovery">{move || recovery.get().unwrap_or_default()}</code>
                     <div class="row-actions">
@@ -2859,7 +3294,11 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                     <Show when=move || has_keyring.get() != Some(false)>
                         <label>
                             {move || {
-                                if use_recovery.get() { "Recovery code" } else { "Passphrase" }
+                                if use_recovery.get() {
+                                    "Recovery phrase (24 words)"
+                                } else {
+                                    "Passphrase"
+                                }
                             }}
                             <input
                                 type="password"
@@ -2884,7 +3323,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                                     if use_recovery.get() {
                                         "Use passphrase"
                                     } else {
-                                        "Use recovery code"
+                                        "Use recovery phrase"
                                     }
                                 }}
                             </button>
@@ -2897,6 +3336,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                         <button
                             class="ghost"
                             on:click=move |_| {
+                                crate::e2ee::forget_master();
                                 master.set(None);
                                 notice.set(String::new());
                             }
@@ -2906,6 +3346,9 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                     </div>
 
                     <h3>"Pending enrollments"</h3>
+                    <p class="muted">
+                        "One click approves a new device. If you don't fully trust this server, verify the code first."
+                    </p>
                     <ul class="shares">
                         <For
                             each=move || enrollments.get()
@@ -2923,28 +3366,48 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                                 let code = crate::e2ee::device_code(&key, id);
                                 let fingerprint = crate::e2ee::key_fingerprint(&key);
                                 let entered = RwSignal::new(String::new());
+                                let verify = RwSignal::new(false);
                                 let k = key.clone();
                                 view! {
                                     <li class="file">
                                         <span class="file-body">
                                             <span class="file-name">{name}</span>
-                                            <span class="file-meta">
-                                                <span class="muted">"enrollment " {id}</span>
-                                                <span class="muted">"code " {code}</span>
-                                                <span class="muted">"key " {fingerprint}</span>
-                                            </span>
-                                            <input
-                                                type="text"
-                                                autocomplete="off"
-                                                placeholder="Type the code shown on the new device"
-                                                prop:value=move || entered.get()
-                                                on:input=move |ev| entered.set(event_target_value(&ev))
-                                            />
+                                            <Show when=move || verify.get()>
+                                                <span class="file-meta">
+                                                    <span class="muted">"code " {code.clone()}</span>
+                                                    <span class="muted">"key " {fingerprint.clone()}</span>
+                                                </span>
+                                                <input
+                                                    type="text"
+                                                    autocomplete="off"
+                                                    placeholder="Type the code shown on the new device"
+                                                    prop:value=move || entered.get()
+                                                    on:input=move |ev| entered.set(event_target_value(&ev))
+                                                />
+                                            </Show>
                                         </span>
                                         <span class="file-actions">
-                                            <button on:click=move |_| {
-                                                approve(id, k.clone(), entered.get_untracked())
-                                            }>"Approve"</button>
+                                            <button
+                                                class="ghost"
+                                                title="Compare the code shown on the new device first"
+                                                on:click=move |_| verify.set(!verify.get_untracked())
+                                            >
+                                                "Verify code"
+                                            </button>
+                                            <button
+                                                class="primary"
+                                                on:click=move |_| {
+                                                    let typed = entered.get_untracked();
+                                                    let check = if verify.get_untracked() && !typed.trim().is_empty() {
+                                                        Some(typed)
+                                                    } else {
+                                                        None
+                                                    };
+                                                    approve(id, k.clone(), check)
+                                                }
+                                            >
+                                                "Approve"
+                                            </button>
                                         </span>
                                     </li>
                                 }
@@ -2984,8 +3447,8 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
 
                 <h3>"Add this browser as a device"</h3>
                 <p class="muted">
-                    "Creates an enrollment; approve it on another unlocked device, "
-                    "then unlock here without retyping your passphrase."
+                    "Name this browser, start the enrollment, then approve it on another unlocked device — "
+                    "no passphrase retyping needed."
                 </p>
                 <label>
                     "Device name"
@@ -3009,14 +3472,20 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                             .map(|(id, _, code)| {
                                 view! {
                                     <div class="enroll-qr">
-                                        <div
-                                            class="qr"
-                                            inner_html=crate::e2ee::qr_svg(
-                                                &format!("kolimi-enroll:{id}:{code}"),
-                                            )
-                                        ></div>
-                                        <p class="muted">"Enrollment " {id}</p>
-                                        <p class="muted">"Code " {code}</p>
+                                        <p class="muted">
+                                            "Waiting for approval on another device — then press “Unlock now”."
+                                        </p>
+                                        <details>
+                                            <summary class="muted">"Approval code (advanced)"</summary>
+                                            <div
+                                                class="qr"
+                                                inner_html=crate::e2ee::qr_svg(
+                                                    &format!("kolimi-enroll:{id}:{code}"),
+                                                )
+                                            ></div>
+                                            <p class="muted">"Enrollment " {id}</p>
+                                            <p class="muted">"Code " {code}</p>
+                                        </details>
                                     </div>
                                 }
                             })
@@ -3149,10 +3618,10 @@ fn PasskeysDialog(on_close: Callback<()>) -> impl IntoView {
 
     let remove = move |id: i64| {
         spawn_local(async move {
-            if let Ok(r) = api::delete(&format!("/api/passkeys/{id}")).await
-                && r.status == 204
-            {
-                load.run(());
+            match api::delete(&format!("/api/passkeys/{id}")).await {
+                Ok(r) if r.status == 204 => load.run(()),
+                Ok(r) => error.set(r.error().unwrap_or("Could not remove passkey").to_string()),
+                Err(e) => error.set(e),
             }
         });
     };
@@ -3285,6 +3754,116 @@ fn PasskeysDialog(on_close: Callback<()>) -> impl IntoView {
 }
 
 #[component]
+fn VersionsDialog(
+    path: String,
+    name: String,
+    on_close: Callback<()>,
+    on_restored: Callback<()>,
+) -> impl IntoView {
+    let versions = RwSignal::new(Vec::<Value>::new());
+    let error = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+
+    let load = {
+        let path = path.clone();
+        Callback::new(move |_: ()| {
+            let path = path.clone();
+            spawn_local(async move {
+                match api::get(&format!("/api/versions?path={}", encode(&path))).await {
+                    Ok(r) if r.status == 200 => {
+                        versions.set(r.body.as_array().cloned().unwrap_or_default());
+                    }
+                    Ok(r) => error.set(r.error().unwrap_or("Could not load versions").to_string()),
+                    Err(e) => error.set(e),
+                }
+            });
+        })
+    };
+    Effect::new(move |_| load.run(()));
+
+    let restore = {
+        let path = path.clone();
+        Callback::new(move |id: i64| {
+            let path = path.clone();
+            busy.set(true);
+            spawn_local(async move {
+                match api::send_json(
+                    "POST",
+                    &format!("/api/versions/{id}/restore"),
+                    &json!({ "path": path }),
+                )
+                .await
+                {
+                    Ok(r) if r.status == 200 => {
+                        busy.set(false);
+                        load.run(());
+                        on_restored.run(());
+                    }
+                    Ok(r) => {
+                        busy.set(false);
+                        error.set(r.error().unwrap_or("Restore failed").to_string());
+                    }
+                    Err(e) => {
+                        busy.set(false);
+                        error.set(e);
+                    }
+                }
+            });
+        })
+    };
+
+    let close = move |_| on_close.run(());
+
+    view! {
+        <div class="backdrop">
+            <div class="card modal">
+                <div class="modal-head">
+                    <h2>{format!("Versions of “{name}”")}</h2>
+                    <button class="icon-btn" aria-label="Close" on:click=close>
+                        <Icon name="x"/>
+                    </button>
+                </div>
+                <p class="muted">"Restoring a version makes it current; the replaced content is kept as a version too."</p>
+                <ul class="shares">
+                    <For
+                        each=move || versions.get()
+                        key=|v| v["id"].as_i64().unwrap_or(0)
+                        children=move |v| {
+                            let id = v["id"].as_i64().unwrap_or(0);
+                            let size = v["size"].as_u64().unwrap_or(0);
+                            let when = v["created_at"].as_i64().unwrap_or(0);
+                            view! {
+                                <li class="row">
+                                    <span class="name">
+                                        <span class="lead-icon">
+                                            <Icon name="history"/>
+                                        </span>
+                                        {format!("{} · {}", human_size(size), relative_time(when))}
+                                    </span>
+                                    <span class="row-actions">
+                                        <button
+                                            class="ghost"
+                                            disabled=move || busy.get()
+                                            on:click=move |_| restore.run(id)
+                                        >
+                                            "Restore"
+                                        </button>
+                                    </span>
+                                </li>
+                            }
+                        }
+                    />
+                    <Show when=move || versions.get().is_empty()>
+                        <li class="row muted">"No older versions."</li>
+                    </Show>
+                </ul>
+                <p class="error">{move || error.get()}</p>
+            </div>
+        </div>
+    }
+}
+
+#[component]
 fn ShareDialog(
     path: String,
     name: String,
@@ -3321,6 +3900,8 @@ fn ShareDialog(
         })
     };
     Effect::new(move |_| load.run(()));
+
+    let link_frags = RwSignal::new(std::collections::HashMap::<i64, String>::new());
 
     let create = {
         let path = path.clone();
@@ -3363,9 +3944,60 @@ fn ShareDialog(
                                     .collect::<Vec<_>>()
                                     .join(",");
                                 url = format!("{url}#k={key}&l={lengths}");
+                                if let Some(id) = r.body["id"].as_i64() {
+                                    let frag = url
+                                        .split_once('#')
+                                        .map(|(_, f)| format!("#{f}"))
+                                        .unwrap_or_default();
+                                    link_frags.update(|map| {
+                                        map.insert(id, frag);
+                                    });
+                                }
+                            }
+                            if encrypted && master.is_none() {
+                                error.set("Link created, but the file key was not attached (encryption is locked). Unlock encryption and create a new link to share the file.".to_string());
                             }
                             created
                                 .set(Some((url, r.body["password"].as_str().map(str::to_string))));
+                        } else if encrypted {
+                            // User/group shares of encrypted files: wrap the
+                            // file key(s) for every recipient so they can
+                            // actually decrypt. Without this the share is an
+                            // ACL without keys.
+                            if let Some(master) = &master {
+                                let recipients: Vec<String> = if r.body["kind"] == "group" {
+                                    match crate::e2ee::group_members(
+                                        r.body["recipient"].as_str().unwrap_or_default(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(members) => members,
+                                        Err(e) => {
+                                            error.set(e);
+                                            Vec::new()
+                                        }
+                                    }
+                                } else {
+                                    r.body["recipient"]
+                                        .as_str()
+                                        .map(|u| vec![u.to_string()])
+                                        .unwrap_or_default()
+                                };
+                                let mut skipped = Vec::new();
+                                for username in &recipients {
+                                    if crate::e2ee::share_encrypted_with(master, &path, username)
+                                        .await
+                                        .is_err()
+                                    {
+                                        skipped.push(username.clone());
+                                    }
+                                }
+                                if !skipped.is_empty() {
+                                    error.set(format!("Shared, but {} recipient(s) have not set up encryption yet ({}). They can read only plaintext files.", skipped.len(), skipped.join(", ")));
+                                }
+                            } else {
+                                error.set("Shared, but the file key was not wrapped (encryption is locked). Unlock encryption, then revoke and re-share to grant file access.".to_string());
+                            }
                         }
                         load.run(());
                     }
@@ -3378,10 +4010,10 @@ fn ShareDialog(
 
     let revoke = move |id: i64| {
         spawn_local(async move {
-            if let Ok(r) = api::delete(&format!("/api/shares/{id}")).await
-                && r.status == 204
-            {
-                load.run(());
+            match api::delete(&format!("/api/shares/{id}")).await {
+                Ok(r) if r.status == 204 => load.run(()),
+                Ok(r) => error.set(r.error().unwrap_or("Could not revoke share").to_string()),
+                Err(e) => error.set(e),
             }
         });
     };
@@ -3420,13 +4052,22 @@ fn ShareDialog(
                                     <span class="row-actions">
                                         {url
                                             .map(|url| {
+                                                // Links created this session carry
+                                                // their `#k=` fragment here (the
+                                                // server never sees it).
+                                                let frag = link_frags
+                                                    .get()
+                                                    .get(&id)
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let full = format!("{}{}", url, frag);
                                                 view! {
                                                     <button
                                                         class="ghost"
                                                         on:click=move |_| {
-                                                            let url = url.clone();
+                                                            let full = full.clone();
                                                             spawn_local(async move {
-                                                                api::copy_to_clipboard(&full_url(&url)).await;
+                                                                api::copy_to_clipboard(&full_url(&full)).await;
                                                             });
                                                         }
                                                     >

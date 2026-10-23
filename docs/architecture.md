@@ -15,8 +15,8 @@ A few facts that make this concrete:
   key material. That boundary is enforced by the compiler.
 - `kolimi-auth` does not depend on the database crate: the server hands
   it rows. Auth logic cannot reach into your file tree.
-- Third-party code never links into the binary. Plugins are WebAssembly
-  components run by `kolimi-plugins` in a wasmtime sandbox whose
+- Third-party code never links into the binary. (The former WebAssembly
+  plugin host was removed in 0.1.26 as unused.) Previews decode in a sandbox whose
   capabilities are the import list.
 - The desktop client is a **separate workspace** (`apps/kolimi-desktop`), so
   the Tauri/webkit dependency tree never touches the server build.
@@ -34,7 +34,7 @@ A few facts that make this concrete:
 | `kolimi-webdav` | WebDAV + CalDAV/CardDAV protocol surfaces | `vfs` |
 | `kolimi-search` | tantivy full-text index | — |
 | `kolimi-preview` | Sandboxed preview decoder (re-exec worker) | — |
-| `kolimi-plugins` | wasmtime component host for plugins | — |
+
 | `kolimi-server` | Composition root: HTTP routes, AppState, janitor, metrics, binary | everything above |
 | `kolimi-ui` | Leptos web UI, compiled to wasm and embedded as assets | (wasm only) |
 | `kolimi-sync` | Desktop sync core + CLI | `chunk`, `crypto` |
@@ -65,11 +65,11 @@ which lives in the domain crates.
   further, the split is mechanical: extract `api_*` groups into a
   `kolimi-api` crate that the binary wires up.
 - **`kolimi-db` holds many tables** (users, nodes, shares, DAV, search
-  state, audit, E2EE keys, scrub cursor, plugin KV is file-based).
+  state, audit, E2EE keys, and the scrub cursor are file-based).
   Single-file SQLite is the deployment story; the repositories are
   already separated by module and could move behind traits if a
   Postgres backend lands (pending work).
-- **Feature flags** are currently compile-time-free: plugins, search,
+- **Feature flags** are currently compile-time-free: search,
   and previews are always built in. If binary size or attack surface
   becomes a concern, `--features` gates are straightforward (the
   crates are already optional in principle).
@@ -78,7 +78,7 @@ which lives in the domain crates.
 
 ```
                  ┌──────────────────────── kolimi-server ───────────────────────┐
- client ──TLS──▶ │ axum router: /dav /api /public /app /plugins /metrics        │
+ client ──TLS──▶ │ axum router: /dav /api /public /app /metrics                 │
                  │   auth middleware ─▶ kolimi-auth        (sessions/passkeys)  │
                  │   route handlers ─▶ kolimi-vfs::authz ─▶ permission engine   │
                  │                        │                                     │
@@ -87,7 +87,7 @@ which lives in the domain crates.
                  │   background: janitor (retention, GC, BLAKE3 scrub)          │
                  │   background: search indexer (change feed → tantivy)         │
                  │   sandbox: preview worker (re-exec, landlock+seccomp+rlimits)│
-                 │   sandbox: plugin host (wasmtime, fuel+memory caps)          │
+                 │   sandbox: preview worker (landlock/seccomp/rlimits)         │
                  └──────────────────────────────────────────────────────────────┘
 ```
 

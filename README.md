@@ -37,9 +37,7 @@ process.
 - **Append-only audit log.** Every security-relevant action is
   hash-chained; `kolimi-server audit verify` detects tampering.
 - **Nothing unsandboxed.** Previews decode in a re-executed
-  landlock+seccomp+rlimits worker; plugins are WebAssembly components
-  under a wasmtime fuel/memory sandbox with a capability-only import
-  list.
+  landlock+seccomp+rlimits worker.
 - **Observable and gated.** Prometheus `/metrics`, incremental BLAKE3
   scrubbing, CI performance gates (10k-file delta < 5 s, binary < 50 MB).
 
@@ -61,7 +59,6 @@ table and the next milestone (MLS group messaging, RFC 9420).
 | `crates/kolimi-webdav` | WebDAV + CalDAV/CardDAV surfaces and REPORTs |
 | `crates/kolimi-search` | tantivy full-text index fed from the change feed, per-user isolation |
 | `crates/kolimi-preview` | Preview decoding in a landlock+seccomp+rlimits worker process |
-| `crates/kolimi-plugins` | wasmtime component host for sandboxed WebAssembly plugins |
 | `crates/kolimi-sync` | Desktop sync core + `kolimi-sync` CLI (delta sync, E2EE, sharing) |
 | `crates/kolimi-ffi` | UniFFI bindings for the mobile shells (Kotlin/Swift) |
 | `crates/kolimi-ui` | Leptos (WASM) web UI, embedded into the server binary |
@@ -315,26 +312,12 @@ TOTP (RFC 6238, 6 digits, 30 s) plus ten one-time recovery codes:
 All events (`totp.enable`, `totp.disable`, `auth.totp_required`,
 `totp.admin_disable`) land in the audit log.
 
-## Plugins (sandboxed WASM)
+## Plugins
 
-Drop a WebAssembly component and a metadata file into
-`<data-dir>/plugins/`:
-
-```sh
-cp hello_plugin.wasm /var/lib/kolimi/plugins/hello.wasm
-echo '{"name":"hello","version":"0.1.0","enabled":true}' \
-    > /var/lib/kolimi/plugins/hello.json
-```
-
-The plugin serves `/plugins/hello/…` for signed-in users and shows up in
-`GET /api/plugins`. The sandbox is the import list: plugins get logging,
-a plugin-private key-value store, and the clock — nothing else. WASI is
-linked with an empty context (no directories, no sockets, no env), each
-call has a fuel budget and a 16 MiB memory cap, and a trapping plugin is
-contained and audited (`plugin.error`). Build plugins with
-`cargo-component` against `crates/kolimi-plugins/wit/plugin.wit`; see
-`examples/` for a working plugin and `scripts/build-plugins.sh` for the
-test fixtures.
+Removed in 0.1.26: the WebAssembly plugin host was unused dead weight
+(an entire wasmtime tree for a key-value toy with no file/user/event
+hooks). The `/plugins/*` and `/api/plugins` routes are gone. If a real
+plugin story returns, it will be designed against actual hooks first.
 
 ## Metrics and performance gates
 
