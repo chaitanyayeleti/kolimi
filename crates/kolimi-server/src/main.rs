@@ -481,7 +481,9 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
             match kolimi_search::SearchIndex::open(&data.join("search")) {
                 Ok(search) => {
                     if let Err(error) = search.delete_user(user.id).and_then(|()| search.commit()) {
-                        eprintln!("warning: could not remove search data for {username}: {error}");
+                        eprintln!(
+                            "warning: could not remove search data for {username}: {error} (the server holds the index lock while running; leftovers are pruned automatically on the next server start)"
+                        );
                     }
                 }
                 Err(error) => {

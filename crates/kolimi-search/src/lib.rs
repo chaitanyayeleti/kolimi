@@ -5,6 +5,7 @@
 //! change feed by a background indexer, which makes it crash-safe: a
 //! restart replays from the last committed sequence.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -198,6 +199,42 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Every user id that has at least one document in the index.
+    pub fn indexed_user_ids(&self) -> Result<HashSet<i64>, SearchError> {
+        self.reader.reload()?;
+        let searcher = self.reader.searcher();
+        let mut out = HashSet::new();
+        for segment in searcher.segment_readers() {
+            let inverted = segment.inverted_index(self.fields.user)?;
+            let mut stream = inverted.terms().stream()?;
+            while stream.advance() {
+                if let Ok(text) = std::str::from_utf8(stream.key())
+                    && let Ok(id) = text.parse::<i64>()
+                {
+                    out.insert(id);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Deletes documents of users that no longer exist (e.g. an account
+    /// deleted via the CLI while the server held the index lock, so the
+    /// CLI's own cleanup could not run). Also closes the user-id-reuse
+    /// hole: a deleted row id recycled by SQLite can never surface the
+    /// previous owner's indexed filenames. Returns the pruned user count.
+    /// Call [`commit`](Self::commit) afterwards to make it visible.
+    pub fn prune_missing_users(&self, live_ids: &HashSet<i64>) -> Result<usize, SearchError> {
+        let mut pruned = 0;
+        for id in self.indexed_user_ids()? {
+            if !live_ids.contains(&id) {
+                self.delete_user(id)?;
+                pruned += 1;
+            }
+        }
+        Ok(pruned)
+    }
+
     /// Commits pending changes and makes them visible to searches.
     pub fn commit(&self) -> Result<(), SearchError> {
         {
@@ -382,6 +419,27 @@ mod tests {
         let hits = index.search(2, "tantivy", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(index.search(3, "tantivy", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prune_missing_users_removes_orphaned_documents() {
+        let index = SearchIndex::in_memory().unwrap();
+        index
+            .upsert(&doc(1, "/notes/kept.md", Some("stays here")))
+            .unwrap();
+        index
+            .upsert(&doc(2, "/notes/gone.md", Some("deleted user data")))
+            .unwrap();
+        index.commit().unwrap();
+
+        let mut live = std::collections::HashSet::new();
+        live.insert(1);
+        assert_eq!(index.prune_missing_users(&live).unwrap(), 1);
+        index.commit().unwrap();
+        assert_eq!(index.prune_missing_users(&live).unwrap(), 0);
+
+        assert!(index.search(2, "deleted", 10).unwrap().is_empty());
+        assert_eq!(index.search(1, "stays", 10).unwrap().len(), 1);
     }
 
     #[test]

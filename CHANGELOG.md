@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.29] - 2026-10-26
+
+### Fixed
+- Search-index orphans after account deletion: deleting a user via the CLI
+  while the server runs can't lock the index, so their filenames stayed
+  searchable (and a recycled user id could inherit them). The server now
+  prunes documents of unknown users at startup and commits the result;
+  the CLI warning says so explicitly.
+- Verified sign-out, explicit encryption-setup states, per-folder
+  encryption detection, bulk-download decryption (from 0.1.28, now
+  released together).
+
+## [0.1.28] - 2026-10-26
+
 ## [0.1.28] - 2026-10-26
 
 ### Fixed

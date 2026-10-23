@@ -129,6 +129,31 @@ impl AppState {
         let store = BlobStore::open_with_quota(data_dir.join("blobs"), quota_bytes).await?;
         let vfs = Arc::new(Vfs::new(db.clone(), store));
         let search = Arc::new(SearchIndex::open(&data_dir.join("search"))?);
+        // Repair window: an account deleted via the CLI while the server was
+        // running could not lock the index, so its search documents leak.
+        // Prune them at startup (also closes the SQLite row-id-reuse hole).
+        match db.list_users().await {
+            Ok(users) => {
+                let live: std::collections::HashSet<i64> =
+                    users.iter().map(|user| user.id).collect();
+                match search.prune_missing_users(&live) {
+                    Ok(0) => {}
+                    Ok(pruned) => {
+                        if let Err(error) = search.commit() {
+                            tracing::warn!(%error, "could not commit search orphan prune");
+                        } else {
+                            tracing::info!(pruned, "pruned search documents of deleted users");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not prune search documents of deleted users");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not list users for search orphan prune");
+            }
+        }
         let preview_worker =
             std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kolimi-server"));
         let dummy_password_hash =

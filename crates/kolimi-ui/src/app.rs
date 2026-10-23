@@ -1070,7 +1070,22 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             return;
         };
         if let Some(files) = transfer.files() {
-            upload_files(collect_files(files));
+            let selected = collect_files(files);
+            if selected.is_empty() {
+                // A folder (not files) was dropped: browsers only expose
+                // files here, so say so instead of failing silently.
+                let types = transfer.types();
+                if (0..types.length())
+                    .filter_map(|i| types.get(i).as_string())
+                    .any(|kind| kind == "Files")
+                {
+                    error.set(
+                        "That looks like a folder — drag-and-drop takes files only. Create the folder first, then drop the files inside.".to_string(),
+                    );
+                }
+                return;
+            }
+            upload_files(selected);
         }
     };
 
