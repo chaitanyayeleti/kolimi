@@ -202,6 +202,26 @@ pub async fn security_headers(State(state): State<AppState>, req: Request, next:
     response
 }
 
+/// Middleware: log rejected requests at INFO.
+///
+/// Without this a failed upload or a refused WebDAV write leaves no trace at
+/// the default log level — the client sees a toast and the server admin sees
+/// nothing. Path only, never the query string, which can carry share tokens.
+pub async fn log_rejected(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let response = next.run(req).await;
+    let status = response.status();
+    // An unauthenticated visit to the app probes `/api/me` before showing
+    // the login form; that 401 is expected and would just be noise.
+    let expected_probe =
+        status == StatusCode::UNAUTHORIZED && (path == "/api/me" || path == "/api/session");
+    if (status.is_client_error() || status.is_server_error()) && !expected_probe {
+        tracing::info!(%method, %path, %status, "request rejected");
+    }
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

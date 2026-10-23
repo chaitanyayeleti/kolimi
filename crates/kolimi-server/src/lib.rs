@@ -349,6 +349,7 @@ pub fn build_app(state: AppState) -> Router {
             state.clone(),
             hardening::security_headers,
         ))
+        .layer(axum::middleware::from_fn(hardening::log_rejected))
         .with_state(state)
 }
 

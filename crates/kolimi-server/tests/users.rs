@@ -202,7 +202,14 @@ async fn disable_blocks_login_and_drops_sessions() {
         status_with_cookie(&app, "/api/me", &cookie).await,
         StatusCode::UNAUTHORIZED
     );
-    let (status, _) = request(&app, "GET", "/api/me", Some(&basic("bob", PASS)), None).await;
+    let (status, _) = request(
+        &app,
+        "GET",
+        "/api/me/usage",
+        Some(&basic("bob", PASS)),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = request(
         &app,
@@ -224,7 +231,16 @@ async fn disable_blocks_login_and_drops_sessions() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = request(&app, "GET", "/api/me", Some(&basic("bob", PASS)), None).await;
+    // `/api/me` is cookie/Bearer only (see the Basic-auth regression test);
+    // `/api/me/usage` is the equivalent endpoint for credentialed clients.
+    let (status, _) = request(
+        &app,
+        "GET",
+        "/api/me/usage",
+        Some(&basic("bob", PASS)),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     // You cannot disable yourself.
@@ -317,7 +333,14 @@ async fn delete_removes_the_user_and_cascades() {
         "bob's blobs are removed with the account"
     );
     assert!(state.db.find_user("bob").await.unwrap().is_none());
-    let (status, _) = request(&app, "GET", "/api/me", Some(&basic("bob", PASS)), None).await;
+    let (status, _) = request(
+        &app,
+        "GET",
+        "/api/me/usage",
+        Some(&basic("bob", PASS)),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (_, body) = request(&app, "GET", "/api/users", Some(&basic("alice", PASS)), None).await;
     let names: Vec<&str> = body["users"]

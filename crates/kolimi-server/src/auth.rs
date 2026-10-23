@@ -25,6 +25,7 @@ pub async fn require_auth(
     next: Next,
 ) -> Result<Response, Response> {
     let method = req.method().clone();
+    let path = req.uri().path().to_string();
     let headers = req.headers().clone();
     let ip = hardening::client_ip(
         &headers,
@@ -34,7 +35,20 @@ pub async fn require_auth(
         state.trust_proxy,
     );
 
-    let (user, via_cookie) = authenticate(&state, &headers, &ip).await?;
+    let (user, via_cookie) = match authenticate(&state, &headers, &ip, &path).await {
+        Ok(authenticated) => authenticated,
+        Err(mut response) => {
+            // Only WebDAV surfaces may ask the client for HTTP Basic
+            // credentials. Challenging `/api/*` makes browsers cache the
+            // password for the whole origin and silently authenticate with
+            // it: no session cookie is ever created, sign-out has nothing
+            // to revoke, and stale credentials shadow real sessions.
+            if !path.starts_with("/dav") {
+                response.headers_mut().remove(header::WWW_AUTHENTICATE);
+            }
+            return Err(response);
+        }
+    };
 
     // Cookie-authenticated state-changing requests must carry the
     // double-submit CSRF token on every surface (API, WebDAV, plugins), not
@@ -80,30 +94,51 @@ enum Credentials {
     Cookie(String),
 }
 
-fn extract_credentials(headers: &HeaderMap) -> Option<Credentials> {
+fn extract_credentials(headers: &HeaderMap, path: &str) -> Option<Credentials> {
+    // The session cookie always wins. Browsers attach cached HTTP Basic
+    // credentials to every same-origin request once challenged, and if the
+    // `Authorization` header were preferred those stale credentials would
+    // shadow a real session — so `DELETE /api/session` would revoke a
+    // session nobody was using while the browser stayed signed in through
+    // Basic. A cookie that no longer exists must therefore yield 401, never
+    // a silent Basic re-authentication.
+    if let Some(raw) = cookie_value(headers, SESSION_COOKIE) {
+        return Some(Credentials::Cookie(raw));
+    }
     if let Some(value) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
     {
         let (scheme, rest) = value.split_once(' ')?;
-        if scheme.eq_ignore_ascii_case("basic") {
-            let (username, password) = decode_basic(rest.trim())?;
-            return Some(Credentials::Basic { username, password });
-        }
         if scheme.eq_ignore_ascii_case("bearer") {
             return Some(Credentials::Bearer(rest.trim().to_string()));
         }
+        if scheme.eq_ignore_ascii_case("basic") && basic_allowed(path) {
+            let (username, password) = decode_basic(rest.trim())?;
+            return Some(Credentials::Basic { username, password });
+        }
         return None;
     }
-    cookie_value(headers, SESSION_COOKIE).map(Credentials::Cookie)
+    None
+}
+
+/// Whether HTTP Basic may authenticate this path.
+///
+/// Basic stays a first-class credential for WebDAV, `curl -u` scripts, the
+/// sync client and the desktop app. The one exception is `/api/me`: it is
+/// the web UI's session probe, and accepting Basic there lets a browser's
+/// cached credentials skip the login form entirely and survive sign-out.
+fn basic_allowed(path: &str) -> bool {
+    path != "/api/me"
 }
 
 async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
     ip: &str,
+    path: &str,
 ) -> Result<(CurrentUser, bool), Response> {
-    match extract_credentials(headers) {
+    match extract_credentials(headers, path) {
         Some(Credentials::Basic { username, password }) => {
             authenticate_basic(state, &username, &password, ip)
                 .await

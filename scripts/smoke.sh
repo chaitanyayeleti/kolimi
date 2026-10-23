@@ -69,6 +69,28 @@ code=$(curl -sS -m 10 -b "$JAR" "$BASE/api/me" -o /dev/null -w '%{http_code}')
 [ "$code" = 200 ] || fail "/api/me returned $code"
 ok "session works"
 
+say "browser Basic credentials cannot bypass the session"
+# If /api/me accepted Basic, a browser that was once challenged would sign
+# itself in without a cookie and sign-out could never revoke it. It must
+# answer 401 and must NOT re-challenge (a challenge is what caches the
+# password in the browser in the first place).
+probe=$(curl -sS -m 10 -D - -o /dev/null -u smoke:smoke-password "$BASE/api/me" | tr -d '\r')
+code=$(printf '%s' "$probe" | head -1 | awk '{print $2}')
+[ "$code" = 401 ] || fail "/api/me with Basic returned $code (expected 401)"
+printf '%s' "$probe" | grep -qi '^www-authenticate:' && fail "/api/me sent a Basic challenge"
+ok "session probe ignores Basic and sends no challenge"
+
+# WebDAV clients cannot hold cookies or send CSRF headers, so they keep Basic.
+code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -u smoke:smoke-password \
+    -X PROPFIND -H 'Depth: 0' "$BASE/dav/")
+[ "$code" = 207 ] || fail "WebDAV Basic auth returned $code (expected 207)"
+ok "WebDAV Basic auth still works"
+
+# Scripts using `curl -u` keep working on the rest of the API.
+code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -u smoke:smoke-password "$BASE/api/me/usage")
+[ "$code" = 200 ] || fail "API Basic auth returned $code (expected 200)"
+ok "API Basic auth still works"
+
 say "default folders"
 body=$(curl -sS -m 10 -b "$JAR" "$BASE/api/browse?path=/")
 for folder in Photos Videos Images Vault; do

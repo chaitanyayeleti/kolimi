@@ -120,6 +120,61 @@ async fn unauthenticated_requests_are_rejected_with_basic_challenge() {
 }
 
 #[tokio::test]
+async fn api_session_probe_ignores_basic_credentials() {
+    // A browser that once received a Basic challenge caches the password and
+    // sends it on every same-origin request. If `/api/me` accepted it, the
+    // app would look signed in without a session cookie, and sign-out could
+    // never revoke anything. The endpoint must stay cookie/Bearer only and
+    // must not re-challenge the browser.
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let (status, headers, _) = send(&server.app, request("GET", "/api/me", Some(&auth))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        headers.get(header::WWW_AUTHENTICATE).is_none(),
+        "the web session probe must never send a Basic challenge"
+    );
+}
+
+#[tokio::test]
+async fn cookie_takes_precedence_over_basic_credentials() {
+    let server = setup().await;
+    let login = request_with_body(
+        "POST",
+        "/api/session",
+        "",
+        "application/json",
+        format!(r#"{{"username":"{USER}","password":"{PASS}"}}"#).as_bytes(),
+    );
+    let (status, headers, _) = send(&server.app, login).await;
+    assert_eq!(status, StatusCode::OK);
+    let session_cookie = cookie_pair(&headers, "kolimi_session").unwrap();
+
+    // Wrong Basic password, valid cookie: the session must win rather than
+    // the request failing on the shadowing Authorization header.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/me")
+        .header(header::COOKIE, &session_cookie)
+        .header(header::AUTHORIZATION, basic(USER, "not the password"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&server.app, req).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn basic_still_authenticates_webdav_and_api_scripts() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let (status, _, _) = send(&server.app, request("PROPFIND", "/dav/", Some(&auth))).await;
+    assert_eq!(status, StatusCode::from_u16(207).unwrap());
+
+    let (status, _, _) = send(&server.app, request("GET", "/api/me/usage", Some(&auth))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn logout_navigation_revokes_the_session_and_clears_cookies() {
     let server = setup().await;
     let login = request_with_body(

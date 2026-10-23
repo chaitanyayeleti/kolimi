@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.34] - 2026-10-26
+
+### Fixed
+- **Sign-out could not stick in browsers holding cached HTTP Basic
+  credentials.** Every 401 carried `WWW-Authenticate: Basic`, including
+  `/api/me`. A browser that answered that challenge cached the password and
+  then authenticated every request with it: the web app never received a
+  session cookie, so `GET /logout` had nothing to revoke and a refresh
+  signed straight back in. Session cookies now take precedence over
+  `Authorization`, `/api/me` is cookie/Bearer only, and Basic challenges are
+  sent only on `/dav`. WebDAV clients, `curl -u` API scripts and the sync
+  client keep working.
+- Rejected requests are logged at INFO with method, path and status, so a
+  failed upload is visible in `docker compose logs` at the default log level
+  instead of only as a toast in the browser.
+- `scripts/smoke.sh` now covers the Basic/session split: `/api/me` must
+  answer 401 without a challenge, while `/dav` and `/api/me/usage` still
+  accept Basic.
+
+## [0.1.33] - 2026-10-26
 ## [0.1.33] - 2026-10-26
 
 ### Fixed
