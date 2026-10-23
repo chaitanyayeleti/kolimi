@@ -5,9 +5,9 @@
 //! `/dav/calendars/{user}/...`, and `/dav/addressbooks/{user}/...`. The
 //! file tree never sees them (the root names are reserved).
 //!
-//! Documented M4 deviations: `calendar-query`/`addressbook-query` filters
-//! are advisory (the whole collection is returned; clients filter locally),
-//! and `sync-level: infinite` is rejected.
+//! `calendar-query`/`addressbook-query` filters (`comp-filter`,
+//! `prop-filter`, `text-match`, `time-range`) are evaluated server-side.
+//! Documented deviation: `sync-level: infinite` is rejected.
 #![allow(clippy::result_large_err)]
 
 use axum::{
@@ -1132,11 +1132,11 @@ async fn report(
             let token = format!("urn:kolimi:sync:{}:{}", collection.id, latest_seq);
             render_response(&resources, &deleted, &wanted, Some(&token))
         }
-        Report::CalendarQuery { props } if kind == Kind::Calendar => {
-            query_all(vfs, segments, collection, kind, props.into()).await
+        Report::CalendarQuery { props, filter } if kind == Kind::Calendar => {
+            query_all(vfs, segments, collection, kind, props.into(), filter).await
         }
-        Report::AddressbookQuery { props } if kind == Kind::Addressbook => {
-            query_all(vfs, segments, collection, kind, props.into()).await
+        Report::AddressbookQuery { props, filter } if kind == Kind::Addressbook => {
+            query_all(vfs, segments, collection, kind, props.into(), filter).await
         }
         Report::CalendarMultiget { hrefs, props } if kind == Kind::Calendar => {
             multiget(vfs, segments, collection, kind, hrefs, props.into()).await
@@ -1154,6 +1154,7 @@ async fn query_all(
     collection: &DavCollection,
     kind: Kind,
     wanted: Wanted,
+    filter: Option<crate::filter::Filter>,
 ) -> Response {
     let db = vfs.db();
     let objects = match db.list_dav_objects(collection.id).await {
@@ -1162,12 +1163,31 @@ async fn query_all(
     };
     let mut resources = Vec::with_capacity(objects.len());
     for object in &objects {
-        let data = if wanted.wants_data(kind) {
+        // A filter needs the object body even when the client did not ask
+        // for calendar-data/address-data in the response.
+        let full = if filter.is_some() || wanted.wants_data(kind) {
             db.dav_object(collection.id, &object.name)
                 .await
                 .ok()
                 .flatten()
-                .map(|object| object.data)
+        } else {
+            None
+        };
+        if let Some(filter) = &filter {
+            let Some(full) = &full else {
+                continue;
+            };
+            let body = String::from_utf8_lossy(&full.data);
+            let matches = match kind {
+                Kind::Calendar => crate::query::calendar_matches(&body, filter),
+                Kind::Addressbook => crate::query::addressbook_matches(&body, filter),
+            };
+            if !matches {
+                continue;
+            }
+        }
+        let data = if wanted.wants_data(kind) {
+            full.map(|object| object.data)
         } else {
             None
         };

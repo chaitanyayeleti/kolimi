@@ -10,8 +10,10 @@
 mod caldav;
 mod cond;
 mod davpath;
+mod filter;
 mod ical;
 mod lock;
+mod query;
 mod range;
 mod report;
 mod vcard;

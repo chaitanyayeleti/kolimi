@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.38] - 2026-10-26
+
+### Added
+- **Unlocking no longer freezes the tab.** Argon2id runs in a dedicated
+  Web Worker (`kdf-worker.js` + a 50 KB wasm module) and only the resulting
+  KEK comes back to the UI thread. If workers are unavailable the UI falls
+  back to deriving in-page rather than failing to unlock.
+- **CalDAV/CardDAV filters are evaluated server-side.** `calendar-query` and
+  `addressbook-query` now honour nested `comp-filter`, `prop-filter`,
+  `text-match` (collation and negation), and `time-range`: all-day events,
+  recurring series (bounded by `UNTIL`), dateless todos, and address-book
+  property searches. Clients no longer need to fetch whole collections to
+  filter locally.
+
+### Changed
+- CI checks that the KDF worker assets are staged and clippy-checks the
+  worker crate.
+
+## [0.1.37] - 2026-10-26
 ## [0.1.37] - 2026-10-26
 
 ### Added

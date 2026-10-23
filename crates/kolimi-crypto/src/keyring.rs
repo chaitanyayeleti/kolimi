@@ -239,6 +239,51 @@ impl Keyring {
         Ok(master)
     }
 
+    /// The salt and Argon2id parameters of the passphrase wrap.
+    ///
+    /// Callers that derive the KEK elsewhere (a Web Worker, so the UI thread
+    /// stays responsive) need these before unlocking.
+    pub fn passphrase_params(&self) -> Option<(Vec<u8>, Argon2Params)> {
+        let Wrap::Passphrase {
+            salt,
+            m_cost,
+            t_cost,
+            p_cost,
+            ..
+        } = self
+            .wraps
+            .iter()
+            .find(|wrap| wrap.method() == "passphrase")?
+        else {
+            return None;
+        };
+        Some((
+            salt.clone(),
+            Argon2Params {
+                m_cost: *m_cost,
+                t_cost: *t_cost,
+                p_cost: *p_cost,
+            },
+        ))
+    }
+
+    /// Unlocks the master key with an already-derived passphrase KEK.
+    ///
+    /// This performs no Argon2 work; the caller is responsible for deriving
+    /// `kek` from the passphrase with the parameters from
+    /// [`Self::passphrase_params`].
+    pub fn unlock_with_kek(&self, kek: &[u8; KEY_LEN]) -> Result<MasterKey, CryptoError> {
+        let Some(Wrap::Passphrase { wrapped, .. }) =
+            self.wraps.iter().find(|wrap| wrap.method() == "passphrase")
+        else {
+            return Err(CryptoError::Unlock);
+        };
+        let bytes = unwrap(kek, wrapped, PASSPHRASE_AAD).map_err(|_| CryptoError::Unlock)?;
+        let master = MasterKey::from_bytes(bytes);
+        self.verify(&master)?;
+        Ok(master)
+    }
+
     /// Unlocks the master key with the recovery code.
     pub fn unlock_with_recovery(
         &self,

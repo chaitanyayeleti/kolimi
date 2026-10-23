@@ -39,11 +39,12 @@ pub enum Report {
         /// Requested properties.
         props: ReportProps,
     },
-    /// CalDAV `calendar-query` (filters are not evaluated; the full
-    /// collection is returned).
+    /// CalDAV `calendar-query`.
     CalendarQuery {
         /// Requested properties.
         props: ReportProps,
+        /// Optional filter tree; `None` returns the whole collection.
+        filter: Option<crate::filter::Filter>,
     },
     /// CalDAV `calendar-multiget`.
     CalendarMultiget {
@@ -56,6 +57,8 @@ pub enum Report {
     AddressbookQuery {
         /// Requested properties.
         props: ReportProps,
+        /// Optional filter tree; `None` returns the whole collection.
+        filter: Option<crate::filter::Filter>,
     },
     /// CardDAV `addressbook-multiget`.
     AddressbookMultiget {
@@ -225,9 +228,15 @@ pub fn parse_report(body: &[u8]) -> Result<Report, ()> {
             level: level.unwrap_or(1),
             props,
         }),
-        ("calendar-query", Some(CALDAV_NS)) => Ok(Report::CalendarQuery { props }),
+        ("calendar-query", Some(CALDAV_NS)) => Ok(Report::CalendarQuery {
+            props,
+            filter: crate::filter::parse_filter(body),
+        }),
         ("calendar-multiget", Some(CALDAV_NS)) => Ok(Report::CalendarMultiget { hrefs, props }),
-        ("addressbook-query", Some(CARDDAV_NS)) => Ok(Report::AddressbookQuery { props }),
+        ("addressbook-query", Some(CARDDAV_NS)) => Ok(Report::AddressbookQuery {
+            props,
+            filter: crate::filter::parse_filter(body),
+        }),
         ("addressbook-multiget", Some(CARDDAV_NS)) => {
             Ok(Report::AddressbookMultiget { hrefs, props })
         }
@@ -349,7 +358,7 @@ mod tests {
               xmlns:card="urn:ietf:params:xml:ns:carddav">
               <d:allprop/>
             </card:addressbook-query>"#;
-        let Report::AddressbookQuery { props } = parse_report(body).unwrap() else {
+        let Report::AddressbookQuery { props, .. } = parse_report(body).unwrap() else {
             panic!("wrong report");
         };
         assert_eq!(props, ReportProps::All);

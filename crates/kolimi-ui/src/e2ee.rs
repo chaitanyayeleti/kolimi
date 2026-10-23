@@ -4,7 +4,10 @@
 //! decryption happens here with `kolimi-crypto` compiled to wasm.
 
 use crate::app::encode;
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use kolimi_crypto::{CryptoError, FileKey, Keyring, MasterKey};
 use serde_json::Value;
 use wasm_bindgen::JsCast;
@@ -45,14 +48,96 @@ pub fn save_bytes(name: &str, bytes: &[u8]) {
 }
 
 /// Unlocks the account's master key with a passphrase.
+///
+/// Argon2id runs in a Web Worker ([`derive_kek_off_thread`]) so the tab keeps
+/// painting; if workers are unavailable it falls back to deriving on the
+/// main thread rather than failing to unlock.
 pub async fn unlock(passphrase: &str) -> Result<MasterKey, String> {
     let keyring = load_keyring().await?;
     check_keyring(&keyring)?;
-    let master = keyring
-        .unlock_with_passphrase(passphrase)
-        .map_err(|error| unlock_error(error, "Wrong passphrase"))?;
+    let master = match keyring.passphrase_params() {
+        Some((salt, params)) => match derive_kek_off_thread(passphrase, &salt, &params).await {
+            Ok(kek) => keyring
+                .unlock_with_kek(&kek)
+                .map_err(|error| unlock_error(error, "Wrong passphrase"))?,
+            Err(_) => keyring
+                .unlock_with_passphrase(passphrase)
+                .map_err(|error| unlock_error(error, "Wrong passphrase"))?,
+        },
+        None => keyring
+            .unlock_with_passphrase(passphrase)
+            .map_err(|error| unlock_error(error, "Wrong passphrase"))?,
+    };
     record_epoch(&keyring);
     Ok(master)
+}
+
+/// Derives the passphrase KEK in a module Web Worker.
+///
+/// The worker loads a dedicated wasm build (`kdf.js` / `kdf_bg.wasm`), so the
+/// main UI's wasm instance never spends its time inside Argon2. The worker is
+/// terminated after one derivation; unlocks are rare and a fresh worker
+/// avoids keeping the passphrase or the 64 MiB Argon2 arena alive.
+async fn derive_kek_off_thread(
+    passphrase: &str,
+    salt: &[u8],
+    params: &kolimi_crypto::Argon2Params,
+) -> Result<[u8; 32], String> {
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_futures::JsFuture;
+
+    let options = web_sys::WorkerOptions::new();
+    options.set_type(web_sys::WorkerType::Module);
+    let worker = web_sys::Worker::new_with_options("/app/kdf-worker.js", &options)
+        .map_err(|_| "workers unavailable".to_string())?;
+
+    let request = js_sys::Object::new();
+    let set = |key: &str, value: JsValue| {
+        let _ = js_sys::Reflect::set(&request, &JsValue::from_str(key), &value);
+    };
+    set("passphrase", JsValue::from_str(passphrase));
+    set("salt", JsValue::from_str(&URL_SAFE_NO_PAD.encode(salt)));
+    set("m_cost", JsValue::from_f64(f64::from(params.m_cost)));
+    set("t_cost", JsValue::from_f64(f64::from(params.t_cost)));
+    set("p_cost", JsValue::from_f64(f64::from(params.p_cost)));
+    let request: JsValue = request.into();
+
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        let reject_message = reject.clone();
+        let onmessage = Closure::once_into_js(move |event: web_sys::MessageEvent| {
+            let data = event.data();
+            match js_sys::Reflect::get(&data, &JsValue::from_str("kek")) {
+                Ok(kek) if !kek.is_undefined() => {
+                    let _ = resolve.call1(&JsValue::NULL, &kek);
+                }
+                _ => {
+                    let message = js_sys::Reflect::get(&data, &JsValue::from_str("error"))
+                        .ok()
+                        .and_then(|value| value.as_string())
+                        .unwrap_or_else(|| "key derivation failed".to_string());
+                    let _ = reject_message.call1(&JsValue::NULL, &JsValue::from_str(&message));
+                }
+            }
+        });
+        worker.set_onmessage(Some(onmessage.unchecked_ref()));
+        let onerror = Closure::once_into_js(move |event: web_sys::ErrorEvent| {
+            let _ = reject.call1(&JsValue::NULL, &JsValue::from_str(&event.message()));
+        });
+        worker.set_onerror(Some(onerror.unchecked_ref()));
+        let _ = worker.post_message(&request);
+    });
+
+    let value = JsFuture::from(promise)
+        .await
+        .map_err(|_| "key derivation failed".to_string())?;
+    worker.terminate();
+    let array = js_sys::Uint8Array::new(&value);
+    if array.length() != 32 {
+        return Err("worker returned a bad key".to_string());
+    }
+    let mut kek = [0u8; 32];
+    array.copy_to(&mut kek);
+    Ok(kek)
 }
 
 /// Unlocks the account's master key with the recovery code.

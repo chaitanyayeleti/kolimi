@@ -1,0 +1,19 @@
+[package]
+name = "kolimi-kdf"
+description = "Argon2id key derivation for the Kolimi web UI, run in a Web Worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+base64.workspace = true
+kolimi-crypto.workspace = true
+wasm-bindgen = "0.2"

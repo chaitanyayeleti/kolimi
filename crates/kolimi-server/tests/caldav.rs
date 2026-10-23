@@ -524,6 +524,215 @@ async fn calendar_query_and_multiget_reports() {
     );
 }
 
+const ALL_DAY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:all-day@kolimi\r\nDTSTAMP:20261011T000000Z\r\nDTSTART;VALUE=DATE:20261015\r\n\
+DTEND;VALUE=DATE:20261016\r\nSUMMARY:Offsite\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+const RECURRING: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:weekly@kolimi\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261001T090000Z\r\n\
+DTEND:20261001T100000Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Weekly sync\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+
+const RECURRING_ENDED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:ended@kolimi\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261001T090000Z\r\n\
+DTEND:20261001T100000Z\r\nRRULE:FREQ=WEEKLY;UNTIL=20261005T000000Z\r\n\
+SUMMARY:Old series\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+const VCARD_2: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:contact-2@kolimi\r\n\
+FN:Grace Hopper\r\nN:Hopper;Grace;;;\r\nEMAIL:grace@example.com\r\nEND:VCARD\r\n";
+
+async fn calendar_query(server: &TestServer, filter: &str) -> String {
+    let body = format!(
+        r#"<?xml version="1.0"?>
+        <c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+          <d:prop><d:getetag/><c:calendar-data/></d:prop>
+          <c:filter>{filter}</c:filter>
+        </c:calendar-query>"#
+    );
+    let (status, _, response) = send(
+        &server.app,
+        dav_request(
+            "REPORT",
+            "/dav/calendars/alice/work",
+            Some(ALICE),
+            &[("depth", "1"), ("content-type", "application/xml")],
+            Some(body.as_bytes()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::MULTI_STATUS);
+    xml(&response)
+}
+
+#[tokio::test]
+async fn calendar_query_evaluates_time_range_and_text_match() {
+    let server = setup().await;
+    mkcalendar(&server, ALICE, "/dav/calendars/alice/work", "").await;
+    for (name, data) in [("event-1.ics", EVENT), ("event-2.ics", EVENT_2)] {
+        put_object(
+            &server,
+            ALICE,
+            &format!("/dav/calendars/alice/work/{name}"),
+            "text/calendar",
+            data.as_bytes(),
+        )
+        .await;
+    }
+
+    let only_first = calendar_query(
+        &server,
+        r#"<c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+             <c:time-range start="20261012T000000Z" end="20261013T000000Z"/>
+           </c:comp-filter></c:comp-filter>"#,
+    )
+    .await;
+    assert!(only_first.contains("UID:event-1@kolimi"), "{only_first}");
+    assert!(!only_first.contains("UID:event-2@kolimi"), "{only_first}");
+
+    let only_second = calendar_query(
+        &server,
+        r#"<c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+             <c:time-range start="20261013T000000Z" end="20261014T000000Z"/>
+           </c:comp-filter></c:comp-filter>"#,
+    )
+    .await;
+    assert!(only_second.contains("UID:event-2@kolimi"), "{only_second}");
+    assert!(!only_second.contains("UID:event-1@kolimi"), "{only_second}");
+
+    // text-match narrows by SUMMARY, combined with the range.
+    let review = calendar_query(
+        &server,
+        r#"<c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+             <c:time-range start="20261011T000000Z" end="20261014T000000Z"/>
+             <c:prop-filter name="SUMMARY">
+               <c:text-match collation="i;ascii-casemap">review</c:text-match>
+             </c:prop-filter>
+           </c:comp-filter></c:comp-filter>"#,
+    )
+    .await;
+    assert!(review.contains("UID:event-2@kolimi"), "{review}");
+    assert!(!review.contains("UID:event-1@kolimi"), "{review}");
+
+    // negate-condition inverts the text match.
+    let not_standup = calendar_query(
+        &server,
+        r#"<c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+             <c:prop-filter name="SUMMARY">
+               <c:text-match negate-condition="yes">Standup</c:text-match>
+             </c:prop-filter>
+           </c:comp-filter></c:comp-filter>"#,
+    )
+    .await;
+    assert!(not_standup.contains("UID:event-2@kolimi"), "{not_standup}");
+    assert!(!not_standup.contains("UID:event-1@kolimi"), "{not_standup}");
+}
+
+#[tokio::test]
+async fn calendar_query_handles_all_day_and_recurring_events() {
+    let server = setup().await;
+    mkcalendar(&server, ALICE, "/dav/calendars/alice/work", "").await;
+    for (name, data) in [
+        ("all-day.ics", ALL_DAY),
+        ("weekly.ics", RECURRING),
+        ("ended.ics", RECURRING_ENDED),
+    ] {
+        put_object(
+            &server,
+            ALICE,
+            &format!("/dav/calendars/alice/work/{name}"),
+            "text/calendar",
+            data.as_bytes(),
+        )
+        .await;
+    }
+
+    let text = calendar_query(
+        &server,
+        r#"<c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+             <c:time-range start="20261015T000000Z" end="20261016T000000Z"/>
+           </c:comp-filter></c:comp-filter>"#,
+    )
+    .await;
+    assert!(text.contains("UID:all-day@kolimi"), "{text}");
+    assert!(text.contains("UID:weekly@kolimi"), "{text}");
+    assert!(
+        !text.contains("UID:ended@kolimi"),
+        "an UNTIL in the past must exclude the series: {text}"
+    );
+}
+
+#[tokio::test]
+async fn addressbook_query_filters_by_property_text() {
+    let server = setup().await;
+    let body = r#"<d:mkcol xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+        <d:set><d:prop>
+          <d:resourcetype><d:collection/><card:addressbook/></d:resourcetype>
+          <d:displayname>Friends</d:displayname>
+        </d:prop></d:set></d:mkcol>"#;
+    let (status, _, _) = send(
+        &server.app,
+        dav_request(
+            "MKCOL",
+            "/dav/addressbooks/alice/friends",
+            Some(ALICE),
+            &[("content-type", "application/xml")],
+            Some(body.as_bytes()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    for (name, data) in [("contact-1.vcf", VCARD), ("contact-2.vcf", VCARD_2)] {
+        put_object(
+            &server,
+            ALICE,
+            &format!("/dav/addressbooks/alice/friends/{name}"),
+            "text/vcard",
+            data.as_bytes(),
+        )
+        .await;
+    }
+
+    let query = r#"<card:addressbook-query xmlns:d="DAV:"
+        xmlns:card="urn:ietf:params:xml:ns:carddav">
+        <d:prop><d:getetag/><card:address-data/></d:prop>
+        <card:filter>
+          <card:prop-filter name="FN">
+            <card:text-match collation="i;ascii-casemap">lovelace</card:text-match>
+          </card:prop-filter>
+        </card:filter>
+      </card:addressbook-query>"#;
+    let (status, _, response) = send(
+        &server.app,
+        dav_request(
+            "REPORT",
+            "/dav/addressbooks/alice/friends",
+            Some(ALICE),
+            &[("depth", "1"), ("content-type", "application/xml")],
+            Some(query.as_bytes()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::MULTI_STATUS);
+    let text = xml(&response);
+    assert!(text.contains("UID:contact-1@kolimi"), "{text}");
+    assert!(!text.contains("UID:contact-2@kolimi"), "{text}");
+}
+
+#[tokio::test]
+async fn options_advertises_calendar_addressbook_and_sync() {
+    let server = setup().await;
+    let (status, headers, _) = send(
+        &server.app,
+        dav_request("OPTIONS", "/dav/", Some(ALICE), &[], None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let dav = headers.get("dav").unwrap().to_str().unwrap();
+    assert!(dav.contains("calendar-access"), "{dav}");
+    assert!(dav.contains("addressbook"), "{dav}");
+    assert!(dav.contains("sync-collection"), "{dav}");
+}
+
 #[tokio::test]
 async fn sync_collection_lifecycle() {
     let server = setup().await;

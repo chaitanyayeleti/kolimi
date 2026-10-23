@@ -38,6 +38,18 @@ wasm-bindgen \
     --out-name app \
     "target/$TARGET/release/kolimi_ui.wasm"
 cp crates/kolimi-ui/index.html crates/kolimi-ui/style.css crates/kolimi-ui/bootstrap.js "$OUT/"
+
+# Argon2id runs in a Web Worker so unlocking never freezes the tab. Build it
+# as a second, tiny wasm module plus the worker glue.
+echo "building kolimi-kdf for $TARGET (release)"
+cargo build -p kolimi-kdf --target "$TARGET" --release
+wasm-bindgen \
+    --target web \
+    --no-typescript \
+    --out-dir "$OUT" \
+    --out-name kdf \
+    "target/$TARGET/release/kolimi_kdf.wasm"
+cp crates/kolimi-kdf/worker.js "$OUT/kdf-worker.js"
 cp crates/kolimi-ui/favicon.svg crates/kolimi-ui/favicon-32.png crates/kolimi-ui/apple-touch-icon.png "$OUT/"
 
 echo "UI staged in $OUT"
