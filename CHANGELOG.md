@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.28] - 2026-10-26
+
+### Fixed
+- Sign out verifies the session is actually dead before leaving the login
+  screen — a failed logout no longer looks like success until the next
+  reload logs you back in.
+- A fresh account can no longer land on the unlock form: the encryption
+  dialog shows an explicit checking state, and a retryable error if the
+  server can't be reached, instead of assuming a keyring exists.
+- Folder encryption detection only treats a folder as encrypted when every
+  file it holds is encrypted (mixed folders stay plaintext).
+
+## [0.1.27] - 2026-10-26
+
 ## [0.1.27] - 2026-10-26
 
 ### Fixed

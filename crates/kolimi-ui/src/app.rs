@@ -888,10 +888,20 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     });
 
     let sign_out = move |_| {
-        crate::e2ee::forget_master();
         spawn_local(async move {
-            let _ = api::delete("/api/session").await;
-            view.set(View::Login);
+            // Verify the logout: silently dropping to the login screen while
+            // the session is still alive looks exactly like "sign out does
+            // nothing" on the next reload.
+            let revoked = api::delete("/api/session")
+                .await
+                .is_ok_and(|r| r.status == 204)
+                && api::get("/api/me").await.is_ok_and(|r| r.status == 401);
+            if revoked {
+                crate::e2ee::forget_master();
+                view.set(View::Login);
+            } else {
+                error.set("Sign out failed — the server still accepts this session. Check your connection and try again.".to_string());
+            }
         });
     };
 
@@ -3085,6 +3095,22 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     });
     let use_recovery = RwSignal::new(false);
     let has_keyring = RwSignal::new(Option::<bool>::None);
+    // `None` with `keyring_error` unset means "still checking" — never show
+    // the unlock form for an unknown state, or a new account looks like it
+    // already has encryption.
+    let keyring_error = RwSignal::new(false);
+    let check_keyring = Callback::new(move |_: ()| {
+        keyring_error.set(false);
+        spawn_local(async move {
+            match crate::e2ee::keyring_exists().await {
+                Ok(exists) => has_keyring.set(Some(exists)),
+                Err(_) => keyring_error.set(true),
+            }
+        });
+    });
+    Effect::new(move |_| {
+        check_keyring.run(());
+    });
     let setup_pass = RwSignal::new(String::new());
     let setup_confirm = RwSignal::new(String::new());
     let recovery = RwSignal::new(Option::<String>::None);
@@ -3104,13 +3130,6 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
         if master.get().is_some() {
             load_devices.run(());
         }
-    });
-    Effect::new(move |_| {
-        spawn_local(async move {
-            if let Ok(exists) = crate::e2ee::keyring_exists().await {
-                has_keyring.set(Some(exists));
-            }
-        });
     });
 
     let unlock = move |_| {
@@ -3270,6 +3289,19 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                     </div>
                 </Show>
                 <Show when=move || master.get().is_none() && recovery.get().is_none()>
+                    <Show when=move || has_keyring.get().is_none() && !keyring_error.get()>
+                        <p class="muted">"Checking encryption status…"</p>
+                    </Show>
+                    <Show when=move || keyring_error.get()>
+                        <p class="error">
+                            "Couldn't check the encryption status — the server didn't answer. Check your connection and retry."
+                        </p>
+                        <div class="row-actions">
+                            <button class="primary" on:click=move |_| check_keyring.run(())>
+                                "Retry"
+                            </button>
+                        </div>
+                    </Show>
                     <Show when=move || has_keyring.get() == Some(false)>
                         <p class="muted">
                             "Encryption is not set up for this account yet. Choose a passphrase — it never leaves this browser."
@@ -3301,7 +3333,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                             </button>
                         </div>
                     </Show>
-                    <Show when=move || has_keyring.get() != Some(false)>
+                    <Show when=move || has_keyring.get() == Some(true)>
                         <label>
                             {move || {
                                 if use_recovery.get() {
