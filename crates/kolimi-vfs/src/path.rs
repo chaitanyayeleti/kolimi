@@ -3,7 +3,11 @@ use crate::error::PathError;
 /// Maximum number of segments in a path.
 pub const MAX_DEPTH: usize = 256;
 /// Maximum length of a single path segment in bytes.
-pub const MAX_SEGMENT_LEN: usize = 255;
+// Client-side encrypted names are stored as opaque `k1_…` segments and
+// are longer than the plaintext they hide (a 255-byte name encodes to ~400
+// bytes), so the server cap is raised accordingly. WebDAV never sees these
+// names: encrypted subtrees reject DAV writes.
+pub const MAX_SEGMENT_LEN: usize = 512;
 
 /// Splits a path into validated segments.
 ///
@@ -69,7 +73,7 @@ mod tests {
 
     #[test]
     fn rejects_overlong_names_and_deep_paths() {
-        let long = "x".repeat(256);
+        let long = "x".repeat(513);
         assert!(parse(&format!("/{long}")).is_err());
 
         let deep: Vec<String> = (0..300).map(|i| format!("s{i}")).collect();

@@ -167,11 +167,33 @@ async fn encrypted_files_never_reach_the_server_in_plaintext() {
     // The tree flags the encrypted file and only that file.
     let tree = get_json(&server.url, "/api/sync/tree?after_id=0&limit=100").await;
     let entries = tree["entries"].as_array().unwrap();
+    // File names are encrypted too: the tree must not contain the plaintext
+    // name anywhere, only an opaque `k1_…` segment under /Private.
     let secret_entry = entries
         .iter()
-        .find(|entry| entry["path"] == "/Private/secret.bin")
-        .unwrap();
+        .find(|entry| {
+            entry["kind"] == "file"
+                && entry["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with("/Private/"))
+        })
+        .expect("the encrypted file exists");
     assert_eq!(secret_entry["encrypted"], true);
+    let stored_path = secret_entry["path"].as_str().unwrap();
+    assert!(
+        !stored_path.contains("secret.bin"),
+        "the file name leaked into the tree: {stored_path}"
+    );
+    assert!(
+        !entries.iter().any(|entry| entry["path"]
+            .as_str()
+            .is_some_and(|path| path.contains("secret.bin"))),
+        "a plaintext file name appears in the tree"
+    );
+    assert!(
+        scan_for(server.dir.path(), b"secret.bin").is_empty(),
+        "the plaintext file name leaked onto the server"
+    );
     let public_entry = entries
         .iter()
         .find(|entry| entry["path"] == "/public.txt")
@@ -226,6 +248,128 @@ async fn encrypted_files_never_reach_the_server_in_plaintext() {
     assert_eq!(
         std::fs::read(mirror.join("Private/secret.bin")).unwrap(),
         edited
+    );
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn legacy_plaintext_names_are_updated_in_place_not_duplicated() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let seed = root.path().join("seed");
+    let mirror = root.path().join("mirror");
+    std::fs::create_dir_all(&mirror).unwrap();
+
+    let (keyring, _recovery) = create_keyring_with_params(E2EE_PASS, &fast_params()).unwrap();
+    upload_keyring(&config(&server.url, &seed, None), &keyring)
+        .await
+        .unwrap();
+    std::fs::create_dir_all(seed.join("Private")).unwrap();
+    std::fs::write(seed.join("Private/other.bin"), b"other").unwrap();
+    sync_once(&config(
+        &server.url,
+        &seed,
+        Some(e2ee_options(Some(E2EE_PASS), None)),
+    ))
+    .await
+    .unwrap();
+
+    // Simulate a file created before names were encrypted: ciphertext with a
+    // wrapped key, but a plaintext name on the server.
+    let master = keyring.unlock_with_passphrase(E2EE_PASS).unwrap();
+    let file_key = kolimi_crypto::FileKey::generate().unwrap();
+    let ciphertext = file_key.encrypt_chunk(b"legacy content").unwrap();
+    let hash = kolimi_chunk::Hash::of(&ciphertext);
+    let status = reqwest::Client::new()
+        .put(format!("{}/api/chunks/{}", server.url, hash.to_hex()))
+        .basic_auth("alice", Some(PASS))
+        .body(ciphertext.clone())
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert!(matches!(status, 201 | 204), "chunk upload: {status}");
+    let wrapped = master.wrap_file_key(&file_key).unwrap();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "size": ciphertext.len(),
+        "chunks": [{ "hash": hash.to_hex(), "len": ciphertext.len() }],
+        "wrapped_key": STANDARD.encode(&wrapped),
+    });
+    let status = reqwest::Client::new()
+        .put(format!(
+            "{}/api/files?path=%2FPrivate%2Flegacy.txt",
+            server.url
+        ))
+        .basic_auth("alice", Some(PASS))
+        .json(&manifest)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 200, "legacy commit");
+
+    // A mirror pulls it under its real (plaintext) name.
+    let report = sync_once(&config(
+        &server.url,
+        &mirror,
+        Some(e2ee_options(Some(E2EE_PASS), None)),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(report.pulled, 2, "{report:?}");
+    assert_eq!(
+        std::fs::read(mirror.join("Private/legacy.txt")).unwrap(),
+        b"legacy content"
+    );
+
+    // Editing and pushing must update that same server node, not create an
+    // encoded duplicate beside it.
+    std::fs::write(mirror.join("Private/legacy.txt"), b"edited legacy").unwrap();
+    sync_once(&config(
+        &server.url,
+        &mirror,
+        Some(e2ee_options(Some(E2EE_PASS), None)),
+    ))
+    .await
+    .unwrap();
+
+    let tree = get_json(&server.url, "/api/sync/tree?after_id=0&limit=100").await;
+    let legacy: Vec<String> = tree["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["path"].as_str())
+        .filter(|path| path.starts_with("/Private/"))
+        .filter(|path| {
+            let name = path.rsplit('/').next().unwrap_or_default();
+            name == "legacy.txt"
+                || kolimi_crypto::decode_name(&master, name).as_deref() == Some("legacy.txt")
+        })
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        legacy,
+        vec!["/Private/legacy.txt".to_string()],
+        "exactly one server node must hold the legacy name"
+    );
+
+    // The edit is visible to a fresh mirror.
+    let fresh = root.path().join("fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    sync_once(&config(
+        &server.url,
+        &fresh,
+        Some(e2ee_options(Some(E2EE_PASS), None)),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(fresh.join("Private/legacy.txt")).unwrap(),
+        b"edited legacy"
     );
 
     server.handle.abort();
@@ -376,7 +520,23 @@ async fn independent_decoder_reads_client_uploads() {
     let keyring = Keyring::from_json(keyring_json["keyring"].as_str().unwrap()).unwrap();
     let master = keyring.unlock_with_passphrase(E2EE_PASS).unwrap();
 
-    let key_json = get_json(&server.url, "/api/files/key?path=%2FPrivate%2Fsecret.bin").await;
+    let tree = get_json(&server.url, "/api/sync/tree?after_id=0&limit=100").await;
+    let encoded_path = tree["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["kind"] == "file"
+                && entry["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with("/Private/"))
+        })
+        .and_then(|entry| entry["path"].as_str())
+        .expect("encrypted file in the tree")
+        .to_string();
+    assert!(!encoded_path.contains("secret.bin"));
+    let query_path = encoded_path.replace('/', "%2F");
+    let key_json = get_json(&server.url, &format!("/api/files/key?path={query_path}")).await;
     let wrapped = STANDARD
         .decode(key_json["wrapped_key"].as_str().unwrap())
         .unwrap();
@@ -384,7 +544,7 @@ async fn independent_decoder_reads_client_uploads() {
 
     let manifest = get_json(
         &server.url,
-        "/api/files/manifest?path=%2FPrivate%2Fsecret.bin",
+        &format!("/api/files/manifest?path={query_path}"),
     )
     .await;
     let chunks = manifest["chunks"].as_array().unwrap();
@@ -400,6 +560,8 @@ async fn independent_decoder_reads_client_uploads() {
         );
         decoded.extend_from_slice(file_key.decrypt_chunk(&bytes).unwrap().as_slice());
     }
+    // New encrypted files carry a length header + padding; strip it.
+    let decoded = kolimi_crypto::unpad_file(&decoded).unwrap();
     assert_eq!(decoded, secret);
 
     server.handle.abort();

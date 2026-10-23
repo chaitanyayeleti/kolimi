@@ -110,6 +110,33 @@ async fn post_json(server: &str, username: &str, path: &str, body: &serde_json::
         .as_u16()
 }
 
+async fn get_json(server: &str, path: &str) -> serde_json::Value {
+    reqwest::Client::new()
+        .get(format!("{server}{path}"))
+        .basic_auth("alice", Some(PASS))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// The single file mounted under `Shared with me` (encrypted shares use an
+/// opaque stored name, so tests cannot assume the plaintext one).
+fn shared_file(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(dir.join("Shared with me"))
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.path())
+}
+
 #[tokio::test]
 async fn group_share_reaches_members_and_removal_revokes() {
     let (server, state) = start_server().await;
@@ -157,20 +184,41 @@ async fn group_share_reaches_members_and_removal_revokes() {
         let config = config(&server.url, name, dir);
         let report = sync_once(&config).await.unwrap();
         assert_eq!(report.pulled, 1, "{name}: {report:?}");
-        assert_eq!(
-            std::fs::read(dir.join("Shared with me/doc.bin")).unwrap(),
-            secret
+        let mounted = shared_file(dir).expect("shared file mounted");
+        assert!(
+            !mounted
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("doc.bin"),
+            "the shared file name must stay encrypted"
         );
+        assert_eq!(std::fs::read(&mounted).unwrap(), secret);
     }
 
     // Public links to encrypted files are allowed: the file key travels in
     // the URL fragment, which the browser never sends to the server.
+    // The share API takes the stored path; resolve the encoded segment first.
+    let tree = get_json(&server.url, "/api/sync/tree?after_id=0&limit=100").await;
+    let stored_path = tree["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["kind"] == "file"
+                && entry["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with("/Private/"))
+        })
+        .and_then(|entry| entry["path"].as_str())
+        .unwrap()
+        .to_string();
     let status = post_json(
         &server.url,
         "alice",
         "/api/shares",
         &serde_json::json!({
-            "path": "/Private/doc.bin",
+            "path": stored_path,
             "kind": "link",
         }),
     )
@@ -217,10 +265,10 @@ async fn group_share_reaches_members_and_removal_revokes() {
     // Carol's next sync removes the local copy; bob's is a no-op.
     let report = sync_once(&carol).await.unwrap();
     assert_eq!(report.removed_local, 1, "{report:?}");
-    assert!(!carol_dir.join("Shared with me/doc.bin").exists());
+    assert!(shared_file(&carol_dir).is_none());
     let report = sync_once(&bob).await.unwrap();
     assert_eq!(report, Default::default());
-    assert!(bob_dir.join("Shared with me/doc.bin").exists());
+    assert!(shared_file(&bob_dir).is_some());
 
     server.handle.abort();
 }

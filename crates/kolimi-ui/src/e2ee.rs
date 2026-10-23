@@ -233,6 +233,102 @@ pub struct ReencryptFile {
     pub content_id: Option<String>,
 }
 
+/// Renames items inside encrypted folders whose names are still readable.
+///
+/// Files keep their content; only the server-side names change. Plaintext
+/// files (no wrapped key) are skipped: renaming them would hide the name
+/// without encrypting the bytes, so encrypt those first. The walk renames
+/// parents before children and tracks the new paths as it goes, making an
+/// interrupted run safe to repeat.
+pub async fn migrate_names(master: &MasterKey) -> Result<usize, String> {
+    let mut entries = Vec::new();
+    let mut after = 0i64;
+    loop {
+        let response = api::get(&format!("/api/sync/tree?after_id={after}&limit=1000")).await?;
+        if response.status != 200 {
+            return Err(response
+                .error()
+                .unwrap_or("could not list the tree")
+                .to_string());
+        }
+        entries.extend(
+            response.body["entries"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+        );
+        if !response.body["has_more"].as_bool().unwrap_or(false) {
+            break;
+        }
+        let last = response.body["last_id"].as_i64().unwrap_or(after);
+        if last <= after {
+            break;
+        }
+        after = last;
+    }
+
+    let flagged: Vec<String> = entries
+        .iter()
+        .filter(|entry| {
+            entry["kind"].as_str() == Some("dir") && entry["encrypted"].as_bool() == Some(true)
+        })
+        .filter_map(|entry| entry["path"].as_str().map(str::to_string))
+        .collect();
+    // The outermost flagged folders are the visible roots; their own names
+    // stay readable (e.g. "Vault"). Everything below them is migrated.
+    let roots: Vec<&String> = flagged
+        .iter()
+        .filter(|path| {
+            !flagged
+                .iter()
+                .any(|other| other != *path && is_under(path, other))
+        })
+        .collect();
+    if roots.is_empty() {
+        return Ok(0);
+    }
+
+    let mut nodes: Vec<(String, bool, bool)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let path = entry["path"].as_str()?;
+            if !roots.iter().any(|root| is_under(path, root)) {
+                return None;
+            }
+            Some((
+                path.to_string(),
+                entry["kind"].as_str() == Some("dir"),
+                entry["encrypted"].as_bool().unwrap_or(false),
+            ))
+        })
+        .collect();
+    nodes.sort_by_key(|(path, _, _)| path.split('/').filter(|part| !part.is_empty()).count());
+
+    let mut renamed = 0usize;
+    let mut mapping = std::collections::HashMap::<String, String>::new();
+    for (old_path, is_dir, has_key) in nodes {
+        let (old_parent, name) = old_path
+            .rsplit_once('/')
+            .map(|(parent, name)| (parent.to_string(), name.to_string()))
+            .unwrap_or_else(|| (String::new(), old_path.clone()));
+        let parent = mapping.get(&old_parent).cloned().unwrap_or(old_parent);
+        if kolimi_crypto::is_encoded_name(&name) {
+            mapping.insert(old_path, format!("{parent}/{name}"));
+            continue;
+        }
+        if !is_dir && !has_key {
+            // Content is still plaintext; encrypt it before hiding its name.
+            continue;
+        }
+        let encoded = encode_component(master, &name)?;
+        let new_path = format!("{parent}/{encoded}");
+        move_file(&format!("{parent}/{name}"), &new_path).await?;
+        mapping.insert(old_path, new_path);
+        renamed += 1;
+    }
+    Ok(renamed)
+}
+
 /// Every plaintext file below `path`, from the server's tree snapshot.
 ///
 /// `encrypted` in the tree is true when a file has a wrapped key (or lives
@@ -330,10 +426,39 @@ pub async fn file_key_and_lengths(
     Ok((*file_key.as_bytes(), lengths))
 }
 
+/// Decodes a stored file/folder name for display, leaving plaintext names
+/// (and names from another keyring) untouched.
+pub fn decode_display_name(master: Option<&MasterKey>, name: &str) -> String {
+    if let Some(master) = master {
+        return kolimi_crypto::decode_name(master, name).unwrap_or_else(|| name.to_string());
+    }
+    // Locked: never show the opaque `k1_…` bytes — say what they are.
+    if kolimi_crypto::is_encoded_name(name) {
+        "Encrypted item".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Decodes every path segment for display. The returned path is for humans
+/// only; navigation must keep using the stored, encoded path.
+pub fn decode_display_path(master: Option<&MasterKey>, path: &str) -> String {
+    path.split('/')
+        .map(|segment| decode_display_name(master, segment))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Encodes one name for storage inside an encrypted folder.
+pub fn encode_component(master: &MasterKey, name: &str) -> Result<String, String> {
+    kolimi_crypto::encode_name(master, name)
+        .map_err(|_| "could not encrypt the file name".to_string())
+}
+
 /// Decrypts an encrypted file, returning its name and plaintext bytes.
 pub async fn decrypt_file(master: &MasterKey, path: &str) -> Result<(String, Vec<u8>), String> {
     let (file_key, manifest) = load_file(master, path).await?;
-    let name = path.rsplit('/').next().unwrap_or("file").to_string();
+    let name = decode_display_name(Some(master), path.rsplit('/').next().unwrap_or("file"));
     let Some(chunks) = manifest["chunks"].as_array() else {
         return Ok((name, Vec::new()));
     };
@@ -347,6 +472,8 @@ pub async fn decrypt_file(master: &MasterKey, path: &str) -> Result<(String, Vec
             .map_err(|_| "Decryption failed (wrong key or corrupt data)".to_string())?;
         out.extend_from_slice(plaintext.as_slice());
     }
+    let out = kolimi_crypto::unpad_file(&out)
+        .map_err(|_| "Decryption failed (corrupt padding)".to_string())?;
     Ok((name, out))
 }
 
@@ -371,7 +498,7 @@ pub fn decrypt_public(
         out.extend_from_slice(plaintext.as_slice());
         offset = end;
     }
-    Ok(out)
+    kolimi_crypto::unpad_file(&out).map_err(|_| "Decryption failed (corrupt padding)".to_string())
 }
 
 /// Fetches an encrypted file's wrapped key (unwrapped) and its manifest.
@@ -659,9 +786,12 @@ pub async fn upload_encrypted_versioned(
 ) -> Result<(), String> {
     let file_key =
         FileKey::generate().map_err(|_| "could not generate the file key".to_string())?;
+    // Hide the exact length: header + zero padding up to a coarse bucket
+    // before encryption. The server only learns the bucket.
+    let padded = kolimi_crypto::pad_file(data);
     let mut chunks = Vec::new();
     let mut total = 0u64;
-    for chunk in kolimi_chunk::chunker::split(data) {
+    for chunk in kolimi_chunk::chunker::split(&padded) {
         let ciphertext = file_key
             .encrypt_chunk(chunk.data)
             .map_err(|_| "could not encrypt the file".to_string())?;

@@ -12,19 +12,22 @@ use crate::api;
 /// The file key and chunk lengths carried in the URL fragment of a link to
 /// an encrypted file (`#k=<base64url>&l=<len,len,…>`). The fragment is never
 /// sent to the server, so the server cannot decrypt.
-fn parse_fragment() -> Option<([u8; 32], Vec<u32>)> {
+fn parse_fragment() -> Option<([u8; 32], Vec<u32>, Option<String>)> {
     let hash = web_sys::window()?.location().hash().ok()?;
     let mut key: Option<[u8; 32]> = None;
     let mut lengths: Vec<u32> = Vec::new();
+    let mut name: Option<String> = None;
     for part in hash.trim_start_matches('#').split('&') {
         if let Some(value) = part.strip_prefix("k=") {
             let bytes = URL_SAFE_NO_PAD.decode(value).ok()?;
             key = Some(bytes.try_into().ok()?);
         } else if let Some(value) = part.strip_prefix("l=") {
             lengths = value.split(',').filter_map(|n| n.parse().ok()).collect();
+        } else if let Some(value) = part.strip_prefix("n=") {
+            name = js_sys::decode_uri_component(value).ok().map(|s| s.into());
         }
     }
-    key.map(|key| (key, lengths))
+    key.map(|key| (key, lengths, name))
 }
 
 #[derive(Clone, PartialEq)]
@@ -135,7 +138,12 @@ pub fn PublicApp(token: String) -> impl IntoView {
                         view! { <p class="error">{message}</p> }.into_any()
                     }
                     Meta::Ready(meta) => {
-                        let name = meta["name"].as_str().unwrap_or_default().to_string();
+                        let name = link_key
+                            .get_value()
+                            .and_then(|(_, _, name)| name)
+                            .unwrap_or_else(|| {
+                                meta["name"].as_str().unwrap_or_default().to_string()
+                            });
                         // List responses carry `entries` but no `kind`: treat as dir.
                         let is_dir = meta["kind"].as_str() == Some("dir")
                             || (meta.get("kind").is_none()
@@ -249,7 +257,7 @@ pub fn PublicApp(token: String) -> impl IntoView {
                                             />
                                         </ul>
                                     }.into_any()
-                                } else if let Some((key, lengths)) = link_key.get_value() {
+                                } else if let Some((key, lengths, _)) = link_key.get_value() {
                                     let file_name = name.clone();
                                     let download = download_url.clone();
                                     let decrypt = move |_| {
@@ -284,11 +292,15 @@ pub fn PublicApp(token: String) -> impl IntoView {
                                 } else {
                                     view! {
                                         <p>
-                                            {format!(
-                                                "{} · {}",
-                                                human_size(meta["size"].as_u64().unwrap_or(0)),
-                                                "shared file",
-                                            )}
+                                            {if link_key.get_value().is_some() {
+                                                "Encrypted · shared file".to_string()
+                                            } else {
+                                                format!(
+                                                    "{} · {}",
+                                                    human_size(meta["size"].as_u64().unwrap_or(0)),
+                                                    "shared file",
+                                                )
+                                            }}
                                         </p>
                                         <a class="button" href=download_url download>
                                             "Download"

@@ -28,6 +28,8 @@ mod identity;
 mod keyring;
 mod keys;
 pub mod mnemonic;
+mod name;
+mod padding;
 
 pub use error::CryptoError;
 pub use file::FileKey;
@@ -44,3 +46,5 @@ pub use keys::{
     Argon2Params, kek_from_passphrase, kek_from_prf, kek_from_recovery_code, wrap_with_nonce,
 };
 pub use keys::{MasterKey, RECOVERY_CODE_LEN};
+pub use name::{NAME_PREFIX, decode_name, encode_name, is_encoded_name};
+pub use padding::{pad_file, padded_len, unpad_file};

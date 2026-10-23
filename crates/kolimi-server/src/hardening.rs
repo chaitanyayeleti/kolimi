@@ -212,10 +212,12 @@ pub async fn log_rejected(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let response = next.run(req).await;
     let status = response.status();
-    // An unauthenticated visit to the app probes `/api/me` before showing
-    // the login form; that 401 is expected and would just be noise.
-    let expected_probe =
-        status == StatusCode::UNAUTHORIZED && (path == "/api/me" || path == "/api/session");
+    // Expected, internet-facing 4xx noise: the pre-login session probe, the
+    // "no keyring yet" check, the public-link password gate, and the link
+    // attempt on an expired session.
+    let expected_probe = (status == StatusCode::UNAUTHORIZED
+        && (path == "/api/me" || path == "/api/session" || path.starts_with("/public/")))
+        || (status == StatusCode::NOT_FOUND && path == "/api/e2ee/keyring");
     if (status.is_client_error() || status.is_server_error()) && !expected_probe {
         tracing::info!(%method, %path, %status, "request rejected");
     }

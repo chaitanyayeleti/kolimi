@@ -113,6 +113,54 @@ async fn post_json(server: &str, username: &str, path: &str, body: &serde_json::
         .as_u16()
 }
 
+/// Stored path of the first file below `prefix` in a user's tree.
+async fn stored_path(server: &str, username: &str, prefix: &str) -> String {
+    // Owned files come from the tree; received shares from shared-tree.
+    for endpoint in [
+        "/api/sync/tree?after_id=0&limit=100",
+        "/api/sync/shared-tree",
+    ] {
+        let (status, body) = get_json(server, username, endpoint).await;
+        assert_eq!(status, 200, "{endpoint}");
+        if let Some(path) = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| {
+                entry["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with(prefix))
+            })
+            .and_then(|entry| entry["path"].as_str())
+        {
+            return path.to_string();
+        }
+    }
+    panic!("no file below {prefix}");
+}
+
+/// Percent-encodes a stored path for use as a query value.
+fn query(path: &str) -> String {
+    path.replace('%', "%25")
+        .replace('/', "%2F")
+        .replace(' ', "%20")
+}
+
+/// The single file mounted under `Shared with me` (its name is opaque for
+/// encrypted shares).
+fn shared_file(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(dir.join("Shared with me"))
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.path())
+}
+
 async fn setup_keyring(server: &str, username: &str, local: &Path) {
     let config = config(server, username, local);
     let (keyring, _recovery) = create_keyring_with_params(E2EE_PASS, &fast_params()).unwrap();
@@ -148,12 +196,13 @@ async fn encrypted_file_shared_with_a_user_syncs_decrypted() {
     assert_eq!(wrapped, 1);
 
     // Group shares of encrypted files stay refused.
+    let stored = stored_path(&server.url, "alice", "/Private/").await;
     let status = post_json(
         &server.url,
         "alice",
         "/api/shares",
         &serde_json::json!({
-            "path": "/Private/secret.bin",
+            "path": stored,
             "kind": "group",
             "recipient": "everyone",
         }),
@@ -164,7 +213,15 @@ async fn encrypted_file_shared_with_a_user_syncs_decrypted() {
     // Bob syncs: the file arrives decrypted under `Shared with me/`.
     let report = sync_once(&bob).await.unwrap();
     assert_eq!(report.pulled, 1, "{report:?}");
-    let bob_copy = bob_dir.join("Shared with me/secret.bin");
+    let bob_copy = shared_file(&bob_dir).expect("shared file mounted");
+    assert!(
+        !bob_copy
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("secret.bin"),
+        "the shared file name must stay encrypted"
+    );
     assert_eq!(std::fs::read(&bob_copy).unwrap(), secret);
 
     // A second pass is a no-op.
@@ -229,10 +286,12 @@ async fn independent_recipient_decoder() {
         .unwrap();
     let identity: Identity = master.unwrap_identity(&wrapped_private).unwrap();
 
+    let shared_path = stored_path(&server.url, "bob", "/Shared with me/").await;
+    let shared_query = query(&shared_path);
     let (status, body) = get_json(
         &server.url,
         "bob",
-        "/api/e2ee/share-key?path=%2FShared%20with%20me%2Fsecret.bin",
+        &format!("/api/e2ee/share-key?path={shared_query}"),
     )
     .await;
     assert_eq!(status, 200, "{body}");
@@ -244,7 +303,7 @@ async fn independent_recipient_decoder() {
     let (status, manifest) = get_json(
         &server.url,
         "bob",
-        "/api/files/manifest?path=%2FShared%20with%20me%2Fsecret.bin",
+        &format!("/api/files/manifest?path={shared_query}"),
     )
     .await;
     assert_eq!(status, 200);
@@ -257,7 +316,7 @@ async fn independent_recipient_decoder() {
         let (status, bytes) = {
             let response = reqwest::Client::new()
                 .get(format!(
-                    "{}/api/chunks/{hash}?path=%2FShared%20with%20me%2Fsecret.bin",
+                    "{}/api/chunks/{hash}?path={shared_query}",
                     server.url
                 ))
                 .basic_auth("bob", Some(PASS))
@@ -272,6 +331,7 @@ async fn independent_recipient_decoder() {
         assert_eq!(status, 200, "chunk {hash}");
         decoded.extend_from_slice(file_key.decrypt_chunk(&bytes).unwrap().as_slice());
     }
+    let decoded = kolimi_crypto::unpad_file(&decoded).unwrap();
     assert_eq!(decoded, secret);
 
     // Without the path context bob's own store does not have the chunk.

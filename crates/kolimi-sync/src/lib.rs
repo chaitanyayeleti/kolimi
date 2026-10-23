@@ -135,8 +135,32 @@ impl EncryptPolicy {
         // and the CLI's --e2ee-root) must stay encrypted even after the
         // server starts reporting its own flags. Erring toward encryption is
         // the only safe direction.
-        self.prefixes.iter().any(|root| is_under(rel, root))
-            || self.fallback.iter().any(|root| is_under(rel, root))
+        self.prefixes
+            .iter()
+            .chain(self.fallback.iter())
+            .any(|root| root.trim_matches('/').is_empty() || is_under(rel, root))
+    }
+
+    /// Number of leading path segments that stay plaintext on the server.
+    ///
+    /// Everything below the *outermost* encrypted prefix is name-encoded, so
+    /// this deliberately picks the shortest matching prefix. `Some(0)` means
+    /// the sync root itself is encrypted and every segment is encoded.
+    fn encode_boundary(&self, rel: &str) -> Option<usize> {
+        self.prefixes
+            .iter()
+            .chain(self.fallback.iter())
+            .filter(|root| {
+                let root = root.trim_matches('/');
+                root.is_empty() || is_under(rel, root)
+            })
+            .map(|root| {
+                root.trim_matches('/')
+                    .split('/')
+                    .filter(|segment| !segment.is_empty())
+                    .count()
+            })
+            .min()
     }
 }
 
@@ -392,6 +416,53 @@ fn relative_to_root(server_path: &str, root: &str) -> Option<String> {
     Some(rel.to_string())
 }
 
+/// Maps every local relative path to its stored server path (encoded names
+/// included). Sharing and unsharing happen by server path, so a client that
+/// only knows the local name must resolve it first.
+async fn server_path_map(
+    http: &Http,
+    root: &str,
+    e2ee: Option<&E2ee>,
+) -> Result<std::collections::HashMap<String, String>, SyncError> {
+    let mut map = std::collections::HashMap::new();
+    let mut after = 0i64;
+    loop {
+        let path = format!("/api/sync/tree?after_id={after}&limit=1000");
+        let (status, body) = http.get_json(&path).await?;
+        if status != 200 {
+            return Err(SyncError::Server { status, path });
+        }
+        let Some(entries) = body["entries"].as_array() else {
+            return Err(SyncError::Protocol(format!(
+                "sync tree response for {path} has no 'entries' array"
+            )));
+        };
+        let mut advanced = false;
+        for entry in entries {
+            if let Some(id) = entry["id"].as_i64()
+                && id > after
+            {
+                after = id;
+                advanced = true;
+            }
+            let Some(server_path) = entry["path"].as_str() else {
+                continue;
+            };
+            let Some(rel) = relative_to_root(server_path, root) else {
+                continue;
+            };
+            if rel.is_empty() {
+                continue;
+            }
+            map.insert(local_rel(&rel, e2ee), server_path.to_string());
+        }
+        if !body["has_more"].as_bool().unwrap_or(false) || !advanced {
+            break;
+        }
+    }
+    Ok(map)
+}
+
 /// Rejects a server-controlled relative path that could escape the sync root.
 ///
 /// Remote tree entries are untrusted: a `..` component, an absolute path, or a
@@ -475,6 +546,53 @@ fn ensure_parent_dirs(
 struct E2ee {
     master: MasterKey,
     identity: Identity,
+}
+
+impl E2ee {
+    /// Encodes the path segments after the encryption boundary for storage.
+    fn encode_rel(&self, rel: &str, boundary: usize) -> Result<String, SyncError> {
+        let mut out: Vec<String> = Vec::new();
+        for (index, segment) in rel.split('/').enumerate() {
+            if index < boundary {
+                out.push(segment.to_string());
+            } else {
+                out.push(kolimi_crypto::encode_name(&self.master, segment)?);
+            }
+        }
+        Ok(out.join("/"))
+    }
+
+    /// Decodes every stored segment it can; plaintext names and names from
+    /// another keyring (shared encrypted folders) are left as-is.
+    fn decode_rel(&self, rel: &str) -> String {
+        rel.split('/')
+            .map(|segment| {
+                kolimi_crypto::decode_name(&self.master, segment)
+                    .unwrap_or_else(|| segment.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}
+
+/// Encodes a local relative path for the server when it is covered by an
+/// encrypted root. Returns the input unchanged for plaintext paths.
+fn remote_rel(rel: &str, policy: &EncryptPolicy, e2ee: Option<&E2ee>) -> Result<String, SyncError> {
+    let Some(boundary) = policy.encode_boundary(rel) else {
+        return Ok(rel.to_string());
+    };
+    let Some(e2ee) = e2ee else {
+        return Err(SyncError::Locked(format!(
+            "/{rel} is in an encrypted folder — unlock encryption before syncing it"
+        )));
+    };
+    e2ee.encode_rel(rel, boundary)
+}
+
+/// Decodes a server path into the local relative path.
+fn local_rel(rel: &str, e2ee: Option<&E2ee>) -> String {
+    e2ee.map(|e2ee| e2ee.decode_rel(rel))
+        .unwrap_or_else(|| rel.to_string())
 }
 
 async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, SyncError> {
@@ -723,7 +841,14 @@ pub async fn share_path(
     };
     let root = remote_prefix(root);
     let rel_path = rel_path.trim_start_matches('/');
-    let server_path = format!("{root}/{rel_path}");
+    // Names inside encrypted folders are stored encoded, so the plaintext
+    // local path must be resolved through the tree before sharing.
+    let server_paths = server_path_map(&http, &root, Some(&e2ee)).await?;
+    let server_path = server_paths.get(rel_path).cloned().ok_or_else(|| {
+        SyncError::E2ee(format!(
+            "{rel_path} is not on the server yet — sync it before sharing"
+        ))
+    })?;
 
     // Resolve the recipients (group members, minus ourselves).
     let members: Vec<String> = match &target {
@@ -817,7 +942,12 @@ pub async fn share_path(
     let result: Result<u64, SyncError> = async {
         let mut wrapped_count = 0u64;
         for rel in files {
-            let key_path = format!("/api/files/key?path={}", encode(&format!("{root}/{rel}")));
+            let Some(stored_path) = server_paths.get(&rel) else {
+                return Err(SyncError::E2ee(format!(
+                    "{rel} is not on the server yet — sync it before sharing"
+                )));
+            };
+            let key_path = format!("/api/files/key?path={}", encode(stored_path));
             let (status, body) = http.get_json(&key_path).await?;
             if status == 404 {
                 continue; // plaintext file
@@ -839,7 +969,7 @@ pub async fn share_path(
                 let share_key = e2ee.identity.wrap_file_key_for(public_key, &file_key)?;
                 let path = format!(
                     "/api/e2ee/share-key?path={}&recipient={}",
-                    encode(&format!("{root}/{rel}")),
+                    encode(stored_path),
                     encode(member)
                 );
                 let status = http.put_bytes(&path, &share_key).await?;
@@ -894,7 +1024,13 @@ pub async fn unshare_path(
 ) -> Result<(), SyncError> {
     let http = Http::new(config)?;
     let root = remote_prefix(root);
-    let server_path = format!("{root}/{}", rel_path.trim_start_matches('/'));
+    let rel_path = rel_path.trim_start_matches('/');
+    let e2ee = unlock_e2ee(&http, config).await?;
+    let server_paths = server_path_map(&http, &root, e2ee.as_ref()).await?;
+    let server_path = server_paths
+        .get(rel_path)
+        .cloned()
+        .unwrap_or_else(|| format!("{root}/{rel_path}"));
     let list_path = format!("/api/shares?path={}", encode(&server_path));
     let (status, body) = http.get_json(&list_path).await?;
     if status != 200 {
@@ -1642,6 +1778,7 @@ struct RemoteFile {
 async fn remote_files(
     http: &Http,
     root: &str,
+    e2ee: Option<&E2ee>,
 ) -> Result<(BTreeMap<String, RemoteFile>, Vec<String>), SyncError> {
     let mut remote = BTreeMap::new();
     let mut encrypted_dirs: Vec<String> = Vec::new();
@@ -1676,11 +1813,16 @@ async fn remote_files(
                 && let Some(server_path) = entry["path"].as_str()
             {
                 if let Some(rel) = relative_to_root(server_path, root) {
-                    if !rel.is_empty() {
+                    let rel = local_rel(&rel, e2ee);
+                    if rel.is_empty() {
+                        // The pair's root folder itself is encrypted: every
+                        // path below it is name-encoded.
+                        encrypted_dirs.push(String::new());
+                    } else {
                         encrypted_dirs.push(rel);
                     }
                 } else if root.is_empty() {
-                    encrypted_dirs.push(server_path.trim_matches('/').to_string());
+                    encrypted_dirs.push(local_rel(server_path.trim_matches('/'), e2ee));
                 }
             }
             if entry["kind"].as_str() != Some("file") {
@@ -1695,6 +1837,9 @@ async fn remote_files(
             let Some(rel) = relative_to_root(server_path, root) else {
                 continue;
             };
+            // Decode the stored names into the local relative path; the
+            // RemoteFile keeps the encoded server path for HTTP requests.
+            let rel = local_rel(&rel, e2ee);
             remote.insert(
                 rel,
                 RemoteFile {
@@ -1755,7 +1900,7 @@ async fn pull(
     state: &mut State,
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
-    let (remote, encrypted_dirs) = remote_files(http, root).await?;
+    let (remote, encrypted_dirs) = remote_files(http, root, e2ee).await?;
     if !encrypted_dirs.is_empty() {
         policy.prefixes = encrypted_dirs;
     }
@@ -1867,7 +2012,7 @@ async fn pull(
                 if file.shared {
                     Some(load_shared_file_key(http, state, e2ee, &file.path).await?)
                 } else {
-                    Some(load_file_key(http, state, e2ee, root, rel).await?)
+                    Some(load_file_key(http, state, e2ee, rel, &file.path).await?)
                 }
             } else {
                 None
@@ -1889,6 +2034,15 @@ async fn pull(
                     None => data.extend_from_slice(&bytes),
                 }
             }
+            // Encrypted files carry a length header and zero padding; strip
+            // it before writing the local file. Legacy files pass through.
+            let data = if file_key.is_some() {
+                kolimi_crypto::unpad_file(&data).map_err(|error| {
+                    SyncError::E2ee(format!("padded file for /{rel}: {error}"))
+                })?
+            } else {
+                data
+            };
             // For plaintext files the manifest describes `data` itself. An
             // *encrypted* manifest hashes the ciphertext chunks, so the whole-file
             // check does not apply to decrypted data; each chunk was authenticated
@@ -1985,8 +2139,8 @@ async fn load_file_key(
     http: &Http,
     state: &mut State,
     e2ee: &E2ee,
-    root: &str,
     rel: &str,
+    server_path: &str,
 ) -> Result<FileKey, SyncError> {
     if let Some(cached) = state.keys.get(rel).cloned() {
         let cached_result: Result<FileKey, SyncError> = (|| {
@@ -2004,7 +2158,7 @@ async fn load_file_key(
             }
         }
     }
-    let path = format!("/api/files/key?path={}", encode(&format!("{root}/{rel}")));
+    let path = format!("/api/files/key?path={}", encode(server_path));
     let (status, body) = http.get_json(&path).await?;
     if status != 200 {
         return Err(SyncError::Server { status, path });
@@ -2070,8 +2224,8 @@ async fn fetch_or_create_file_key(
     http: &Http,
     state: &mut State,
     e2ee: &E2ee,
-    root: &str,
     rel: &str,
+    server_path: &str,
 ) -> Result<(FileKey, Option<Vec<u8>>), SyncError> {
     if let Some(cached) = state.keys.get(rel) {
         let wrapped = STANDARD
@@ -2079,7 +2233,7 @@ async fn fetch_or_create_file_key(
             .map_err(|error| SyncError::E2ee(format!("cached key: {error}")))?;
         return Ok((e2ee.master.unwrap_file_key(&wrapped)?, None));
     }
-    let path = format!("/api/files/key?path={}", encode(&format!("{root}/{rel}")));
+    let path = format!("/api/files/key?path={}", encode(server_path));
     let (status, body) = http.get_json(&path).await?;
     match status {
         200 => {
@@ -2151,6 +2305,13 @@ async fn push(
     state: &mut State,
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
+    // Existing server paths keyed by local relative path. This keeps a
+    // legacy plaintext-named file (created before names were encrypted) in
+    // place instead of creating a second, encoded copy beside it.
+    let stored_paths = match e2ee {
+        Some(e2ee) => server_path_map(http, root, Some(e2ee)).await?,
+        None => std::collections::HashMap::new(),
+    };
     let mut locals: Vec<String> = Vec::new();
     // Drop conflict-copy records whose file no longer exists, then collect.
     state
@@ -2171,7 +2332,12 @@ async fn push(
         for part in parts {
             current.push('/');
             current.push_str(part);
-            dirs.insert(format!("{root}{current}"));
+            let local_rel = current.trim_start_matches('/');
+            let stored = match stored_paths.get(local_rel) {
+                Some(stored) => stored.clone(),
+                None => format!("{root}/{}", remote_rel(local_rel, policy, e2ee)?),
+            };
+            dirs.insert(stored);
         }
     }
     for dir in &dirs {
@@ -2193,7 +2359,10 @@ async fn push(
         {
             continue;
         }
-        let remote_path = format!("{root}/{rel}");
+        let remote_path = match stored_paths.get(&rel) {
+            Some(stored) => stored.clone(),
+            None => format!("{root}/{}", remote_rel(&rel, policy, e2ee)?),
+        };
         // Pre-check: when we have a known content_id, fetch the current
         // remote manifest and compare before uploading any chunks. If the
         // server moved on, take the 409-conflict path locally (keep the
@@ -2215,6 +2384,13 @@ async fn push(
             }
         }
         let data = std::fs::read(&local_path)?;
+        // Hide the exact length from the server: header + zero padding to a
+        // coarse bucket, inside the ciphertext.
+        let padded = policy.covers(&rel).then(|| kolimi_crypto::pad_file(&data));
+        let encrypted_source = padded
+            .as_ref()
+            .map(|bytes| bytes.as_slice())
+            .unwrap_or(&data);
         let mut pending_key: Option<Vec<u8>> = None;
         let mut file_key: Option<FileKey> = None;
         if policy.covers(&rel) && e2ee.is_none() {
@@ -2228,11 +2404,12 @@ async fn push(
             // Encrypt-then-chunk (RFC 0007): chunk boundaries follow the
             // plaintext so edits stay delta-friendly; the manifest hashes
             // ciphertext chunks.
-            let (key, pending) = fetch_or_create_file_key(http, state, e2ee, root, &rel).await?;
+            let (key, pending) =
+                fetch_or_create_file_key(http, state, e2ee, &rel, &remote_path).await?;
             pending_key = pending;
             let mut chunks = Vec::new();
             let mut total = 0u64;
-            for chunk in chunker::split(&data) {
+            for chunk in chunker::split(encrypted_source) {
                 let ciphertext = key.encrypt_chunk(chunk.data)?;
                 total += ciphertext.len() as u64;
                 chunks.push(ChunkRef {
@@ -2268,7 +2445,7 @@ async fn push(
         };
 
         if let Some(key) = &file_key {
-            for chunk in chunker::split(&data) {
+            for chunk in chunker::split(encrypted_source) {
                 let ciphertext = key.encrypt_chunk(chunk.data)?;
                 if !needs_upload(&Hash::of(&ciphertext)) {
                     continue;
@@ -2314,7 +2491,7 @@ async fn push(
                     if status != 204 {
                         // Roll back the just-committed node: without its key
                         // the server would serve the ciphertext as plaintext.
-                        let rollback = format!("/dav{}", encode_path(&format!("{root}/{rel}")));
+                        let rollback = format!("/dav{}", encode_path(&remote_path));
                         let _ = http.delete(&rollback).await;
                         return Err(SyncError::Server {
                             status,

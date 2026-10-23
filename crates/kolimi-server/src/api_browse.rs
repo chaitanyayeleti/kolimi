@@ -382,6 +382,25 @@ pub async fn move_node(
     if req.from.is_empty() || req.to.is_empty() {
         return api::bad_request("from and to are required");
     }
+    // Metadata moves must not cross the encryption boundary: a plaintext
+    // file would land inside an encrypted folder, or a ciphertext file would
+    // be exposed in a plaintext one. On a DB error, assume encrypted (the
+    // safe direction) so a broken lookup cannot leak plaintext.
+    let from_encrypted = state
+        .vfs
+        .path_is_encrypted(user.user_id, &req.from)
+        .await
+        .unwrap_or(true);
+    let to_encrypted = state
+        .vfs
+        .path_is_encrypted(user.user_id, &req.to)
+        .await
+        .unwrap_or(true);
+    if from_encrypted != to_encrypted {
+        return api::bad_request(
+            "cannot move items across the encryption boundary — upload them into the target folder instead",
+        );
+    }
     match state
         .vfs
         .move_node(user.user_id, &req.from, &req.to, false)

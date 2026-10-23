@@ -6,6 +6,41 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.37] - 2026-10-26
+
+### Added
+- **Encrypted names.** Files and folders created inside an encrypted folder
+  are stored under opaque `k1_…` names. The server, its logs, search index
+  and backups never see the plaintext name. The web UI decodes names for
+  display, breadcrumbs, trash, search results and downloads; rename, new
+  folder and move encode them, and crossing the encryption boundary is
+  refused by both the client and the server.
+- **Encrypted sizes.** Encrypted files carry an encrypted length header and
+  zero padding to a coarse bucket (4 KiB powers of two up to 1 MiB, then
+  1 MiB multiples), so the server learns only the bucket. Legacy encrypted
+  files still decrypt, and public links understand the padded format.
+- **Migrate existing names** in Settings → Encryption: renames items inside
+  encrypted folders in place, parents first, and is safe to repeat.
+  Plaintext files are skipped until their content is encrypted.
+- Public-link fragments now carry the display name (`&n=`), so the public
+  page shows the real name while the server still never sees it.
+
+### Changed
+- The sync client encodes and decodes names and pads/unpads content.
+  Existing plaintext-named encrypted files are updated in place instead of
+  being duplicated under an encoded name.
+- Encrypted shares remain read-only and mount under the owner's opaque name
+  for recipients, who do not have the owner's name key.
+- The path segment limit is now 512 bytes (encoded names are longer than
+  the plaintext they hide).
+
+### Known limitations
+- Encrypted shared folders show opaque names to recipients (sharing the
+  name key per subtree is the next step).
+- Server-side search cannot match encrypted names; items keep their old
+  readable name until the migration is run.
+
+## [0.1.36] - 2026-10-26
 ## [0.1.36] - 2026-10-26
 
 ### Added

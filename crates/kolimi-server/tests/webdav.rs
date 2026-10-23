@@ -235,6 +235,61 @@ async fn plaintext_file_can_be_encrypted_in_place_then_the_folder_flips() {
 }
 
 #[tokio::test]
+async fn moving_across_the_encryption_boundary_is_refused() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    send(&server.app, request("MKCOL", "/dav/Enc", Some(&auth))).await;
+    send(&server.app, request("MKCOL", "/dav/Plain", Some(&auth))).await;
+    let body = serde_json::to_vec(&json!({ "path": "/Enc", "encrypted": true })).unwrap();
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "POST",
+            "/api/files/encrypt",
+            &auth,
+            "application/json",
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    send(
+        &server.app,
+        request_with_body("PUT", "/dav/Plain/a.txt", &auth, "text/plain", b"plain"),
+    )
+    .await;
+
+    let body = serde_json::to_vec(&json!({
+        "from": "/Plain/a.txt",
+        "to": "/Enc/a.txt",
+    }))
+    .unwrap();
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("POST", "/api/files/move", &auth, "application/json", &body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "plaintext must not move into an encrypted folder"
+    );
+
+    // Renaming inside a plaintext folder is still fine.
+    let body = serde_json::to_vec(&json!({
+        "from": "/Plain/a.txt",
+        "to": "/Plain/b.txt",
+    }))
+    .unwrap();
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("POST", "/api/files/move", &auth, "application/json", &body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn api_session_probe_ignores_basic_credentials() {
     // A browser that once received a Basic challenge caches the password and
     // sends it on every same-origin request. If `/api/me` accepted it, the
