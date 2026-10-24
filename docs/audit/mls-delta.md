@@ -54,6 +54,10 @@ Nothing here is a substitute for the review itself.
 - `crates/kolimi-server/tests/mls_e2e.rs`: the full protocol over HTTP —
   key packages, init, commit/welcome, Bob joining, matching exporter, and a
   write recipient updating the keyring that the owner then decrypts.
+- `crates/kolimi-mls/tests/persistence.rs`: device/group state export,
+  import, group reload, and an epoch advance after reload.
+- `crates/kolimi-sync/src/mls_store.rs`: UMK-sealed state file (0600,
+  atomic rename), wrong-key and tamper rejection.
 - `cargo check --target wasm32-unknown-unknown` for the spike.
 - `crates/kolimi-server/tests/mls.rs`: owner-only init, read-vs-write
   ACLs, epoch rules, keyring conflict, key packages, non-member denial.

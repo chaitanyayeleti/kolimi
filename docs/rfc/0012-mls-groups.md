@@ -11,8 +11,10 @@ Status: design + spike (not wired) · Depends on: RFC 0007 (E2EE), RFC 0008
 > key packages → Welcome join → exporter agreement → keyring write by a
 > recipient → owner decrypt. The crate is in the workspace; the 89 new
 > `cargo-vet` exemptions are tracked in
-> [`docs/audit/mls-delta.md`](../audit/mls-delta.md). Desktop/web group-state
-> persistence is the next slice; encrypted shares stay read-only until then.
+> [`docs/audit/mls-delta.md`](../audit/mls-delta.md). The sync/desktop path now
+> has sealed `MlsStore` persistence (device signer + openmls storage, UMK-sealed,
+> 0600) and `Group::load`; wiring the share flow and the web IndexedDB path
+> remain. Encrypted shares stay read-only until those land.
 
 ## Why
 

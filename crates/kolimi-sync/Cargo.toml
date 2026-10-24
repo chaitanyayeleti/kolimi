@@ -32,6 +32,7 @@ keyring = { version = "4", optional = true }
 rpassword.workspace = true
 kolimi-chunk.workspace = true
 kolimi-crypto.workspace = true
+kolimi-mls.workspace = true
 percent-encoding.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "rustls-native-certs"] }
 serde.workspace = true
@@ -39,3 +40,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

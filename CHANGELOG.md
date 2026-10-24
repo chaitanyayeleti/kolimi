@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Sealed MLS device/group state for the sync/desktop client.** `Device`
+  can export its signer, identity and openmls key-value storage;
+  `Group::load` restores a group; `MlsStore` writes the state sealed with
+  the UMK (0600, atomic rename) and rejects a different master key or
+  tampering. Tests cover reloading a group, advancing an epoch after
+  reload, and the sealed file roundtrip.
+- This is groundwork: the sync share flow, web IndexedDB path and write
+  enablement are still pending. Encrypted shares remain read-only.
+
+## [0.1.43] - 2026-10-24
 ## [0.1.43] - 2026-10-24
 
 ### Added

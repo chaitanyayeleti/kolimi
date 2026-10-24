@@ -189,6 +189,36 @@ impl MasterKey {
         Ok(FileKey::from_bytes(unwrap(&self.0, wrapped, FK_AAD)?))
     }
 
+    /// Encrypts local client state (MLS device/group storage, sync state)
+    /// under a key derived from the master key.
+    ///
+    /// `aad` binds the blob to its purpose (for example
+    /// `b"kolimi-mls-state-v1"`). Output is `nonce || ciphertext`.
+    pub fn seal_local(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let key = hkdf32(&self.0, None, b"kolimi-local-state-v1")?;
+        let nonce = random::<NONCE_LEN>()?;
+        let ciphertext = aead_encrypt(&key, &nonce, aad, plaintext)?;
+        let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&ciphertext);
+        Ok(blob)
+    }
+
+    /// Decrypts a blob produced by [`Self::seal_local`].
+    pub fn open_local(&self, blob: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        if blob.len() < NONCE_LEN + TAG_LEN {
+            return Err(CryptoError::Malformed(
+                "local state is truncated".to_string(),
+            ));
+        }
+        let key = hkdf32(&self.0, None, b"kolimi-local-state-v1")?;
+        let (nonce, ciphertext) = blob.split_at(NONCE_LEN);
+        let nonce: [u8; NONCE_LEN] = nonce
+            .try_into()
+            .map_err(|_| CryptoError::Malformed("nonce".to_string()))?;
+        aead_decrypt(&key, &nonce, aad, ciphertext)
+    }
+
     /// Wraps an X25519 identity's private key for server-side storage.
     pub fn wrap_identity(&self, identity: &crate::Identity) -> Result<Vec<u8>, CryptoError> {
         wrap(&self.0, &identity.private_bytes(), IDENTITY_AAD)
@@ -264,7 +294,28 @@ impl Argon2Params {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::Argon2Params;
+    use super::{Argon2Params, MasterKey};
+
+    #[test]
+    fn local_state_seal_roundtrip_and_binding() {
+        let master = MasterKey::generate().unwrap();
+        let plaintext = br#"{"groups":["AAAA"],"storage":{"k":"v"}}"#;
+        let aad = b"kolimi-mls-state-v1";
+        let blob = master.seal_local(plaintext, aad).unwrap();
+        assert_eq!(master.open_local(&blob, aad).unwrap().as_slice(), plaintext);
+        assert!(master.open_local(&blob, b"other-purpose").is_err());
+        assert!(
+            MasterKey::generate()
+                .unwrap()
+                .open_local(&blob, aad)
+                .is_err()
+        );
+
+        let mut tampered = blob.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(master.open_local(&tampered, aad).is_err());
+    }
 
     #[test]
     fn rejects_oversized_kdf_params() {

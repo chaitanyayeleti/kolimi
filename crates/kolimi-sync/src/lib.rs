@@ -17,6 +17,8 @@
 //! directions. This is the core the Tauri/mobile shells will wrap; it is
 //! intentionally one-shot (call it from a timer or file watcher).
 
+pub mod mls_store;
+
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

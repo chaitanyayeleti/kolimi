@@ -4,18 +4,35 @@
 //! this module gives the sync/desktop/web layers one place for device
 //! key packages, group creation, Welcome joins and the epoch exporter.
 
+use std::collections::BTreeMap;
+
+use base64::{Engine, engine::general_purpose::STANDARD};
 use openmls::prelude::tls_codec::{Deserialize, Serialize};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 use crate::CIPHERSUITE;
 
 /// A device credential and its local MLS provider.
 pub struct Device {
+    identity: Vec<u8>,
     provider: OpenMlsRustCrypto,
     signer: SignatureKeyPair,
     credential: CredentialWithKey,
+}
+
+/// Serialized device state: signer, identity and the openmls key-value
+/// storage (including all group secrets). Encrypt this with the UMK before
+/// writing it to disk/IndexedDB.
+#[derive(SerdeSerialize, SerdeDeserialize)]
+struct PersistedDevice {
+    v: u8,
+    identity: Vec<u8>,
+    signer: serde_json::Value,
+    storage: BTreeMap<String, String>,
+    groups: Vec<String>,
 }
 
 impl Device {
@@ -33,10 +50,92 @@ impl Device {
             signature_key: signer.public().into(),
         };
         Ok(Self {
+            identity: identity.to_vec(),
             provider,
             signer,
             credential,
         })
+    }
+
+    /// Serializes the device and the listed group ids.
+    ///
+    /// The output contains every MLS secret; callers **must** seal it with
+    /// [`kolimi_crypto::MasterKey::seal_local`] (or equivalent) before
+    /// persisting it.
+    pub fn export_state(&self, groups: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+        let storage = self.provider.storage();
+        let values = storage
+            .values
+            .read()
+            .map_err(|_| "mls storage lock".to_string())?;
+        let storage: BTreeMap<String, String> = values
+            .iter()
+            .map(|(key, value)| (STANDARD.encode(key), STANDARD.encode(value)))
+            .collect();
+        let signer = serde_json::to_value(&self.signer)
+            .map_err(|error| format!("mls signer encoding: {error}"))?;
+        serde_json::to_vec(&PersistedDevice {
+            v: 1,
+            identity: self.identity.clone(),
+            signer,
+            storage,
+            groups: groups.iter().map(|group| STANDARD.encode(group)).collect(),
+        })
+        .map_err(|error| format!("mls state encoding: {error}"))
+    }
+
+    /// Restores a device from [`Self::export_state`].
+    pub fn import_state(bytes: &[u8]) -> Result<(Self, Vec<Vec<u8>>), String> {
+        let persisted: PersistedDevice =
+            serde_json::from_slice(bytes).map_err(|error| format!("mls state decode: {error}"))?;
+        if persisted.v != 1 {
+            return Err("unsupported MLS state version".to_string());
+        }
+        let provider = OpenMlsRustCrypto::default();
+        {
+            let mut values = provider
+                .storage()
+                .values
+                .write()
+                .map_err(|_| "mls storage lock".to_string())?;
+            for (key, value) in persisted.storage {
+                let key = STANDARD
+                    .decode(key)
+                    .map_err(|_| "bad MLS storage key".to_string())?;
+                let value = STANDARD
+                    .decode(value)
+                    .map_err(|_| "bad MLS storage value".to_string())?;
+                values.insert(key, value);
+            }
+        }
+        let signer: SignatureKeyPair = serde_json::from_value(persisted.signer)
+            .map_err(|error| format!("mls signer decode: {error}"))?;
+        signer
+            .store(provider.storage())
+            .map_err(|error| format!("mls signer store: {error:?}"))?;
+        let credential = BasicCredential::new(persisted.identity.clone());
+        let credential = CredentialWithKey {
+            credential: credential.into(),
+            signature_key: signer.public().into(),
+        };
+        let groups = persisted
+            .groups
+            .into_iter()
+            .map(|group| {
+                STANDARD
+                    .decode(group)
+                    .map_err(|_| "bad MLS group id".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            Self {
+                identity: persisted.identity,
+                provider,
+                signer,
+                credential,
+            },
+            groups,
+        ))
     }
 
     /// The serialized public key package to publish/upload.
@@ -76,6 +175,14 @@ impl Group {
             device.credential.clone(),
         )
         .map_err(|error| format!("mls group create: {error:?}"))?;
+        Ok(Self { group })
+    }
+
+    /// Loads a group from the device's persisted storage.
+    pub fn load(device: &Device, group_id: &[u8]) -> Result<Self, String> {
+        let group = MlsGroup::load(device.provider.storage(), &GroupId::from_slice(group_id))
+            .map_err(|error| format!("mls group load: {error:?}"))?
+            .ok_or_else(|| "MLS group not found in local state".to_string())?;
         Ok(Self { group })
     }
 
@@ -132,9 +239,16 @@ impl Group {
         let protocol = message
             .try_into_protocol_message()
             .map_err(|error| format!("mls protocol message: {error:?}"))?;
-        self.group
+        let processed = self
+            .group
             .process_message(&device.provider, protocol)
             .map_err(|error| format!("mls process message: {error:?}"))?;
+        // A received commit is staged; merge it so the epoch advances.
+        if let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() {
+            self.group
+                .merge_staged_commit(&device.provider, *staged)
+                .map_err(|error| format!("mls merge staged commit: {error:?}"))?;
+        }
         Ok(())
     }
 
