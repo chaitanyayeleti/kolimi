@@ -3,7 +3,7 @@
 services:
   kolimi:
     # Prebuilt image from GitHub Container Registry — no local build.
-    image: ${KOLIMI_IMAGE:-ghcr.io/chaitanyayeleti/kolimi:0.1.40}
+    image: ${KOLIMI_IMAGE:-ghcr.io/chaitanyayeleti/kolimi:0.1.41}
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"

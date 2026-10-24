@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.41] - 2026-10-24
+
+### Changed
+- The decorative lock glyph in a file row's action cluster looked like a
+  button next to Download/Share/Rename/Delete. It is removed; encryption
+  state now lives in the row metadata (`Encrypted`, `Folder · Encrypted`),
+  and the download action is explicitly labelled **Download & decrypt** in
+  the row, context menu and lightbox. There was never a second decrypt
+  action — the lock was informational.
+
+## [0.1.40] - 2026-10-24
 ## [0.1.40] - 2026-10-24
 
 ### Added

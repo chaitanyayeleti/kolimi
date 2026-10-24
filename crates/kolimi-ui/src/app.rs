@@ -2353,7 +2353,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                         <span class="file-actions">
                                                             <button
                                                                 class="icon-btn"
-                                                                title="Download (decrypt)"
+                                                                title="Download & decrypt"
                                                                 on:click=move |_| decrypt_entry(dl.clone())
                                                             >
                                                                 <Icon name="download"/>
@@ -2471,7 +2471,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let name = entry.name.clone();
                                                 let kind = entry.kind.clone();
                                                 let meta = if is_dir {
-                                                    "Folder".to_string()
+                                                    if entry.encrypted {
+                                                        "Folder · Encrypted".to_string()
+                                                    } else {
+                                                        "Folder".to_string()
+                                                    }
                                                 } else {
                                                     let when = relative_time(entry.modified_at);
                                                     let size = if entry.encrypted {
@@ -2578,27 +2582,13 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                             <span class="tile-meta">{meta}</span>
                                                         </button>
                                                         <div class="tile-actions">
-                                                            {encrypted
-                                                                .then(|| {
-                                                                    // Informational only: Download already
-                                                                    // decrypts, so a second button would just
-                                                                    // do the same thing twice.
-                                                                    view! {
-                                                                        <span
-                                                                            class="icon-btn"
-                                                                            title="Encrypted — downloads decrypt in your browser"
-                                                                        >
-                                                                            <Icon name="lock"/>
-                                                                        </span>
-                                                                    }
-                                                                })}
                                                             {(!is_dir)
                                                                 .then(|| {
                                                                     if encrypted {
                                                                         view! {
                                                                             <button
                                                                                 class="icon-btn"
-                                                                                title="Download (decrypt)"
+                                                                                title="Download & decrypt"
                                                                                 on:click=move |_| decrypt_entry(download_copy.clone())
                                                                             >
                                                                                 <Icon name="download"/>
@@ -2682,7 +2672,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                 let name = entry.name.clone();
                                                 let kind = entry.kind.clone();
                                                 let meta = if is_dir {
-                                                    "Folder".to_string()
+                                                    if entry.encrypted {
+                                                        "Folder · Encrypted".to_string()
+                                                    } else {
+                                                        "Folder".to_string()
+                                                    }
                                                 } else {
                                                     let when = relative_time(entry.modified_at);
                                                     let size = if entry.encrypted {
@@ -2802,25 +2796,13 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                                             </span>
                                                         </button>
                                                         <span class="file-actions">
-                                                            {encrypted
-                                                                .then(|| {
-                                                                    // Informational: Download decrypts.
-                                                                    view! {
-                                                                        <span
-                                                                            class="icon-btn"
-                                                                            title="Encrypted — downloads decrypt in your browser"
-                                                                        >
-                                                                            <Icon name="lock"/>
-                                                                        </span>
-                                                                    }
-                                                                })}
                                                             {(!is_dir)
                                                                 .then(|| {
                                                                     if encrypted {
                                                                         view! {
                                                                             <button
                                                                                 class="icon-btn"
-                                                                                title="Download (decrypt)"
+                                                                                title="Download & decrypt"
                                                                                 on:click=move |_| decrypt_entry(download_copy.clone())
                                                                             >
                                                                                 <Icon name="download"/>
@@ -3160,14 +3142,14 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                             view! {
                                                 <button
                                                     class="ctx-item"
-                                                    title="Download (decrypt)"
+                                                    title="Download & decrypt"
                                                     on:click=move |_| {
                                                         context_menu.set(None);
                                                         decrypt_entry(entry.clone());
                                                     }
                                                 >
                                                     <Icon name="download"/>
-                                                    "Download"
+                                                    "Download & decrypt"
                                                 </button>
                                             }
                                                 .into_any()
@@ -3336,7 +3318,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                         view! {
                                             <button
                                                 class="icon-btn"
-                                                title="Download (decrypt)"
+                                                title="Download & decrypt"
                                                 on:click=move |_| {
                                                     lightbox.set(None);
                                                     decrypt_entry(dl_entry.clone());
