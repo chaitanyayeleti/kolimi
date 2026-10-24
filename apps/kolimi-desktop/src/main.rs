@@ -167,6 +167,9 @@ struct SyncPair {
     remote: String,
     #[serde(default)]
     encrypted_roots: Vec<String>,
+    /// Opt in to MLS group shares (write-enabled encrypted shares).
+    #[serde(default)]
+    mls: bool,
 }
 
 fn default_remote() -> String {
@@ -189,6 +192,7 @@ fn pair_sync_config(
             recovery_code: None,
             prf_secret: None,
             encrypted_roots: pair.encrypted_roots.clone(),
+            mls: pair.mls || std::env::var_os("KOLIMI_MLS_SHARES").is_some(),
         }),
     }
 }
@@ -543,6 +547,7 @@ fn migrated_settings(v1: &V1Config) -> Settings {
                 local_dir: v1.local_dir.clone(),
                 remote: "/".to_string(),
                 encrypted_roots: v1.encrypted_roots.clone(),
+                mls: false,
             }],
         }],
     }
@@ -1140,6 +1145,7 @@ fn add_pair(
             local_dir: local,
             remote: normalize_remote(&remote),
             encrypted_roots: normalize_roots(encrypted_roots),
+            mls: false,
         });
         settings.clone()
     };
@@ -1566,6 +1572,7 @@ fn account_config(
             recovery_code: None,
             prf_secret: None,
             encrypted_roots: Vec::new(),
+            mls: false,
         }),
     }
 }

@@ -834,7 +834,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             let shared = entry.shared;
             spawn_local(async move {
                 let result = if shared {
-                    crate::e2ee::decrypt_shared_file(&master, &path, &display_name).await
+                    crate::mls::decrypt_shared_or_legacy(&master, &path, &display_name).await
                 } else {
                     crate::e2ee::decrypt_file(&master, &path).await
                 };
@@ -873,6 +873,15 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     {
         e2ee_master.set(Some(recalled));
     }
+    // A web recipient must publish an MLS key package before anyone can
+    // share an encrypted folder with them. This is idempotent per device.
+    Effect::new(move |_| {
+        if let Some(master) = e2ee_master.get() {
+            spawn_local(async move {
+                let _ = crate::mls::publish_key_package(&master).await;
+            });
+        }
+    });
     let undo = RwSignal::new(Option::<(String, i64)>::None);
     let uploads = RwSignal::new(Vec::<UploadItem>::new());
     let upload_seq = RwSignal::new(0u32);
@@ -1184,6 +1193,36 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 .await
                 .map(|info| info["encrypted"].as_bool().unwrap_or(false))
                 .unwrap_or(false);
+            // A writable received share is encrypted with the owner's name
+            // key and MLS keyring, not this account's Vault keys.
+            if crate::mls::is_writable_shared(&dir).await {
+                let Some(master) = e2ee_master.get_untracked() else {
+                    finish(false, None);
+                    error.set("Unlock encryption to write to this shared folder.".to_string());
+                    e2ee_open.set(true);
+                    return;
+                };
+                let bytes = match api::read_file(&file).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        finish(false, None);
+                        error.set(e);
+                        return;
+                    }
+                };
+                progress.set(50);
+                match crate::mls::upload_shared(&master, &dir, &plain_name, &bytes).await {
+                    Ok(()) => {
+                        progress.set(100);
+                        finish(true, None);
+                    }
+                    Err(e) => {
+                        finish(false, None);
+                        error.set(e);
+                    }
+                }
+                return;
+            }
             if encrypted {
                 let Some(master) = e2ee_master.get_untracked() else {
                     finish(false, None);
@@ -1364,22 +1403,38 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 .await
                 .map(|info| info["encrypted"].as_bool().unwrap_or(false))
                 .unwrap_or(false);
-            let folder_name = if encrypted {
-                let Some(master) = e2ee_master.get_untracked() else {
-                    error.set("Unlock encryption first (Settings → Encryption).".to_string());
-                    e2ee_open.set(true);
-                    return;
-                };
-                let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &current);
-                match crate::e2ee::encode_component(&master, &parent_plaintext, &name) {
-                    Ok(encoded) => encoded,
-                    Err(e) => {
-                        error.set(e);
-                        return;
+            let writable_share = match e2ee_master.get_untracked() {
+                Some(master) => crate::mls::encode_shared_name(&master, &current, &name).await,
+                None => Ok(None),
+            };
+            let folder_name = match writable_share {
+                Ok(Some(encoded)) => encoded,
+                Ok(None) => {
+                    if encrypted {
+                        let Some(master) = e2ee_master.get_untracked() else {
+                            error.set(
+                                "Unlock encryption first (Settings → Encryption).".to_string(),
+                            );
+                            e2ee_open.set(true);
+                            return;
+                        };
+                        let parent_plaintext =
+                            crate::e2ee::decode_display_path(Some(&master), &current);
+                        match crate::e2ee::encode_component(&master, &parent_plaintext, &name) {
+                            Ok(encoded) => encoded,
+                            Err(e) => {
+                                error.set(e);
+                                return;
+                            }
+                        }
+                    } else {
+                        name
                     }
                 }
-            } else {
-                name
+                Err(e) => {
+                    error.set(e);
+                    return;
+                }
             };
             let url = format!(
                 "/dav{}",
@@ -1458,8 +1513,34 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         }
         let current = path.get_untracked();
         let encrypted = entry.encrypted && !entry.shared;
+        let shared = entry.shared;
         let source = entry.path.clone();
         spawn_local(async move {
+            if shared {
+                let Some(master) = e2ee_master.get_untracked() else {
+                    error.set("Unlock encryption first (Settings → Encryption).".to_string());
+                    e2ee_open.set(true);
+                    return;
+                };
+                match crate::mls::encode_shared_name(&master, &current, &name).await {
+                    Ok(Some(encoded)) => {
+                        let destination = format!("{}/{}", current.trim_end_matches('/'), encoded);
+                        let url = format!("/dav{}", encode_path(&source));
+                        let dest_dav = format!("/dav{}", encode_path(&destination));
+                        match api::dav("MOVE", &url, None, &[("destination", &dest_dav)]).await {
+                            Ok(r) if matches!(r.status, 201 | 204) => load(current),
+                            Ok(r) => error.set(format!("Rename failed (HTTP {})", r.status)),
+                            Err(e) => error.set(e),
+                        }
+                    }
+                    Ok(None) => error.set(
+                        "This shared folder is read-only — ask the owner for write access."
+                            .to_string(),
+                    ),
+                    Err(e) => error.set(e),
+                }
+                return;
+            }
             if encrypted {
                 let Some(master) = e2ee_master.get_untracked() else {
                     error.set("Vault is locked — unlock encryption first.".to_string());
@@ -1691,7 +1772,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
         let shared = entry.shared;
         spawn_local(async move {
             let result = if shared {
-                crate::e2ee::decrypt_shared_file(&master, &path, &display_name).await
+                crate::mls::decrypt_shared_or_legacy(&master, &path, &display_name).await
             } else {
                 crate::e2ee::decrypt_file(&master, &path).await
             };
@@ -4925,10 +5006,9 @@ fn ShareDialog(
                             created
                                 .set(Some((url, r.body["password"].as_str().map(str::to_string))));
                         } else if encrypted {
-                            // User/group shares of encrypted files: wrap the
-                            // file key(s) for every recipient so they can
-                            // actually decrypt. Without this the share is an
-                            // ACL without keys.
+                            // User/group shares of encrypted content need a
+                            // key path. Folders use an MLS group + keyring;
+                            // files keep the per-recipient X25519 wrap.
                             if let Some(master) = &master {
                                 let recipients: Vec<String> = if r.body["kind"] == "group" {
                                     match crate::e2ee::group_members(
@@ -4948,17 +5028,76 @@ fn ShareDialog(
                                         .map(|u| vec![u.to_string()])
                                         .unwrap_or_default()
                                 };
-                                let mut skipped = Vec::new();
-                                for username in &recipients {
-                                    if crate::e2ee::share_encrypted_with(master, &path, username)
+                                let is_dir = crate::e2ee::file_info(&path)
+                                    .await
+                                    .map(|info| info["kind"].as_str() == Some("dir"))
+                                    .unwrap_or(false);
+                                let permission_now = permission.get_untracked();
+                                if is_dir {
+                                    match crate::mls::share_folder(
+                                        master,
+                                        &path,
+                                        &recipients,
+                                        &permission_now,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {}
+                                        Err(e) if permission_now == "write" => {
+                                            // A write ACL without a keyring would
+                                            // let the recipient corrupt the
+                                            // share; revoke it instead.
+                                            if let Some(id) = r.body["id"].as_i64() {
+                                                let _ =
+                                                    api::delete(&format!("/api/shares/{id}")).await;
+                                            }
+                                            error.set(format!(
+                                                "Could not create the MLS group, so the write share was revoked: {e}"
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            // Older recipients may have no key
+                                            // package; fall back to per-file
+                                            // wraps so a read share still works.
+                                            let mut skipped = Vec::new();
+                                            for username in &recipients {
+                                                if crate::e2ee::share_encrypted_with(
+                                                    master, &path, username,
+                                                )
+                                                .await
+                                                .is_err()
+                                                {
+                                                    skipped.push(username.clone());
+                                                }
+                                            }
+                                            if !skipped.is_empty() {
+                                                error.set(format!(
+                                                    "Shared read-only, but {e}; {} recipient(s) have no MLS key package ({}).",
+                                                    skipped.len(),
+                                                    skipped.join(", ")
+                                                ));
+                                            } else {
+                                                error.set(format!(
+                                                    "Shared with legacy file keys; MLS setup failed: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let mut skipped = Vec::new();
+                                    for username in &recipients {
+                                        if crate::e2ee::share_encrypted_with(
+                                            master, &path, username,
+                                        )
                                         .await
                                         .is_err()
-                                    {
-                                        skipped.push(username.clone());
+                                        {
+                                            skipped.push(username.clone());
+                                        }
                                     }
-                                }
-                                if !skipped.is_empty() {
-                                    error.set(format!("Shared, but {} recipient(s) have not set up encryption yet ({}). They can read only plaintext files.", skipped.len(), skipped.join(", ")));
+                                    if !skipped.is_empty() {
+                                        error.set(format!("Shared, but {} recipient(s) have not set up encryption yet ({}). They can read only plaintext files.", skipped.len(), skipped.join(", ")));
+                                    }
                                 }
                             } else {
                                 error.set("Shared, but the file key was not wrapped (encryption is locked). Unlock encryption, then revoke and re-share to grant file access.".to_string());

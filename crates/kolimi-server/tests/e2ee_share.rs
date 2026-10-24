@@ -71,6 +71,7 @@ fn config(server: &str, username: &str, local: &Path) -> SyncConfig {
             recovery_code: None,
             prf_secret: None,
             encrypted_roots: vec!["Private".to_string()],
+            mls: false,
         }),
     }
 }

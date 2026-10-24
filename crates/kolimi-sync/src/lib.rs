@@ -17,6 +17,7 @@
 //! directions. This is the core the Tauri/mobile shells will wrap; it is
 //! intentionally one-shot (call it from a timer or file watcher).
 
+pub mod mls;
 pub mod mls_store;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -83,6 +84,10 @@ pub struct E2eeOptions {
     pub prf_secret: Option<Vec<u8>>,
     /// Relative paths whose files are encrypted end-to-end.
     pub encrypted_roots: Vec<String>,
+    /// Opt in to MLS group shares (RFC 9420): shared folders carry an
+    /// epoch-bound keyring, and write recipients can add files. Off by
+    /// default until the external review is complete.
+    pub mls: bool,
 }
 
 impl std::fmt::Debug for E2eeOptions {
@@ -342,6 +347,14 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
     let mut state = State::load(&config.local_dir)?;
     cleanup_stale_temp_files(&config.local_dir);
     let e2ee = unlock_e2ee(&http, config).await?;
+    let mut mls = match e2ee.as_ref().filter(|e2ee| e2ee.mls) {
+        Some(e2ee) => {
+            let mut mls = crate::mls::MlsClient::load(config, &e2ee.master)?;
+            mls.publish_key_package(&http, &e2ee.master).await?;
+            Some(mls)
+        }
+        None => None,
+    };
     // The server's folder flags are the source of truth; local
     // `encrypted_roots` is only a fallback for older servers.
     let mut policy = EncryptPolicy {
@@ -358,6 +371,7 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
         config,
         &root,
         e2ee.as_ref(),
+        mls.as_mut(),
         &mut policy,
         &mut state,
         &mut report,
@@ -371,6 +385,7 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
         config,
         &root,
         e2ee.as_ref(),
+        mls.as_mut(),
         &policy,
         &mut state,
         &mut report,
@@ -383,6 +398,7 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
             config,
             &root,
             e2ee.as_ref(),
+            mls.as_mut(),
             &mut policy,
             &mut state,
             &mut report,
@@ -545,6 +561,7 @@ fn ensure_parent_dirs(
 struct E2ee {
     master: MasterKey,
     identity: Identity,
+    mls: bool,
 }
 
 impl E2ee {
@@ -717,7 +734,11 @@ async fn unlock_e2ee(http: &Http, config: &SyncConfig) -> Result<Option<E2ee>, S
         write_keyring_epoch(&config.local_dir, keyring.epoch)?;
     }
     let identity = ensure_identity(http, &master).await?;
-    Ok(Some(E2ee { master, identity }))
+    Ok(Some(E2ee {
+        master,
+        identity,
+        mls: options.mls,
+    }))
 }
 
 /// Loads the user's X25519 identity, creating and publishing one on first
@@ -793,9 +814,29 @@ pub async fn setup_keyring(config: &SyncConfig, passphrase: &str) -> Result<Stri
             .as_ref()
             .map(|options| options.encrypted_roots.clone())
             .unwrap_or_default(),
+        mls: config.e2ee.as_ref().is_some_and(|options| options.mls),
     });
     publish_identity(&identity_config).await?;
     Ok(kolimi_crypto::recovery_code_display(&recovery))
+}
+
+/// Access level granted by a share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharePermission {
+    /// Recipient can read and sync the shared path.
+    Read,
+    /// Recipient can also write (encrypted folders use MLS groups).
+    Write,
+}
+
+impl SharePermission {
+    /// The server's permission string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
 }
 
 /// Who a share targets.
@@ -870,6 +911,21 @@ pub async fn share_path(
     rel_path: &str,
     target: ShareTarget,
 ) -> Result<u64, SyncError> {
+    share_path_with_permission(config, root, rel_path, target, SharePermission::Read).await
+}
+
+/// Like [`share_path`], but with an explicit access level.
+///
+/// Write shares of encrypted folders require MLS (`E2eeOptions::mls`); the
+/// owner creates the node group and publishes the epoch-bound keyring so the
+/// recipient can add files that other members can read.
+pub async fn share_path_with_permission(
+    config: &SyncConfig,
+    root: &str,
+    rel_path: &str,
+    target: ShareTarget,
+    permission: SharePermission,
+) -> Result<u64, SyncError> {
     let http = Http::new(config)?;
     let Some(e2ee) = unlock_e2ee(&http, config).await? else {
         return Err(SyncError::E2ee(
@@ -886,6 +942,35 @@ pub async fn share_path(
             "{rel_path} is not on the server yet — sync it before sharing"
         ))
     })?;
+    let info_path = format!("/api/files/info?path={}", encode(&server_path));
+    let (status, info) = http.get_json(&info_path).await?;
+    if status != 200 {
+        return Err(SyncError::Server {
+            status,
+            path: info_path,
+        });
+    }
+    let is_dir = info["kind"].as_str() == Some("dir");
+    // Older sync-created folders carry no server-side encrypted flag; the
+    // pair's configured encrypted roots are the fallback (same rule pull
+    // uses for a mixed account).
+    let encrypted = info["encrypted"].as_bool().unwrap_or(false)
+        || config
+            .e2ee
+            .as_ref()
+            .is_some_and(|options| options.covers(rel_path));
+    if permission == SharePermission::Write {
+        if !e2ee.mls {
+            return Err(SyncError::E2ee(
+                "write shares require MLS; enable it first (E2eeOptions::mls)".to_string(),
+            ));
+        }
+        if !is_dir || !encrypted {
+            return Err(SyncError::E2ee(
+                "write shares are supported for encrypted folders only".to_string(),
+            ));
+        }
+    }
 
     // Resolve the recipients (group members, minus ourselves).
     let members: Vec<String> = match &target {
@@ -912,6 +997,7 @@ pub async fn share_path(
         }
     };
     let mut recipients: Vec<(String, [u8; 32])> = Vec::new();
+    let mut recipient_names: Vec<String> = Vec::new();
     for member in members {
         if member == config.username {
             continue;
@@ -934,6 +1020,7 @@ pub async fn share_path(
         // Trust on first use: pin the recipient's key, and refuse a share if a
         // pinned key changes (a possible server-side key substitution).
         check_recipient_key(&config.local_dir, &member, &public_key)?;
+        recipient_names.push(member.clone());
         recipients.push((member, public_key));
     }
     if recipients.is_empty() {
@@ -949,7 +1036,7 @@ pub async fn share_path(
                 "path": server_path,
                 "kind": target.kind(),
                 "recipient": target.name(),
-                "permission": "read",
+                "permission": permission.as_str(),
             }),
         )
         .await?;
@@ -975,9 +1062,13 @@ pub async fn share_path(
         )));
     }
 
+    // MLS is authoritative for encrypted folders when enabled: the group
+    // keyring replaces per-file wrapping (which cannot cover new files).
+    let use_mls = encrypted && is_dir && e2ee.mls;
     // Wrap keys inside an async block so any failure rolls the share back.
     let result: Result<u64, SyncError> = async {
         let mut wrapped_count = 0u64;
+        let mut mls_keys: Vec<(String, [u8; 32])> = Vec::new();
         for rel in files {
             let Some(stored_path) = server_paths.get(&rel) else {
                 return Err(SyncError::E2ee(format!(
@@ -1002,18 +1093,29 @@ pub async fn share_path(
                     })?)
                     .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
             let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
-            for (member, public_key) in &recipients {
-                let share_key = e2ee.identity.wrap_file_key_for(public_key, &file_key)?;
-                let path = format!(
-                    "/api/e2ee/share-key?path={}&recipient={}",
-                    encode(stored_path),
-                    encode(member)
-                );
-                let status = http.put_bytes(&path, &share_key).await?;
-                if status != 204 {
-                    return Err(SyncError::Server { status, path });
+            if encrypted
+                && is_dir
+                && let Some(relative) = stored_path.strip_prefix(&server_path)
+            {
+                let relative = relative.trim_start_matches('/');
+                if !relative.is_empty() {
+                    mls_keys.push((relative.to_string(), *file_key.as_bytes()));
                 }
-                wrapped_count += 1;
+            }
+            if !use_mls {
+                for (member, public_key) in &recipients {
+                    let share_key = e2ee.identity.wrap_file_key_for(public_key, &file_key)?;
+                    let path = format!(
+                        "/api/e2ee/share-key?path={}&recipient={}",
+                        encode(stored_path),
+                        encode(member)
+                    );
+                    let status = http.put_bytes(&path, &share_key).await?;
+                    if status != 204 {
+                        return Err(SyncError::Server { status, path });
+                    }
+                    wrapped_count += 1;
+                }
             }
         }
 
@@ -1044,6 +1146,28 @@ pub async fn share_path(
                 return Err(SyncError::Server { status, path });
             }
         }
+
+        // MLS group + epoch-bound keyring for encrypted folders. The v1
+        // wraps above remain as a fallback for older clients.
+        if use_mls {
+            let mls_result: Result<(), SyncError> = async {
+                let mut mls = crate::mls::MlsClient::load(config, &e2ee.master)?;
+                mls.publish_key_package(&http, &e2ee.master).await?;
+                mls.create_group(&http, &e2ee.master, &server_path, &recipient_names)
+                    .await?;
+                let mut keyring = kolimi_mls::keyring::ShareKeyring::new();
+                for (relative, file_key) in &mls_keys {
+                    keyring.insert(relative, file_key);
+                }
+                mls.publish_keyring(&http, &e2ee.master, &server_path, &keyring)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            // Without the group there is no usable key path; fail the
+            // share rather than leave a read ACL with no keys.
+            mls_result?;
+        }
         Ok(wrapped_count)
     }
     .await;
@@ -1052,6 +1176,147 @@ pub async fn share_path(
         rollback_share(&http, share_id).await;
     }
     result
+}
+
+/// Migrates existing encrypted folder shares to MLS groups + keyrings.
+///
+/// The ACL and permission are left untouched; only the key path changes.
+/// Recipients that have not published a key package are reported and their
+/// share keeps working through the legacy per-file wraps.
+pub async fn migrate_mls_shares(config: &SyncConfig) -> Result<Vec<String>, SyncError> {
+    let http = Http::new(config)?;
+    let Some(e2ee) = unlock_e2ee(&http, config).await? else {
+        return Err(SyncError::E2ee(
+            "migration requires e2ee options".to_string(),
+        ));
+    };
+    if !e2ee.mls {
+        return Err(SyncError::E2ee(
+            "enable MLS (E2eeOptions::mls) before migrating".to_string(),
+        ));
+    }
+    let (status, body) = http.get_json("/api/shares/owned").await?;
+    if status != 200 {
+        return Err(SyncError::Server {
+            status,
+            path: "/api/shares/owned".to_string(),
+        });
+    }
+    // One group per shared node, with all recipients merged.
+    let mut nodes: BTreeMap<String, (Vec<String>, bool)> = BTreeMap::new();
+    for share in body["shares"].as_array().cloned().unwrap_or_default() {
+        let Some(path) = share["path"].as_str().filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        let permission = share["permission"].as_str().unwrap_or("read");
+        let mut members = Vec::new();
+        match share["kind"].as_str() {
+            Some("user") => {
+                if let Some(user) = share["recipient"].as_str() {
+                    members.push(user.to_string());
+                }
+            }
+            Some("group") => {
+                if let Some(group) = share["recipient"].as_str() {
+                    let path = format!("/api/groups/{}/members", encode(group));
+                    if let Ok((200, body)) = http.get_json(&path).await {
+                        members.extend(
+                            body["members"]
+                                .as_array()
+                                .map(|list| {
+                                    list.iter()
+                                        .filter_map(|name| name.as_str().map(str::to_string))
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+            _ => continue,
+        }
+        let entry = nodes.entry(path.to_string()).or_insert((Vec::new(), false));
+        for member in members {
+            if member != config.username && !entry.0.contains(&member) {
+                entry.0.push(member);
+            }
+        }
+        entry.1 |= permission == "write";
+    }
+    let mut migrated = Vec::new();
+    for (path, (recipients, _write)) in nodes {
+        let info_path = format!("/api/files/info?path={}", encode(&path));
+        let Ok((200, info)) = http.get_json(&info_path).await else {
+            continue;
+        };
+        if info["kind"].as_str() != Some("dir") {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_server_files(&http, &path, &mut files).await?;
+        // Sync-created folders may not carry the server's encrypted flag;
+        // at least one encrypted file is proof the tree uses client keys.
+        if info["encrypted"].as_bool() != Some(true) && files.is_empty() {
+            continue;
+        }
+        let mut mls = crate::mls::MlsClient::load(config, &e2ee.master)?;
+        mls.publish_key_package(&http, &e2ee.master).await?;
+        mls.create_group(&http, &e2ee.master, &path, &recipients)
+            .await?;
+        let mut keyring = kolimi_mls::keyring::ShareKeyring::new();
+        for file in files {
+            let key_path = format!("/api/files/key?path={}", encode(&file));
+            let Ok((200, body)) = http.get_json(&key_path).await else {
+                continue;
+            };
+            let Some(encoded) = body["wrapped_key"].as_str() else {
+                continue;
+            };
+            let Ok(wrapped) = STANDARD.decode(encoded) else {
+                continue;
+            };
+            let Ok(file_key) = e2ee.master.unwrap_file_key(&wrapped) else {
+                continue;
+            };
+            if let Some(relative) = file.strip_prefix(&path) {
+                let relative = relative.trim_start_matches('/');
+                if !relative.is_empty() {
+                    keyring.insert(relative, file_key.as_bytes());
+                }
+            }
+        }
+        mls.publish_keyring(&http, &e2ee.master, &path, &keyring)
+            .await?;
+        migrated.push(path);
+    }
+    Ok(migrated)
+}
+
+async fn collect_server_files(
+    http: &Http,
+    path: &str,
+    out: &mut Vec<String>,
+) -> Result<(), SyncError> {
+    let url = format!("/api/browse?path={}", encode(path));
+    let (status, body) = http.get_json(&url).await?;
+    if status != 200 {
+        return Err(SyncError::Server { status, path: url });
+    }
+    let mut dirs = Vec::new();
+    for entry in body["entries"].as_array().cloned().unwrap_or_default() {
+        let Some(entry_path) = entry["path"].as_str() else {
+            continue;
+        };
+        if entry["kind"].as_str() == Some("dir") {
+            dirs.push(entry_path.to_string());
+        } else if entry["encrypted"].as_bool() == Some(true) {
+            out.push(entry_path.to_string());
+        }
+    }
+    for dir in dirs {
+        Box::pin(collect_server_files(http, &dir, out)).await?;
+    }
+    Ok(())
 }
 
 /// Best-effort revoke of a share we just created (mid-share failure).
@@ -1755,13 +2020,20 @@ impl Http {
     /// Asks the server which of `hashes` it does not already hold, so a push
     /// uploads only new chunks. Returns `None` when the server predates the
     /// endpoint, in which case the caller uploads everything.
-    async fn chunks_missing(&self, hashes: &[Hash]) -> Result<Option<HashSet<Hash>>, SyncError> {
+    async fn chunks_missing(
+        &self,
+        hashes: &[Hash],
+        context: Option<&str>,
+    ) -> Result<Option<HashSet<Hash>>, SyncError> {
         if hashes.is_empty() {
             return Ok(Some(HashSet::new()));
         }
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "hashes": hashes.iter().map(|hash| hash.to_hex()).collect::<Vec<_>>(),
         });
+        if let Some(context) = context {
+            body["path"] = serde_json::json!(context);
+        }
         let (status, value) = self.post_json("/api/chunks/exist", &body).await?;
         if status == 404 || status == 405 {
             return Ok(None);
@@ -1849,6 +2121,10 @@ struct SharedName {
     name: String,
     /// Key for a shared folder's children.
     key: Option<kolimi_crypto::NameKey>,
+    /// Server permission (`read`/`write`).
+    permission: String,
+    /// Whether the mount is an encrypted folder.
+    encrypted: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -1899,9 +2175,80 @@ async fn load_shared_names(http: &Http, e2ee: Option<&E2ee>) -> Result<Vec<Share
             prefix: prefix.to_string(),
             name: payload.name,
             key,
+            permission: mount["permission"].as_str().unwrap_or("read").to_string(),
+            encrypted: mount["encrypted"].as_bool().unwrap_or(false),
         });
     }
     Ok(names)
+}
+
+/// A received folder this account may write to through MLS.
+struct SharedWriteMount {
+    /// Local relative prefix (`Shared with me/<name>`).
+    local_prefix: String,
+    /// Stored server mount (`/Shared with me/<stored name>`).
+    server_prefix: String,
+    /// Name key for the mount's children.
+    key: kolimi_crypto::NameKey,
+}
+
+impl SharedWriteMount {
+    /// Encodes a local path inside the mount and returns the server path plus
+    /// the parent directories that must exist first.
+    fn encode(&self, rel_inside: &str) -> Result<(String, Vec<String>), SyncError> {
+        let segments: Vec<&str> = rel_inside
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect();
+        if segments.is_empty() {
+            return Err(SyncError::Protocol("empty shared path".to_string()));
+        }
+        let mut key = self.key.clone();
+        let mut stored = self.server_prefix.clone();
+        let mut parents = Vec::new();
+        for (index, segment) in segments.iter().enumerate() {
+            let encoded = key
+                .encode(segment)
+                .map_err(|error| SyncError::E2ee(format!("shared name: {error}")))?;
+            stored.push('/');
+            stored.push_str(&encoded);
+            if index + 1 < segments.len() {
+                parents.push(stored.clone());
+                key = key
+                    .child(segment)
+                    .map_err(|error| SyncError::E2ee(format!("shared name key: {error}")))?;
+            }
+        }
+        Ok((stored, parents))
+    }
+}
+
+fn shared_write_mounts(shares: &[SharedName], root: &str) -> Vec<SharedWriteMount> {
+    shares
+        .iter()
+        .filter(|share| share.permission == "write" && share.encrypted)
+        .filter_map(|share| {
+            let decoded = format!("/{}/{}", SHARED_MOUNT, share.name);
+            let local_prefix = relative_to_root(&decoded, root)?;
+            let key = share.key.clone()?;
+            Some(SharedWriteMount {
+                local_prefix,
+                server_prefix: share.prefix.clone(),
+                key,
+            })
+        })
+        .collect()
+}
+
+fn shared_mount_for<'a>(
+    mounts: &'a [SharedWriteMount],
+    rel: &str,
+) -> Option<(&'a SharedWriteMount, String)> {
+    mounts.iter().find_map(|mount| {
+        let rest = rel.strip_prefix(&mount.local_prefix)?;
+        let rest = rest.strip_prefix('/')?;
+        (!rest.is_empty()).then(|| (mount, rest.to_string()))
+    })
 }
 
 /// Decodes a shared server path with the wrapped mount name and folder key.
@@ -2058,11 +2405,13 @@ async fn remote_files(
     Ok((remote, encrypted_dirs))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn pull(
     http: &Http,
     config: &SyncConfig,
     root: &str,
     e2ee: Option<&E2ee>,
+    mut mls: Option<&mut crate::mls::MlsClient>,
     policy: &mut EncryptPolicy,
     state: &mut State,
     report: &mut SyncReport,
@@ -2177,9 +2526,20 @@ async fn pull(
                     )
                 })?;
                 if file.shared {
-                    Some(load_shared_file_key(http, state, e2ee, &file.path).await?)
+                    match mls.as_deref_mut() {
+                        Some(mls) => match mls.file_key(http, &e2ee.master, &file.path).await? {
+                            Some(key) => Some(key),
+                            None => {
+                                Some(load_shared_file_key(http, state, e2ee, &file.path).await?)
+                            }
+                        },
+                        None => Some(load_shared_file_key(http, state, e2ee, &file.path).await?),
+                    }
                 } else {
-                    Some(load_file_key(http, state, e2ee, rel, &file.path).await?)
+                    Some(
+                        load_file_key(http, state, e2ee, mls.as_deref_mut(), rel, &file.path)
+                            .await?,
+                    )
                 }
             } else {
                 None
@@ -2306,6 +2666,7 @@ async fn load_file_key(
     http: &Http,
     state: &mut State,
     e2ee: &E2ee,
+    mls: Option<&mut crate::mls::MlsClient>,
     rel: &str,
     server_path: &str,
 ) -> Result<FileKey, SyncError> {
@@ -2327,18 +2688,34 @@ async fn load_file_key(
     }
     let path = format!("/api/files/key?path={}", encode(server_path));
     let (status, body) = http.get_json(&path).await?;
-    if status != 200 {
+    let mut key_error = None;
+    if status == 200
+        && let Some(encoded) = body["wrapped_key"].as_str()
+    {
+        match STANDARD
+            .decode(encoded)
+            .map_err(|error| SyncError::E2ee(format!("file key: {error}")))
+            .and_then(|wrapped| Ok(e2ee.master.unwrap_file_key(&wrapped)?))
+        {
+            Ok(key) => {
+                state.keys.insert(rel.to_string(), encoded.to_string());
+                return Ok(key);
+            }
+            Err(error) => key_error = Some(error),
+        }
+    } else if status != 200 && status != 404 {
         return Err(SyncError::Server { status, path });
     }
-    let encoded = body["wrapped_key"]
-        .as_str()
-        .ok_or_else(|| SyncError::E2ee("malformed file key response".to_string()))?;
-    let wrapped = STANDARD
-        .decode(encoded)
-        .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
-    let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
-    state.keys.insert(rel.to_string(), encoded.to_string());
-    Ok(file_key)
+    // A recipient may have written this file into an MLS-managed folder;
+    // its node key is not wrapped for us, but the share keyring is.
+    if let Some(mls) = mls
+        && let Some(key) = mls.file_key(http, &e2ee.master, server_path).await?
+    {
+        return Ok(key);
+    }
+    Err(key_error.unwrap_or_else(|| {
+        SyncError::E2ee(format!("no file key for {server_path} (HTTP {status})"))
+    }))
 }
 
 /// Fetches and unwraps the share key for a file shared with this user.
@@ -2390,6 +2767,7 @@ async fn load_shared_file_key(
 async fn fetch_or_create_file_key(
     http: &Http,
     state: &mut State,
+    mls: Option<&mut crate::mls::MlsClient>,
     e2ee: &E2ee,
     rel: &str,
     server_path: &str,
@@ -2410,11 +2788,29 @@ async fn fetch_or_create_file_key(
             let wrapped = STANDARD
                 .decode(encoded)
                 .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
-            let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
-            state.keys.insert(rel.to_string(), encoded.to_string());
-            Ok((file_key, None))
+            match e2ee.master.unwrap_file_key(&wrapped) {
+                Ok(file_key) => {
+                    state.keys.insert(rel.to_string(), encoded.to_string());
+                    Ok((file_key, None))
+                }
+                Err(_) => {
+                    if let Some(mls) = mls
+                        && let Some(key) = mls.file_key(http, &e2ee.master, server_path).await?
+                    {
+                        return Ok((key, None));
+                    }
+                    Err(SyncError::E2ee(format!(
+                        "the file key for {server_path} is not wrapped for this account"
+                    )))
+                }
+            }
         }
         404 => {
+            if let Some(mls) = mls
+                && let Some(key) = mls.file_key(http, &e2ee.master, server_path).await?
+            {
+                return Ok((key, None));
+            }
             let file_key = FileKey::generate()?;
             let wrapped = e2ee.master.wrap_file_key(&file_key)?;
             Ok((file_key, Some(wrapped)))
@@ -2463,11 +2859,13 @@ async fn chunk_bytes(
     Ok(bytes)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn push(
     http: &Http,
     config: &SyncConfig,
     root: &str,
     e2ee: Option<&E2ee>,
+    mut mls: Option<&mut crate::mls::MlsClient>,
     policy: &EncryptPolicy,
     state: &mut State,
     report: &mut SyncReport,
@@ -2485,7 +2883,23 @@ async fn push(
         .conflicts
         .retain(|rel| config.local_dir.join(rel).exists());
     collect_files(&config.local_dir, &config.local_dir, &mut locals, state)?;
+    // Writable received shares are the one exception to the read-only
+    // `Shared with me/` mirror. Only MLS write mounts are ever uploaded.
+    let shared_writes = match e2ee {
+        Some(e2ee) if e2ee.mls => {
+            let shares = load_shared_names(http, Some(e2ee)).await?;
+            shared_write_mounts(&shares, root)
+        }
+        _ => Vec::new(),
+    };
+    for mount in &shared_writes {
+        let dir = config.local_dir.join(&mount.local_prefix);
+        if dir.is_dir() {
+            collect_files(&config.local_dir, &dir, &mut locals, state)?;
+        }
+    }
     locals.sort();
+    locals.dedup();
 
     // Create remote directories for every parent path first.
     let mut dirs: BTreeSet<String> = BTreeSet::new();
@@ -2493,6 +2907,9 @@ async fn push(
         dirs.insert(root.to_string());
     }
     for rel in &locals {
+        if shared_mount_for(&shared_writes, rel).is_some() {
+            continue;
+        }
         let mut parts: Vec<&str> = rel.split('/').collect();
         parts.pop();
         let mut current = String::new();
@@ -2526,10 +2943,28 @@ async fn push(
         {
             continue;
         }
-        let remote_path = match stored_paths.get(&rel) {
-            Some(stored) => stored.clone(),
-            None => remote_rel(root, &rel, policy, e2ee)?,
+        let shared = shared_mount_for(&shared_writes, &rel);
+        let (remote_path, shared_parents) = match &shared {
+            Some((mount, inside)) => {
+                let (path, parents) = mount.encode(inside)?;
+                (path, parents)
+            }
+            None => (
+                match stored_paths.get(&rel) {
+                    Some(stored) => stored.clone(),
+                    None => remote_rel(root, &rel, policy, e2ee)?,
+                },
+                Vec::new(),
+            ),
         };
+        // Ensure the encoded parent folders exist in the owner's tree.
+        for parent in &shared_parents {
+            if state.created_dirs.contains(parent) {
+                continue;
+            }
+            mkcol(http, parent).await?;
+            state.created_dirs.insert(parent.clone());
+        }
         // Pre-check: when we have a known content_id, fetch the current
         // remote manifest and compare before uploading any chunks. If the
         // server moved on, take the 409-conflict path locally (keep the
@@ -2553,26 +2988,43 @@ async fn push(
         let data = std::fs::read(&local_path)?;
         // Hide the exact length from the server: header + zero padding to a
         // coarse bucket, inside the ciphertext.
-        let padded = policy.covers(&rel).then(|| kolimi_crypto::pad_file(&data));
+        let encrypt_this = policy.covers(&rel) || shared.is_some();
+        let padded = encrypt_this.then(|| kolimi_crypto::pad_file(&data));
         let encrypted_source = padded
             .as_ref()
             .map(|bytes| bytes.as_slice())
             .unwrap_or(&data);
         let mut pending_key: Option<Vec<u8>> = None;
         let mut file_key: Option<FileKey> = None;
-        if policy.covers(&rel) && e2ee.is_none() {
+        if encrypt_this && e2ee.is_none() {
             // An encrypted folder must never receive plaintext, even as a
             // fallback: refuse rather than leak.
             return Err(SyncError::Locked(format!(
                 "/{rel} is in an encrypted folder — unlock encryption (passphrase or device key) before syncing it"
             )));
         }
-        let manifest = if let Some(e2ee) = e2ee.filter(|_| policy.covers(&rel)) {
+        let manifest = if let Some(e2ee) = e2ee.filter(|_| encrypt_this) {
             // Encrypt-then-chunk (RFC 0007): chunk boundaries follow the
             // plaintext so edits stay delta-friendly; the manifest hashes
             // ciphertext chunks.
-            let (key, pending) =
-                fetch_or_create_file_key(http, state, e2ee, &rel, &remote_path).await?;
+            let (key, pending) = if shared.is_some() {
+                let existing = match mls.as_deref_mut() {
+                    Some(mls) => mls.file_key(http, &e2ee.master, &remote_path).await?,
+                    None => None,
+                };
+                let key = match existing {
+                    Some(key) => key,
+                    None => FileKey::generate()?,
+                };
+                // The node still carries an opaque wrapped key so the server
+                // flags the file encrypted; group members read the MLS
+                // keyring instead.
+                let wrapped = e2ee.master.wrap_file_key(&key)?;
+                (key, Some(wrapped))
+            } else {
+                fetch_or_create_file_key(http, state, mls.as_deref_mut(), e2ee, &rel, &remote_path)
+                    .await?
+            };
             pending_key = pending;
             let mut chunks = Vec::new();
             let mut total = 0u64;
@@ -2597,6 +3049,7 @@ async fn push(
         // Ask the server which chunks it is missing before uploading, so an
         // edit only sends the chunks that actually changed. When the server
         // predates the endpoint (`missing` is `None`), upload every chunk.
+        let chunk_context = shared.as_ref().map(|(_, _)| remote_path.as_str());
         let missing = http
             .chunks_missing(
                 &manifest
@@ -2604,6 +3057,7 @@ async fn push(
                     .iter()
                     .map(|chunk| chunk.hash)
                     .collect::<Vec<_>>(),
+                chunk_context,
             )
             .await?;
         let needs_upload = |hash: &Hash| match &missing {
@@ -2617,7 +3071,14 @@ async fn push(
                 if !needs_upload(&Hash::of(&ciphertext)) {
                     continue;
                 }
-                let path = format!("/api/chunks/{}", Hash::of(&ciphertext).to_hex());
+                let path = match chunk_context {
+                    Some(context) => format!(
+                        "/api/chunks/{}?path={}",
+                        Hash::of(&ciphertext).to_hex(),
+                        encode(context)
+                    ),
+                    None => format!("/api/chunks/{}", Hash::of(&ciphertext).to_hex()),
+                };
                 let status = http.put_bytes(&path, &ciphertext).await?;
                 if status != 201 && status != 204 {
                     return Err(SyncError::Server { status, path });
@@ -2628,7 +3089,14 @@ async fn push(
                 if !needs_upload(&chunk.hash) {
                     continue;
                 }
-                let path = format!("/api/chunks/{}", chunk.hash.to_hex());
+                let path = match chunk_context {
+                    Some(context) => format!(
+                        "/api/chunks/{}?path={}",
+                        chunk.hash.to_hex(),
+                        encode(context)
+                    ),
+                    None => format!("/api/chunks/{}", chunk.hash.to_hex()),
+                };
                 let status = http.put_bytes(&path, chunk.data).await?;
                 if status != 201 && status != 204 {
                     return Err(SyncError::Server { status, path });
@@ -2667,6 +3135,12 @@ async fn push(
                     }
                     state.keys.insert(rel.clone(), STANDARD.encode(&wrapped));
                 }
+                if let (Some(mls), Some(key), Some(e2ee)) =
+                    (mls.as_deref_mut(), file_key.as_ref(), e2ee)
+                {
+                    mls.record_file_key(http, &e2ee.master, &remote_path, key)
+                        .await?;
+                }
                 state.files.insert(
                     rel,
                     StateFile {
@@ -2674,7 +3148,7 @@ async fn push(
                         size: metadata.len(),
                         mtime_ns: mtime,
                         deleted: false,
-                        shared: false,
+                        shared: shared.is_some(),
                     },
                 );
                 report.pushed += 1;
@@ -2708,15 +3182,24 @@ async fn push(
     }
 
     // Local deletions propagate: any known file that is gone locally (and
-    // was not already removed by pull) is deleted remotely.
-    let deleted: Vec<String> = state
+    // was not already removed by pull) is deleted remotely. Read-only
+    // received shares are never deleted; a writable MLS share is.
+    let deleted: Vec<(String, bool)> = state
         .files
         .iter()
-        .filter(|(rel, known)| !known.shared && !config.local_dir.join(rel.as_str()).exists())
-        .map(|(rel, _)| rel.clone())
+        .filter(|(rel, _)| !config.local_dir.join(rel.as_str()).exists())
+        .map(|(rel, known)| (rel.clone(), known.shared))
         .collect();
-    for rel in deleted {
-        let path = format!("/dav{}", encode_path(&format!("{root}/{rel}")));
+    for (rel, was_shared) in deleted {
+        let target = if was_shared {
+            match shared_mount_for(&shared_writes, &rel) {
+                Some((mount, inside)) => mount.encode(&inside)?.0,
+                None => continue,
+            }
+        } else {
+            format!("{root}/{rel}")
+        };
+        let path = format!("/dav{}", encode_path(&target));
         let status = http.delete(&path).await?;
         if status != 204 && status != 404 {
             return Err(SyncError::Server { status, path });

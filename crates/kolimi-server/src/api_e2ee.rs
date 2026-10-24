@@ -113,8 +113,8 @@ pub async fn put_file_key(
     Query(query): Query<KeyQuery>,
     body: Body,
 ) -> Response {
-    let node = match owned_file(&state, &user, &query.path).await {
-        Ok(node) => node,
+    let (owner_id, node) = match writable_file(&state, &user, &query.path).await {
+        Ok(value) => value,
         Err(response) => return response,
     };
     let wrapped = match read_body(body, MAX_KEY_BODY).await {
@@ -124,7 +124,7 @@ pub async fn put_file_key(
     if wrapped.is_empty() {
         return api::bad_request("wrapped key must not be empty");
     }
-    match state.db.set_file_key(user.user_id, node.id, &wrapped).await {
+    match state.db.set_file_key(owner_id, node.id, &wrapped).await {
         Ok(()) => {
             audit(
                 &state,
@@ -412,6 +412,27 @@ async fn owned_file(
         return Err(api::bad_request("not a file"));
     }
     Ok(node)
+}
+
+/// Resolves a file the caller may write, including a write share. Returns
+/// the tree owner (whose blob namespace holds the file) and the node.
+async fn writable_file(
+    state: &AppState,
+    user: &CurrentUser,
+    path: &str,
+) -> Result<(i64, kolimi_vfs::Node), Response> {
+    let access = match state.vfs.resolve_access(user.user_id, path).await {
+        Ok(access) => access,
+        Err(kolimi_vfs::VfsError::NotFound) => return Err(api::not_found()),
+        Err(_) => return Err(api::internal_error()),
+    };
+    if !access.perm.allows(kolimi_vfs::Perm::Write) || access.is_mount_root {
+        return Err(api::forbidden("write access is required"));
+    }
+    if access.node.is_dir() {
+        return Err(api::bad_request("not a file"));
+    }
+    Ok((access.owner_id, access.node))
 }
 
 async fn read_body(body: Body, limit: usize) -> Result<Vec<u8>, Response> {

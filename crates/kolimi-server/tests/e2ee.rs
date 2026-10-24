@@ -57,6 +57,7 @@ fn e2ee_options(passphrase: Option<&str>, recovery: Option<&str>) -> E2eeOptions
         recovery_code: recovery.map(str::to_string),
         prf_secret: None,
         encrypted_roots: vec!["Private".to_string()],
+        mls: false,
     }
 }
 
@@ -66,6 +67,7 @@ fn e2ee_options_prf(prf_secret: &[u8]) -> E2eeOptions {
         recovery_code: None,
         prf_secret: Some(prf_secret.to_vec()),
         encrypted_roots: vec!["Private".to_string()],
+        mls: false,
     }
 }
 

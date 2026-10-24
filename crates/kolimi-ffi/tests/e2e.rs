@@ -45,6 +45,7 @@ fn config(
         e2ee_passphrase: passphrase.map(str::to_string),
         e2ee_recovery_code: recovery.map(str::to_string),
         e2ee_prf_secret: None,
+        mls: false,
     }
 }
 

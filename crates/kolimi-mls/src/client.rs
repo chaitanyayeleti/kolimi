@@ -18,6 +18,7 @@ use crate::CIPHERSUITE;
 /// A device credential and its local MLS provider.
 pub struct Device {
     identity: Vec<u8>,
+    device_id: [u8; 16],
     provider: OpenMlsRustCrypto,
     signer: SignatureKeyPair,
     credential: CredentialWithKey,
@@ -30,6 +31,7 @@ pub struct Device {
 struct PersistedDevice {
     v: u8,
     identity: Vec<u8>,
+    device_id: String,
     signer: serde_json::Value,
     storage: BTreeMap<String, String>,
     groups: Vec<String>,
@@ -49,12 +51,20 @@ impl Device {
             credential: credential.into(),
             signature_key: signer.public().into(),
         };
+        let mut device_id = [0u8; 16];
+        getrandom::getrandom(&mut device_id).map_err(|error| format!("mls device id: {error}"))?;
         Ok(Self {
             identity: identity.to_vec(),
+            device_id,
             provider,
             signer,
             credential,
         })
+    }
+
+    /// The stable id this device publishes its key packages under.
+    pub fn device_id(&self) -> String {
+        STANDARD.encode(self.device_id)
     }
 
     /// Serializes the device and the listed group ids.
@@ -77,6 +87,7 @@ impl Device {
         serde_json::to_vec(&PersistedDevice {
             v: 1,
             identity: self.identity.clone(),
+            device_id: self.device_id(),
             signer,
             storage,
             groups: groups.iter().map(|group| STANDARD.encode(group)).collect(),
@@ -108,6 +119,11 @@ impl Device {
                 values.insert(key, value);
             }
         }
+        let device_id: [u8; 16] = STANDARD
+            .decode(&persisted.device_id)
+            .map_err(|_| "bad MLS device id".to_string())?
+            .try_into()
+            .map_err(|_| "bad MLS device id length".to_string())?;
         let signer: SignatureKeyPair = serde_json::from_value(persisted.signer)
             .map_err(|error| format!("mls signer decode: {error}"))?;
         signer
@@ -130,6 +146,7 @@ impl Device {
         Ok((
             Self {
                 identity: persisted.identity,
+                device_id,
                 provider,
                 signer,
                 credential,

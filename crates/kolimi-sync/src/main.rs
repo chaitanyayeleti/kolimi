@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use clap::Parser;
 use kolimi_crypto::recovery_code_display;
 use kolimi_sync::{
-    E2eeOptions, ShareTarget, SyncConfig, create_keyring, known_recipient_keys, publish_identity,
-    share_path, sync_once_rooted, unshare_path, upload_keyring,
+    E2eeOptions, SharePermission, ShareTarget, SyncConfig, create_keyring, known_recipient_keys,
+    migrate_mls_shares, publish_identity, share_path_with_permission, sync_once_rooted,
+    unshare_path, upload_keyring,
 };
 
 #[derive(Parser)]
@@ -102,6 +103,19 @@ struct Cli {
     /// Revoke the share of --share from --with instead of creating one.
     #[arg(long)]
     unshare: bool,
+
+    /// Enable MLS group shares (RFC 9420) for encrypted shares. Also
+    /// controlled by `KOLIMI_MLS_SHARES`.
+    #[arg(long, env = "KOLIMI_MLS_SHARES")]
+    mls: bool,
+
+    /// Create a write share (encrypted folders only; implies --mls).
+    #[arg(long)]
+    write: bool,
+
+    /// Create MLS groups + keyrings for existing encrypted folder shares.
+    #[arg(long)]
+    mls_migrate: bool,
 }
 
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
@@ -138,6 +152,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 recovery_code: cli.e2ee_recovery.clone(),
                 prf_secret,
                 encrypted_roots: cli.e2ee_roots.clone(),
+                mls: cli.mls || cli.write,
             })
         },
     };
@@ -199,6 +214,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    if cli.mls_migrate {
+        let migrated = migrate_mls_shares(&config).await?;
+        if migrated.is_empty() {
+            println!("no encrypted folder shares needed migration");
+        } else {
+            for path in migrated {
+                println!("migrated {path} to an MLS group");
+            }
+        }
+        return Ok(());
+    }
+
     if let Some(path) = cli.share.clone() {
         let target = match (cli.with.clone(), cli.group.clone()) {
             (Some(user), None) => ShareTarget::User(user),
@@ -213,11 +240,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             unshare_path(&config, &cli.remote, &path, target.clone()).await?;
             println!("revoked {path} for {} {}", target.kind(), target.name());
         } else {
-            let wrapped = share_path(&config, &cli.remote, &path, target.clone()).await?;
+            let permission = if cli.write {
+                SharePermission::Write
+            } else {
+                SharePermission::Read
+            };
+            let wrapped =
+                share_path_with_permission(&config, &cli.remote, &path, target.clone(), permission)
+                    .await?;
             println!(
-                "shared {path} with {} {} ({wrapped} encrypted file key(s) wrapped)",
+                "shared {path} with {} {} ({}; {wrapped} encrypted file key(s) wrapped)",
                 target.kind(),
-                target.name()
+                target.name(),
+                permission.as_str()
             );
         }
         return Ok(());
@@ -249,6 +284,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             recovery_code: None,
             prf_secret: None,
             encrypted_roots: vec!["Private".to_string()],
+            mls: false,
         });
         publish_identity(&identity_config).await?;
         println!("identity published");

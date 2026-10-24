@@ -40,6 +40,8 @@ pub struct FfiSyncConfig {
     /// Remote subfolder to mirror (absolute server path; empty or `/` for
     /// the whole account). Mirrors the CLI `--remote` flag.
     pub remote: Option<String>,
+    /// Opt in to MLS group shares (RFC 9420). Off by default.
+    pub mls: bool,
 }
 
 /// What one sync pass did.
@@ -158,6 +160,7 @@ impl KolimiSync {
                 recovery_code: config.e2ee_recovery_code,
                 prf_secret: config.e2ee_prf_secret,
                 encrypted_roots: config.encrypted_roots,
+                mls: config.mls,
             })
         };
         Arc::new(Self {
@@ -284,6 +287,7 @@ impl KolimiSync {
             recovery_code: None,
             prf_secret: None,
             encrypted_roots: roots,
+            mls: false,
         });
         kolimi_sync::publish_identity(&identity_config)
             .await

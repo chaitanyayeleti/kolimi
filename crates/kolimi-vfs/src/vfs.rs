@@ -220,8 +220,19 @@ impl Vfs {
 
     /// Creates a directory.
     pub async fn mkdir(&self, user_id: i64, raw: &str) -> Result<Node, VfsError> {
-        let (parent, name) = self.resolve_parent(user_id, raw).await?;
-        self.mkdir_at(user_id, parent.id, &name).await
+        // Own tree first: this preserves reserved-name conflicts such as
+        // `/Shared with me`. A received-share path then falls back to the
+        // mount-aware resolver and creates in the owner's tree.
+        match self.resolve_parent(user_id, raw).await {
+            Ok((parent, name)) => return self.mkdir_at(user_id, parent.id, &name).await,
+            Err(VfsError::Conflict(message)) => {
+                return Err(VfsError::Conflict(message));
+            }
+            Err(_) => {}
+        }
+        let (access, name) = self.resolve_parent_access(user_id, raw).await?;
+        access.perm.require(crate::Perm::Write)?;
+        self.mkdir_at(access.owner_id, access.node.id, &name).await
     }
 
     pub(crate) async fn mkdir_at(
@@ -254,15 +265,18 @@ impl Vfs {
 
     /// Stores a whole byte buffer as a file, creating or replacing it.
     pub async fn put_bytes(&self, user_id: i64, raw: &str, data: &[u8]) -> Result<Node, VfsError> {
-        let (parent, name) = self.resolve_parent(user_id, raw).await?;
-        let existing = self.db.find_child(user_id, parent.id, &name).await?;
+        let (access, name) = self.resolve_parent_access(user_id, raw).await?;
+        access.perm.require(crate::Perm::Write)?;
+        let owner_id = access.owner_id;
+        let parent = access.node;
+        let existing = self.db.find_child(owner_id, parent.id, &name).await?;
         if existing.as_ref().is_some_and(|n| n.kind != "file") {
             return Err(VfsError::IsCollection);
         }
         // Check quota before writing anything: otherwise the chunks are
         // already on disk when the quota fails, and a retry deduplicates
         // them (`new_bytes = 0`) and bypasses the quota.
-        let (quota, used) = self.quota_state(user_id).await?;
+        let (quota, used) = self.quota_state(owner_id).await?;
         let old_size = existing.as_ref().map(|n| n.size.max(0) as u64).unwrap_or(0);
         if quota > 0
             && used
@@ -272,14 +286,14 @@ impl Vfs {
         {
             return Err(quota_error(quota));
         }
-        let (manifest, new_bytes) = self.store.ingest_bytes(user_id, data).await?;
+        let (manifest, new_bytes) = self.store.ingest_bytes(owner_id, data).await?;
         // Re-check after ingest (concurrent uploads may have raced).
-        let (quota, used) = self.quota_state(user_id).await?;
+        let (quota, used) = self.quota_state(owner_id).await?;
         if quota > 0 && used.saturating_add(new_bytes) > quota {
             return Err(quota_error(quota));
         }
-        self.record_usage(user_id, new_bytes).await?;
-        self.finalize_put_at(user_id, parent.id, &name, existing, &manifest)
+        self.record_usage(owner_id, new_bytes).await?;
+        self.finalize_put_at(owner_id, parent.id, &name, existing, &manifest)
             .await
     }
 
@@ -577,7 +591,7 @@ impl Vfs {
     /// content id (`None` = file must not exist), for conflict detection.
     pub async fn commit_manifest(
         &self,
-        user_id: i64,
+        caller_id: i64,
         raw: &str,
         manifest: &kolimi_chunk::Manifest,
         expected: Option<&str>,
@@ -591,15 +605,6 @@ impl Vfs {
                 "manifest size does not match chunk lengths".to_string(),
             ));
         }
-        // Encrypted folders must receive a wrapped key with the content.
-        // A file without one would be unreadable ciphertext, and accepting
-        // it would also let a plaintext client write into an encrypted tree.
-        if self.path_is_encrypted(user_id, raw).await? && wrapped_key.is_none() {
-            return Err(VfsError::Conflict(
-                "this folder is encrypted: upload the wrapped file key with the manifest"
-                    .to_string(),
-            ));
-        }
         // Cap absurd manifests before they allocate or loop: 100k chunks or
         // 16 GiB logical size is far beyond any legitimate file here.
         if manifest.chunks.len() > 100_000 || manifest.size > 16 * 1024 * 1024 * 1024 {
@@ -607,7 +612,26 @@ impl Vfs {
                 limit: 16 * 1024 * 1024 * 1024,
             }));
         }
-        let current = self.stat(user_id, raw).await?;
+        // Mount-aware: a write-recipient commits into the owner's tree, and
+        // chunks/manifests live in the owner's blob namespace.
+        let (access, name) = self.resolve_parent_access(caller_id, raw).await?;
+        access.perm.require(crate::Perm::Write)?;
+        let owner_id = access.owner_id;
+        let parent = access.node;
+        let owner_path = self.change_path(owner_id, parent.id, &name).await?;
+        // Encrypted folders must receive a wrapped key with the content.
+        // A file without one would be unreadable ciphertext, and accepting
+        // it would also let a plaintext client write into an encrypted tree.
+        if self.path_is_encrypted(owner_id, &owner_path).await? && wrapped_key.is_none() {
+            return Err(VfsError::Conflict(
+                "this folder is encrypted: upload the wrapped file key with the manifest"
+                    .to_string(),
+            ));
+        }
+        let current = self
+            .stat_access(caller_id, raw)
+            .await?
+            .map(|access| access.node);
         // Whether the file already had a wrapped key decides whether its old
         // version history is ciphertext (safe to keep) or plaintext (must be
         // purged below).
@@ -623,12 +647,12 @@ impl Vfs {
             return Ok(None);
         }
         for chunk in &manifest.chunks {
-            if !self.store.has_chunk(user_id, &chunk.hash).await? {
+            if !self.store.has_chunk(owner_id, &chunk.hash).await? {
                 return Err(VfsError::MissingChunk(chunk.hash));
             }
         }
         // Quota on logical size: replacing a file frees its old size first.
-        let (quota, used) = self.quota_state(user_id).await?;
+        let (quota, used) = self.quota_state(owner_id).await?;
         if quota > 0 {
             let old_size = current.as_ref().map(|n| n.size).unwrap_or(0);
             if used.saturating_sub(old_size).saturating_add(manifest.size) > quota {
@@ -637,36 +661,42 @@ impl Vfs {
         }
         // The manifest itself must be persisted server-side before the
         // node can reference it.
-        self.store.put_manifest(user_id, manifest).await?;
-        let (parent, name) = self.resolve_parent(user_id, raw).await?;
+        self.store.put_manifest(owner_id, manifest).await?;
         let existing = match &current {
-            Some(_) => self.db.find_child(user_id, parent.id, &name).await?,
+            Some(_) => self.db.find_child(owner_id, parent.id, &name).await?,
             None => None,
         };
         let node = self
-            .finalize_put_at(user_id, parent.id, &name, existing, manifest)
+            .finalize_put_at(owner_id, parent.id, &name, existing, manifest)
             .await?;
         if let Some(wrapped) = wrapped_key {
-            self.db.set_file_key(user_id, node.id, wrapped).await?;
+            self.db.set_file_key(owner_id, node.id, wrapped).await?;
             if !was_encrypted {
                 // The file just became encrypted. The commit above archived
                 // its previous plaintext content, and older plaintext
                 // versions may exist: deleting them is what makes the
                 // "everything in this folder is encrypted" promise true for
                 // version history too.
-                self.db.delete_versions(user_id, node.id).await?;
+                self.db.delete_versions(owner_id, node.id).await?;
             }
         }
         Ok(Some(node))
     }
 
     /// Deletes a file or directory by moving it to the trash.
+    ///
+    /// Mount-aware: a write recipient deletes from the owner's tree, but
+    /// never the mount root itself.
     pub async fn delete(&self, user_id: i64, raw: &str) -> Result<(), VfsError> {
-        let node = self.resolve(user_id, raw).await?;
-        if node.parent_id.is_none() {
+        let access = self.resolve_access(user_id, raw).await?;
+        access.perm.require(crate::Perm::Write)?;
+        if access.is_mount_root {
+            return Err(VfsError::Forbidden);
+        }
+        if access.node.parent_id.is_none() {
             return Err(VfsError::Root);
         }
-        self.trash_node_at(user_id, &node).await
+        self.trash_node_at(access.owner_id, &access.node).await
     }
 
     pub(crate) async fn trash_node_at(&self, user_id: i64, node: &Node) -> Result<(), VfsError> {

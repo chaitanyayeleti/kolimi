@@ -68,6 +68,7 @@ fn passphrase_options() -> E2eeOptions {
         recovery_code: None,
         prf_secret: None,
         encrypted_roots: vec!["Private".to_string()],
+        mls: false,
     }
 }
 
@@ -127,6 +128,7 @@ async fn device_enrollment_transfers_the_master_key() {
             recovery_code: None,
             prf_secret: None,
             encrypted_roots: vec!["Private".to_string()],
+            mls: false,
         }),
     );
     let report = kolimi_sync::sync_once(&unlocked).await.unwrap();

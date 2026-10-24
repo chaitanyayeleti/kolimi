@@ -32,6 +32,7 @@ keyring = { version = "4", optional = true }
 rpassword.workspace = true
 kolimi-chunk.workspace = true
 kolimi-crypto.workspace = true
+getrandom = { version = "0.2", features = ["js"] }
 kolimi-mls.workspace = true
 percent-encoding.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "rustls-native-certs"] }

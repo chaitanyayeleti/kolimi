@@ -1,7 +1,8 @@
 # MLS (RFC 9420) audit delta — package
 
-Status: prepared for review · Applies to: `crates/kolimi-mls` + `/api/mls`
-(not yet used by shipped sync clients)
+Status: prepared for review · Applies to: `crates/kolimi-mls`, `/api/mls`,
+sync/desktop client wiring and the web client. **External review has not
+been performed.**
 
 This is the delta an external reviewer needs for the group-E2EE milestone.
 Nothing here is a substitute for the review itself.
@@ -16,8 +17,13 @@ Nothing here is a substitute for the review itself.
   exporter, share-keyring encryption.
 - Server storage and epoch validation in `crates/kolimi-db/src/mls.rs`
   and `crates/kolimi-server/src/api_mls.rs`.
-- Web feasibility: `cargo check --target wasm32-unknown-unknown` passes
-  with the `js` getrandom feature.
+- Desktop/sync: `crates/kolimi-sync/src/mls.rs` and `mls_store.rs`
+  (device bootstrap, group create/join, commits, keyring read/update,
+  sealed state).
+- Web: `crates/kolimi-ui/src/mls.rs` (wasm openmls, sealed browser state,
+  group share/join, shared read/write).
+- Server mount-aware write paths for write shares: `commit_manifest`,
+  chunk upload/existence, node keys, mkdir, move and delete.
 
 ## Server invariants
 
@@ -35,7 +41,7 @@ Nothing here is a substitute for the review itself.
 - Message and keyring sizes are capped (256 KiB / 1 MiB); key packages
   64 KiB.
 
-## Client invariants (spike)
+## Client invariants
 
 - The share keyring key is `HKDF(exporter, salt=group_id,
   info="kolimi-share-keyring-key-v1"||epoch)`; the blob is
@@ -46,6 +52,14 @@ Nothing here is a substitute for the review itself.
   commit. A removed member cannot read the new blob.
 - A removed member retains file keys already received. The guarantee is
   only for new epochs/new keyring versions.
+- The device state carries the MLS signer and openmls key-value storage
+  (group secrets). It is sealed with the UMK before persistence:
+  `.kolimi/mls-state.bin` is 0600 and atomically replaced on desktop/sync;
+  the web client stores a sealed blob in `localStorage` under an
+  account-fingerprint slot. Wrong-key and tamper are rejected.
+- Keyring updates use `if_epoch`; a losing writer refetches and retries.
+- A write recipient's chunks and manifests are stored in the owner's blob
+  namespace; the ACL is still enforced by the VFS before every write.
 
 ## Test evidence
 
@@ -58,10 +72,18 @@ Nothing here is a substitute for the review itself.
   import, group reload, and an epoch advance after reload.
 - `crates/kolimi-sync/src/mls_store.rs`: UMK-sealed state file (0600,
   atomic rename), wrong-key and tamper rejection.
-- `cargo check --target wasm32-unknown-unknown` for the spike.
+- `crates/kolimi-server/tests/mls_sync.rs`: sync owner share → recipient
+  Welcome join → keyring read; write recipient creates/edits/deletes files
+  that the owner decrypts; legacy v1 share migration.
 - `crates/kolimi-server/tests/mls.rs`: owner-only init, read-vs-write
   ACLs, epoch rules, keyring conflict, key packages, non-member denial.
-- `cargo test --workspace`, clippy, fmt, vet and smoke remain green.
+- Browser E2E (Chromium, two authenticated contexts): web owner creates an
+  encrypted folder and MLS group, a web recipient downloads/decrypts the
+  file through the keyring, uploads a file into the write share, and the
+  owner downloads/decrypts the recipient's file.
+- `crates/kolimi-ui` compiles to wasm32 and passes clippy; `cargo test
+  --workspace`, clippy, fmt, vet, audit/deny exceptions and smoke remain
+  green.
 
 ## Open review questions
 
@@ -74,8 +96,10 @@ Nothing here is a substitute for the review itself.
 4. Device credential binding: a key package is currently bound to a
    device id string, not an attested device key. The device-enrollment
    identity should sign or authorize the package.
-5. Client state persistence: desktop OS keystore vs web IndexedDB; both
-   need encrypted-at-rest state and rollback protection.
+5. Client state persistence: desktop/sync uses a UMK-sealed 0600 file and
+   the web client uses UMK-sealed `localStorage`. Both need a rollback /
+   device-cloning story (a stale state file is detected only by the epoch
+   check, not by a monotonic counter).
 6. Concurrent commits: server orders by sequence, but clients must
    resolve forks; the current design assumes one committer per epoch.
 7. WebCrypto/provider differences and the wasm `getrandom` shim.
@@ -87,7 +111,22 @@ Nothing here is a substitute for the review itself.
 - [ ] Fuzz MLS message parsing and client state transitions
 - [ ] Rate-limit `/api/mls/*` and cap per-group messages
 - [ ] Janitor pruning for expired key packages and old messages
-- [ ] Desktop group-state wiring + tests
-- [ ] Web group-state wiring + tests (IndexedDB, locked state)
-- [ ] Write-share enablement behind a feature flag, with a migration path
-- [ ] External review signed off; only then enable by default
+- [x] Desktop/sync group-state wiring + tests
+- [x] Web group-state wiring + tests (sealed browser state, locked state)
+- [x] Write-share enablement behind a feature flag, with a migration path
+- [x] Browser E2E: owner share → recipient read → recipient write → owner read
+- [ ] External review signed off; only then treat MLS as audited
+- [ ] Membership removal/rotation UX and state-loss recovery
+- [ ] Cross-device key-package pool (one package per device today)
+
+## Known limitations
+
+- `mls_key_packages` is unique per `(user, device_id)`; a device publishes
+  one package at a time. Reuse across multiple groups is not modeled.
+- Adding a recipient uses every package currently published; a device that
+  never syncs/unlocks cannot be added.
+- Removing a member and re-encrypting the keyring for the new epoch is
+  implemented at the format level but has no UI/CLI workflow yet.
+- Losing the sealed device state (cleared browser storage, deleted
+  `.kolimi`) means losing that device's MLS membership; a remaining member
+  must re-add it with a fresh package.

@@ -1,20 +1,25 @@
 # RFC 0012: MLS group E2EE (RFC 9420)
 
-Status: design + spike (not wired) · Depends on: RFC 0007 (E2EE), RFC 0008
-(device enrollment), RFC 0010 (DAV boundary) · Requires: external audit delta
+Status: client + server wiring landed (0.2.0); external audit pending ·
+Depends on: RFC 0007 (E2EE), RFC 0008 (device enrollment), RFC 0010 (DAV
+boundary)
 
-> **Client + server slice (0.1.40–0.1.43):** `crates/kolimi-mls` (openmls
-> 0.9) now provides device credentials/key packages, group create/add,
-> Welcome joins, the `kolimi-share-keyring-v1` epoch exporter, epoch
-> rotation, and the epoch-bound encrypted share-keyring format. The server
-> stores node-scoped group state (`/api/mls/*`). An end-to-end test proves
-> key packages → Welcome join → exporter agreement → keyring write by a
-> recipient → owner decrypt. The crate is in the workspace; the 89 new
-> `cargo-vet` exemptions are tracked in
-> [`docs/audit/mls-delta.md`](../audit/mls-delta.md). The sync/desktop path now
-> has sealed `MlsStore` persistence (device signer + openmls storage, UMK-sealed,
-> 0600) and `Group::load`; wiring the share flow and the web IndexedDB path
-> remain. Encrypted shares stay read-only until those land.
+> **Client + server wiring (0.2.0):** `crates/kolimi-mls` (openmls 0.9)
+> provides device credentials/key packages, group create/add, Welcome
+> joins, the `kolimi-share-keyring-v1` epoch exporter, epoch rotation, and
+> the epoch-bound encrypted share-keyring format. The server stores
+> node-scoped group state (`/api/mls/*`). Sync/desktop keeps sealed
+> `MlsStore` state (UMK-sealed, 0600), creates a group on an encrypted
+> folder share, joins from the Welcome on the recipient, processes commits,
+> reads/updates the keyring, and supports write recipients. The web client
+> compiles the same crate to wasm, persists sealed state in browser storage,
+> and uses the keyring for shared reads and writes. `kolimi-sync
+> --mls-migrate` promotes existing encrypted folder shares; legacy v1 wraps
+> still read. Write shares are opt-in in sync/desktop and on by default in
+> the web UI (localStorage kill switch `kolimi-mls=0`). The 89 temporary
+> `cargo-vet` exemptions and the review checklist live in
+> [`docs/audit/mls-delta.md`](../audit/mls-delta.md). **External review is
+> still required before treating MLS as audited.**
 
 ## Why
 
@@ -47,8 +52,8 @@ participating in a commit.
 
 ## Model
 
-- A server `groups` row gets an `mls_group_id` (random 32 bytes) and a
-  monotonically increasing `epoch`.
+- A shared **node** (folder) gets an `mls_group_id` (random 32 bytes) and a
+  monotonically increasing `epoch` (`mls_node_groups`).
 - Each **enrolled device** publishes a key package (credential: username +
   device public key; lifetime bounded).
 - Membership = all devices of all users in the group. Adding a user adds
@@ -56,9 +61,10 @@ participating in a commit.
 - One device is the committer per change (last writer wins, server orders
   by `(epoch, seq)`); a proposal queue lets other devices propose adds or
   removes and the next committer commits them.
-- Existing encrypted shares stay on the v1 per-member path; a share or
-  group is promoted to MLS explicitly (or on the next membership change).
-  No silent migration of file keys.
+- Existing encrypted shares stay on the v1 per-member path until the owner
+  runs an explicit promotion (`kolimi-sync --mls-migrate`, or re-sharing
+  the folder). New encrypted folder shares use MLS when the client enables
+  it. No silent migration of keys.
 
 ## Share keyring
 
@@ -96,14 +102,19 @@ regression, and stores blobs. It never parses MLS plaintext.
 
 - **kolimi-mls** crate: `openmls` wrapper for create/add/remove/commit/
   welcome/export; key package lifecycle; encrypted group state at rest.
-- **Desktop/CLI**: group state under `.kolimi/mls/<group>` encrypted with
-  the UMK (or OS keystore); `kolimi-sync` becomes an MLS committer when a
-  group share changes.
-- **Web**: compile `openmls` to wasm (verify `getrandom` + provider
-  support), persist group state in IndexedDB encrypted with the UMK, and
-  use the existing device enrollment to bind a browser to an MLS credential.
+- **Desktop/CLI**: sealed `.kolimi/mls-state.bin` (device signer, identity
+  and openmls key-value storage, UMK-sealed, 0600). `kolimi-sync` creates
+  the group on share, joins from a Welcome, processes commits, and updates
+  the keyring on write.
+- **Web**: `openmls` compiled to wasm; sealed state in browser
+  `localStorage` (one slot per account fingerprint). The browser publishes
+  a key package on unlock, creates/joins groups, and uses the keyring for
+  shared downloads and uploads.
 - **Sync**: for MLS shares, replace the per-file `/api/e2ee/share-key`
   fetch with the epoch share keyring; keep the v1 path for legacy shares.
+- **Server**: mount-aware writes for write shares (commit, chunks, node
+  keys, mkdir, move, delete) store data in the owner's blob namespace while
+  enforcing the share ACL.
 
 ## Tests
 
@@ -112,18 +123,20 @@ regression, and stores blobs. It never parses MLS plaintext.
   after removal (integration test).
 - A stolen old epoch state cannot derive the next exporter secret (vector
   test).
-- Web/desktop interop: a browser commits, the desktop follows.
+- Web/desktop interop: a browser creates a group, a sync recipient reads
+  and writes, and the owner reads the recipient's file (browser E2E).
 - Server sees only opaque payloads; no plaintext names/keys in logs.
 - Fuzz the message parser and state transitions.
 
 ## Rollout
 
-1. `openmls` wasm/desktop spike + key-package API (no user-visible change).
-2. Group state/message endpoints + epoch enforcement + tests.
-3. Desktop/CLI group-share path behind a flag.
-4. Web path + device credential binding.
-5. Promote on new group shares; keep v1 reads forever.
-6. External audit delta before recommending MLS for sensitive groups.
+1. `openmls` wasm/desktop spike + key-package API (done).
+2. Group state/message endpoints + epoch enforcement + tests (done).
+3. Desktop/CLI group-share path behind a flag (done, `E2eeOptions::mls`).
+4. Web path + browser state + shared writes (done, default on).
+5. Promote on new group shares; keep v1 reads and `--mls-migrate` (done).
+6. External audit delta before recommending MLS for sensitive groups
+   (**pending**).
 
 ## Risks
 

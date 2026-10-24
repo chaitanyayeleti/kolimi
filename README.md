@@ -193,12 +193,26 @@ kolimi-sync --server ... --user alice --password ... --local ~/Kolimi \
 ```
 
 The owner's client wraps the file keys for bob (X25519); bob's next
-sync pulls the file decrypted into `Shared with me/` (read-only).
-`--unshare` revokes it. Groups work too (`--group team`): keys are
-wrapped for every member, and removing a member revokes their keys so
-their next sync drops the local copy. This is per-member wrapping, not
-MLS — RFC 9420 group messaging remains the roadmap item. Public links
-to encrypted files are refused.
+sync pulls the file decrypted into `Shared with me/`. `--unshare` revokes
+it. Groups work too (`--group team`): keys are wrapped for every member,
+and removing a member revokes their keys so their next sync drops the
+local copy.
+
+For encrypted **folders**, enable MLS (`--mls`, or `mls: true` in a
+desktop sync pair / `KOLIMI_MLS_SHARES=1`) and add `--write` for a write
+share:
+
+```sh
+kolimi-sync ... --mls --share Private/Team --with bob --write
+```
+
+The owner creates a node-scoped MLS group and an epoch-bound keyring; bob
+joins from the Welcome on his next sync and both can read and write files
+through the keyring. Existing encrypted folder shares can be promoted with
+`kolimi-sync ... --mls-migrate`. The web UI uses MLS for folder shares by
+default (set `localStorage["kolimi-mls"]="0"` to disable). MLS still needs
+the external crypto review; legacy per-file wraps remain readable. Public
+links to encrypted files are refused.
 
 Unlock works with the passphrase, the recovery code, or a passkey PRF
 (platform shells supply the PRF output; RFC 0007). The server never

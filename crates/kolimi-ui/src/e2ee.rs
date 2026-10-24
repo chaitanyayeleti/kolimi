@@ -726,9 +726,17 @@ async fn load_file(master: &MasterKey, path: &str) -> Result<(FileKey, Value), S
                 .unwrap_or_default(),
         )
         .map_err(|_| "Malformed wrapped key".to_string())?;
-    let file_key = master
-        .unwrap_file_key(&wrapped)
-        .map_err(|_| "Could not unwrap the file key".to_string())?;
+    let file_key = match master.unwrap_file_key(&wrapped) {
+        Ok(key) => key,
+        Err(_) => {
+            // A write recipient created this file; their node key is not
+            // wrapped for us, but the MLS keyring is.
+            let Some(key) = crate::mls::owned_file_key(master, path).await? else {
+                return Err("Could not unwrap the file key".to_string());
+            };
+            FileKey::from_bytes(key)
+        }
+    };
 
     let manifest = api::get(&format!("/api/files/manifest?path={}", encode(path))).await?;
     if manifest.status != 200 {
@@ -993,8 +1001,11 @@ pub async fn upload_encrypted_versioned(
     data: &[u8],
     if_content_id: Option<&str>,
 ) -> Result<(), String> {
-    let file_key =
-        FileKey::generate().map_err(|_| "could not generate the file key".to_string())?;
+    let existing = crate::mls::owned_file_key(master, path).await?;
+    let file_key = match existing {
+        Some(key) => FileKey::from_bytes(key),
+        None => FileKey::generate().map_err(|_| "could not generate the file key".to_string())?,
+    };
     // Hide the exact length: header + zero padding up to a coarse bucket
     // before encryption. The server only learns the bucket.
     let padded = kolimi_crypto::pad_file(data);
@@ -1038,7 +1049,10 @@ pub async fn upload_encrypted_versioned(
     }
     let response = api::send_json("PUT", &url, &manifest).await?;
     match response.status {
-        200 => Ok(()),
+        200 => {
+            crate::mls::record_owned_file_key(master, path, file_key.as_bytes()).await?;
+            Ok(())
+        }
         409 => Err(
             "the file changed on the server since it was read — refresh and try again".to_string(),
         ),
@@ -1050,7 +1064,7 @@ pub async fn upload_encrypted_versioned(
 }
 
 /// The caller's X25519 identity, unwrapped with the master key.
-async fn own_identity(master: &MasterKey) -> Result<kolimi_crypto::Identity, String> {
+pub(crate) async fn own_identity(master: &MasterKey) -> Result<kolimi_crypto::Identity, String> {
     let response = api::get("/api/e2ee/identity").await?;
     if response.status != 200 {
         return Err("No E2EE identity on this account yet.".to_string());
@@ -1100,7 +1114,7 @@ pub async fn decrypt_shared_file(
 }
 
 /// Shared chunk-decryption core for owned and shared files.
-async fn decrypt_manifest(
+pub(crate) async fn decrypt_manifest(
     file_key: &FileKey,
     path: &str,
     manifest: &Value,

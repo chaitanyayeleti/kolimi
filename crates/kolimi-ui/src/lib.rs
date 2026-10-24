@@ -9,6 +9,7 @@
 mod api;
 mod app;
 mod e2ee;
+mod mls;
 mod passkey;
 mod public;
 

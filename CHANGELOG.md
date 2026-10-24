@@ -4,19 +4,59 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-24
 
 ### Added
-- **Sealed MLS device/group state for the sync/desktop client.** `Device`
-  can export its signer, identity and openmls key-value storage;
-  `Group::load` restores a group; `MlsStore` writes the state sealed with
-  the UMK (0600, atomic rename) and rejects a different master key or
-  tampering. Tests cover reloading a group, advancing an epoch after
-  reload, and the sealed file roundtrip.
-- This is groundwork: the sync share flow, web IndexedDB path and write
-  enablement are still pending. Encrypted shares remain read-only.
+- **MLS group shares work end to end on desktop/sync and the web.**
+  Encrypted folder shares create a node-scoped MLS group and an
+  epoch-bound keyring; recipients join from the Welcome, process commits,
+  and decrypt through the keyring. Write recipients can add, edit and
+  delete files that the owner then decrypts.
+- **Sync/desktop MLS client** (`crates/kolimi-sync/src/mls.rs`): sealed
+  device/group state (`mls-state.bin`, UMK-sealed, `0600`, atomic rename),
+  key-package bootstrap, group create/join, commit processing, keyring
+  read/update, and two-client tests covering owner → recipient read,
+  recipient writes, and owner reads the recipient's file.
+- **Web MLS client** (`crates/kolimi-ui/src/mls.rs`): openmls compiled to
+  wasm, sealed state in browser `localStorage`, key-package publishing on
+  unlock, group creation/joining, shared downloads, and encrypted uploads
+  / folder creation / rename / delete into write shares.
+- **Feature flags**: `E2eeOptions::mls` (sync/desktop; `kolimi-sync --mls`,
+  desktop `SyncPair.mls` or `KOLIMI_MLS_SHARES=1`). The web UI enables MLS
+  by default with a `localStorage["kolimi-mls"]="0"` kill switch.
+- **Write shares**: `kolimi-sync --write` and `share_path_with_permission`
+  create a write ACL plus MLS keyring for encrypted folders. The VFS now
+  handles mount-aware writes for write recipients: manifest commits,
+  chunk upload/existence, node keys, mkdir, move and delete use the
+  owner's blob namespace while enforcing the share ACL.
+- **Migration**: `kolimi-sync --mls-migrate` promotes existing encrypted
+  folder shares to MLS groups/keyrings without changing their ACL.
+- **Credentials**: `Device::device_id()` and persisted device ids for
+  key-package publication; sealed state import/export.
+- **Tests**: `crates/kolimi-server/tests/mls_sync.rs` (owner/recipient
+  read, write recipient, delete, v1 migration) and a Chromium two-context
+  browser E2E (web owner shares, recipient reads/writes, owner reads).
 
-## [0.1.43] - 2026-10-24
+### Changed
+- `GET /api/mls/group` defaults to a 100-message page.
+- Shared-write chunks are stored under the owner's user id; `/api/chunks`
+  accepts a `path` context for uploads/existence checks.
+- `/api/files/key` accepts a write share (stored under the owner's node),
+  needed for the opaque per-node key while group members use the keyring.
+- The changelog's duplicated release headers were cleaned up.
+
+### Security / limitations
+- **The external MLS audit is still pending.** `docs/audit/mls-delta.md`
+  is the review package; the 89 `cargo-vet` exemptions for openmls remain
+  temporary (724 total, no audits).
+- Write shares are opt-in in sync/desktop. Web MLS is on by default but
+  can be disabled per browser.
+- One key package per device is modeled; membership removal/rotation has
+  format support but no UI/CLI workflow yet. Losing sealed device state
+  loses that device's group membership.
+- Legacy v1 per-file wraps remain readable; new folder shares use MLS when
+  enabled.
+
 ## [0.1.43] - 2026-10-24
 
 ### Added
@@ -39,7 +79,6 @@ follow [Semantic Versioning](https://semver.org/).
   writes before that would make writer-created files unreadable to others.
 
 ## [0.1.42] - 2026-10-24
-## [0.1.42] - 2026-10-24
 
 ### Added
 - **MLS group-state API** (`/api/mls/*`): device key packages, node-scoped
@@ -60,7 +99,6 @@ follow [Semantic Versioning](https://semver.org/).
   release.
 
 ## [0.1.41] - 2026-10-24
-## [0.1.41] - 2026-10-24
 
 ### Changed
 - The decorative lock glyph in a file row's action cluster looked like a
@@ -70,7 +108,6 @@ follow [Semantic Versioning](https://semver.org/).
   the row, context menu and lightbox. There was never a second decrypt
   action — the lock was informational.
 
-## [0.1.40] - 2026-10-24
 ## [0.1.40] - 2026-10-24
 
 ### Added
@@ -104,7 +141,6 @@ follow [Semantic Versioning](https://semver.org/).
   milestone rather than as a half-working patch.
 
 ## [0.1.39] - 2026-10-24
-## [0.1.39] - 2026-10-24
 
 ### Added
 - **Encrypted share names for recipients.** Sharing an encrypted file or
@@ -132,7 +168,6 @@ follow [Semantic Versioning](https://semver.org/).
   root-key fallback; no data migration is required.
 
 ## [0.1.38] - 2026-10-26
-## [0.1.38] - 2026-10-26
 
 ### Added
 - **Unlocking no longer freezes the tab.** Argon2id runs in a dedicated
@@ -150,7 +185,6 @@ follow [Semantic Versioning](https://semver.org/).
 - CI checks that the KDF worker assets are staged and clippy-checks the
   worker crate.
 
-## [0.1.37] - 2026-10-26
 ## [0.1.37] - 2026-10-26
 
 ### Added
@@ -186,7 +220,6 @@ follow [Semantic Versioning](https://semver.org/).
   readable name until the migration is run.
 
 ## [0.1.36] - 2026-10-26
-## [0.1.36] - 2026-10-26
 
 ### Added
 - **Encrypting a folder now encrypts the files already inside it.** The
@@ -207,14 +240,12 @@ follow [Semantic Versioning](https://semver.org/).
   encrypted, so `/api/versions` cannot expose the old plaintext content.
 
 ## [0.1.35] - 2026-10-26
-## [0.1.35] - 2026-10-26
 
 ### Security
 - Update `tokio` to 1.54.1 for RUSTSEC-2026-0386 (`AsyncFd::new` and
   related constructors violate I/O safety). The advisory was published
   after 0.1.34 was tagged, so this is a dependency-only release.
 
-## [0.1.34] - 2026-10-26
 ## [0.1.34] - 2026-10-26
 
 ### Fixed
@@ -234,7 +265,6 @@ follow [Semantic Versioning](https://semver.org/).
   answer 401 without a challenge, while `/dav` and `/api/me/usage` still
   accept Basic.
 
-## [0.1.33] - 2026-10-26
 ## [0.1.33] - 2026-10-26
 
 ### Fixed
