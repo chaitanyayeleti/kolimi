@@ -62,9 +62,24 @@ impl Device {
         })
     }
 
+    /// The credential identity this device was created with.
+    pub fn identity(&self) -> &[u8] {
+        &self.identity
+    }
+
     /// The stable id this device publishes its key packages under.
     pub fn device_id(&self) -> String {
         STANDARD.encode(self.device_id)
+    }
+
+    /// Reads a serialized key package's leaf signature key. Used to avoid
+    /// adding the same device twice to one group.
+    pub fn key_package_signature_key(&self, bytes: &[u8]) -> Result<Vec<u8>, String> {
+        let package = KeyPackageIn::tls_deserialize_exact(bytes)
+            .map_err(|error| format!("mls key package decode: {error:?}"))?
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|error| format!("mls key package validate: {error:?}"))?;
+        Ok(package.leaf_node().signature_key().as_slice().to_vec())
     }
 
     /// Serializes the device and the listed group ids.
@@ -172,6 +187,17 @@ impl Device {
     }
 }
 
+/// One member of a group.
+#[derive(Debug, Clone)]
+pub struct MemberInfo {
+    /// Leaf index in the ratchet tree.
+    pub index: u32,
+    /// Credential identity (the account username in Kolimi's clients).
+    pub identity: Vec<u8>,
+    /// Public signature key, unique per device within a group.
+    pub signature_key: Vec<u8>,
+}
+
 /// An in-memory MLS group.
 pub struct Group {
     group: MlsGroup,
@@ -247,6 +273,41 @@ impl Group {
             .into_group(&device.provider)
             .map_err(|error| format!("mls group join: {error:?}"))?;
         Ok(Self { group })
+    }
+
+    /// The group's current members, with the credential identity and leaf
+    /// index used for removals.
+    pub fn members(&self) -> Vec<MemberInfo> {
+        self.group
+            .members()
+            .map(|member| MemberInfo {
+                index: member.index.u32(),
+                identity: member.credential.serialized_content().to_vec(),
+                signature_key: member.signature_key.clone(),
+            })
+            .collect()
+    }
+
+    /// Removes members by leaf index and returns the serialized commit.
+    ///
+    /// The caller posts the commit at the new epoch and then re-encrypts the
+    /// share keyring for that epoch. The returned commit is already merged
+    /// locally, so the group is at the new epoch when this returns.
+    pub fn remove(&mut self, device: &Device, indices: &[u32]) -> Result<Vec<u8>, String> {
+        let leaves: Vec<LeafNodeIndex> = indices
+            .iter()
+            .map(|index| LeafNodeIndex::new(*index))
+            .collect();
+        let (commit, _welcome, _group_info) = self
+            .group
+            .remove_members(&device.provider, &device.signer, &leaves)
+            .map_err(|error| format!("mls remove member: {error:?}"))?;
+        self.group
+            .merge_pending_commit(&device.provider)
+            .map_err(|error| format!("mls merge remove commit: {error:?}"))?;
+        commit
+            .to_bytes()
+            .map_err(|error| format!("mls commit encoding: {error:?}"))
     }
 
     /// Processes a commit/proposal/application message from another member.

@@ -1,10 +1,10 @@
 # RFC 0012: MLS group E2EE (RFC 9420)
 
-Status: client + server wiring landed (0.2.0); external audit pending ·
+Status: client + server hardening landed (0.3.0); external audit pending ·
 Depends on: RFC 0007 (E2EE), RFC 0008 (device enrollment), RFC 0010 (DAV
 boundary)
 
-> **Client + server wiring (0.2.0):** `crates/kolimi-mls` (openmls 0.9)
+> **Client + server hardening (0.3.0):** `crates/kolimi-mls` (openmls 0.9)
 > provides device credentials/key packages, group create/add, Welcome
 > joins, the `kolimi-share-keyring-v1` epoch exporter, epoch rotation, and
 > the epoch-bound encrypted share-keyring format. The server stores
@@ -16,7 +16,10 @@ boundary)
 > and uses the keyring for shared reads and writes. `kolimi-sync
 > --mls-migrate` promotes existing encrypted folder shares; legacy v1 wraps
 > still read. Write shares are opt-in in sync/desktop and on by default in
-> the web UI (localStorage kill switch `kolimi-mls=0`). The 89 temporary
+> the web UI (IndexedDB; localStorage kill switch `kolimi-mls=0`).
+> Membership add/remove rotates the keyring, key packages are a consumable
+> pool, keyrings carry a revision, and single-file shares use a group on the
+> file node. The 89 temporary
 > `cargo-vet` exemptions and the review checklist live in
 > [`docs/audit/mls-delta.md`](../audit/mls-delta.md). **External review is
 > still required before treating MLS as audited.**
@@ -107,7 +110,8 @@ regression, and stores blobs. It never parses MLS plaintext.
   the group on share, joins from a Welcome, processes commits, and updates
   the keyring on write.
 - **Web**: `openmls` compiled to wasm; sealed state in browser
-  `localStorage` (one slot per account fingerprint). The browser publishes
+  **IndexedDB** (one slot per account fingerprint, with a localStorage
+  migration). The browser publishes
   a key package on unlock, creates/joins groups, and uses the keyring for
   shared downloads and uploads.
 - **Sync**: for MLS shares, replace the per-file `/api/e2ee/share-key`

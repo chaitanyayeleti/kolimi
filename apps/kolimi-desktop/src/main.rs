@@ -1556,6 +1556,26 @@ fn propagate_account_files(account: &Account) {
     }
 }
 
+/// Ensures a pair config has E2EE options and MLS enabled.
+fn with_mls(
+    mut config: kolimi_sync::SyncConfig,
+    pair: &SyncPair,
+    secrets: &Secrets,
+) -> kolimi_sync::SyncConfig {
+    if config.e2ee.is_none() {
+        config.e2ee = Some(kolimi_sync::E2eeOptions {
+            passphrase: secrets.e2ee_passphrase.clone(),
+            recovery_code: None,
+            prf_secret: None,
+            encrypted_roots: pair.encrypted_roots.clone(),
+            mls: true,
+        });
+    } else if let Some(e2ee) = config.e2ee.as_mut() {
+        e2ee.mls = true;
+    }
+    config
+}
+
 /// A config for account-level E2EE operations (no encrypted roots).
 fn account_config(
     account: &Account,
@@ -1697,6 +1717,120 @@ fn recipient_fingerprints(
     Ok(out)
 }
 
+#[derive(Serialize)]
+struct MlsStatusView {
+    epoch: u64,
+    members: Vec<String>,
+}
+
+fn pair_for<'a>(
+    account: &'a Account,
+    dir: &str,
+) -> Result<&'a SyncPair, String> {
+    account
+        .pairs
+        .iter()
+        .find(|pair| pair.local_dir == dir)
+        .ok_or_else(|| "sync folder not found".to_string())
+}
+
+/// Adds an MLS recipient (folder shares) for one sync pair.
+#[tauri::command]
+async fn share_mls(
+    app: AppHandle,
+    server: String,
+    username: String,
+    dir: String,
+    path: String,
+    kind: String,
+    recipient: String,
+    write: bool,
+) -> Result<u64, String> {
+    let (account, secrets) = find_account(&app, &server, &username)?;
+    let pair = pair_for(&account, &dir)?;
+    let config = with_mls(pair_sync_config(&account, pair, &secrets), pair, &secrets);
+    let target = if kind == "group" {
+        kolimi_sync::ShareTarget::Group(recipient)
+    } else {
+        kolimi_sync::ShareTarget::User(recipient)
+    };
+    let permission = if write {
+        kolimi_sync::SharePermission::Write
+    } else {
+        kolimi_sync::SharePermission::Read
+    };
+    kolimi_sync::share_path_with_permission(
+        &config,
+        &pair.remote,
+        &path,
+        target,
+        permission,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Revokes an MLS recipient share.
+#[tauri::command]
+async fn unshare_mls(
+    app: AppHandle,
+    server: String,
+    username: String,
+    dir: String,
+    path: String,
+    kind: String,
+    recipient: String,
+) -> Result<(), String> {
+    let (account, secrets) = find_account(&app, &server, &username)?;
+    let pair = pair_for(&account, &dir)?;
+    let config = with_mls(pair_sync_config(&account, pair, &secrets), pair, &secrets);
+    let target = if kind == "group" {
+        kolimi_sync::ShareTarget::Group(recipient)
+    } else {
+        kolimi_sync::ShareTarget::User(recipient)
+    };
+    kolimi_sync::unshare_path(&config, &pair.remote, &path, target)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Promotes existing encrypted folder shares to MLS groups/keyrings.
+#[tauri::command]
+async fn migrate_mls(
+    app: AppHandle,
+    server: String,
+    username: String,
+    dir: String,
+) -> Result<Vec<String>, String> {
+    let (account, secrets) = find_account(&app, &server, &username)?;
+    let pair = pair_for(&account, &dir)?;
+    let config = with_mls(pair_sync_config(&account, pair, &secrets), pair, &secrets);
+    kolimi_sync::migrate_mls_shares(&config)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Shows the MLS epoch and members for a folder.
+#[tauri::command]
+async fn mls_status(
+    app: AppHandle,
+    server: String,
+    username: String,
+    dir: String,
+    path: String,
+) -> Result<Option<MlsStatusView>, String> {
+    let (account, secrets) = find_account(&app, &server, &username)?;
+    let pair = pair_for(&account, &dir)?;
+    let config = with_mls(pair_sync_config(&account, pair, &secrets), pair, &secrets);
+    let status = kolimi_sync::mls_status(&config, &pair.remote, &path)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(status.map(|(epoch, members)| MlsStatusView {
+        epoch,
+        members: members.into_iter().map(|(name, _)| name).collect(),
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -1738,7 +1872,11 @@ fn main() {
             finish_enrollment,
             list_enrollments,
             approve_device,
-            recipient_fingerprints
+            recipient_fingerprints,
+            share_mls,
+            unshare_mls,
+            migrate_mls,
+            mls_status
         ])
         .setup(|app| {
             let mut settings = match load_settings_file() {

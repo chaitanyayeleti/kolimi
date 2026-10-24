@@ -10,8 +10,8 @@ use kolimi_auth::password::hash_password;
 use kolimi_crypto::Argon2Params;
 use kolimi_server::{AppState, build_app};
 use kolimi_sync::{
-    E2eeOptions, SharePermission, SyncConfig, create_keyring_with_params,
-    share_path_with_permission, sync_once, upload_keyring,
+    E2eeOptions, SharePermission, ShareTarget, SyncConfig, create_keyring_with_params,
+    share_path_with_permission, sync_once, unshare_path, upload_keyring,
 };
 
 const PASS: &str = "sync pass 123";
@@ -27,7 +27,7 @@ struct Server {
 async fn start_server() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
-    for user in ["alice", "bob"] {
+    for user in ["alice", "bob", "carol"] {
         state
             .db
             .create_user(user, &hash_password(PASS).unwrap())
@@ -305,5 +305,171 @@ async fn existing_v1_folder_share_can_be_migrated_to_mls() {
         b"legacy"
     );
 
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn re_share_adds_a_recipient_and_rotates_the_keyring() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let alice_dir = root.path().join("alice");
+    let bob_dir = root.path().join("bob");
+    let carol_dir = root.path().join("carol");
+    std::fs::create_dir_all(alice_dir.join("Private/Team")).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
+    std::fs::create_dir_all(&carol_dir).unwrap();
+    setup_keyring(&server.url, "alice", &alice_dir).await;
+    setup_keyring(&server.url, "bob", &bob_dir).await;
+    setup_keyring(&server.url, "carol", &carol_dir).await;
+    let alice = config(&server.url, "alice", &alice_dir);
+    let bob = config(&server.url, "bob", &bob_dir);
+    let carol = config(&server.url, "carol", &carol_dir);
+    sync_once(&bob).await.unwrap();
+    sync_once(&carol).await.unwrap();
+    std::fs::write(alice_dir.join("Private/Team/a.txt"), b"alpha").unwrap();
+    sync_once(&alice).await.unwrap();
+    share_path_with_permission(
+        &alice,
+        "/",
+        "Private/Team",
+        ShareTarget::User("bob".to_string()),
+        SharePermission::Read,
+    )
+    .await
+    .unwrap();
+    sync_once(&bob).await.unwrap();
+    let stored = stored_dir(&server.url, "alice", "/Private/").await;
+    let (_, group) = get_json(
+        &server.url,
+        "alice",
+        &format!("/api/mls/group?path={}", query(&stored)),
+    )
+    .await;
+    assert_eq!(group["epoch"], 1, "{group}");
+
+    // Re-sharing with Carol adds her device at a new epoch and keeps the
+    // existing keyring readable by Bob.
+    share_path_with_permission(
+        &alice,
+        "/",
+        "Private/Team",
+        ShareTarget::User("carol".to_string()),
+        SharePermission::Read,
+    )
+    .await
+    .unwrap();
+    let (_, group) = get_json(
+        &server.url,
+        "alice",
+        &format!("/api/mls/group?path={}", query(&stored)),
+    )
+    .await;
+    assert_eq!(group["epoch"], 2, "{group}");
+    assert_eq!(group["keyring"]["epoch"], 2, "{group}");
+    let report = sync_once(&carol).await.unwrap();
+    assert!(report.pulled >= 1, "{report:?}");
+    assert_eq!(
+        std::fs::read(carol_dir.join("Shared with me/Team/a.txt")).unwrap(),
+        b"alpha"
+    );
+
+    // Bob follows the epoch change and still sees owner edits.
+    std::fs::write(alice_dir.join("Private/Team/a.txt"), b"alpha 2").unwrap();
+    sync_once(&alice).await.unwrap();
+    sync_once(&bob).await.unwrap();
+    assert_eq!(
+        std::fs::read(bob_dir.join("Shared with me/Team/a.txt")).unwrap(),
+        b"alpha 2"
+    );
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn unshare_removes_the_member_and_rotates_the_keyring() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let alice_dir = root.path().join("alice");
+    let bob_dir = root.path().join("bob");
+    std::fs::create_dir_all(alice_dir.join("Private/Team")).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
+    setup_keyring(&server.url, "alice", &alice_dir).await;
+    setup_keyring(&server.url, "bob", &bob_dir).await;
+    let alice = config(&server.url, "alice", &alice_dir);
+    let bob = config(&server.url, "bob", &bob_dir);
+    sync_once(&bob).await.unwrap();
+    std::fs::write(alice_dir.join("Private/Team/a.txt"), b"alpha").unwrap();
+    sync_once(&alice).await.unwrap();
+    share_path_with_permission(
+        &alice,
+        "/",
+        "Private/Team",
+        ShareTarget::User("bob".to_string()),
+        SharePermission::Read,
+    )
+    .await
+    .unwrap();
+    sync_once(&bob).await.unwrap();
+    let stored = stored_dir(&server.url, "alice", "/Private/").await;
+    let (_, group) = get_json(
+        &server.url,
+        "alice",
+        &format!("/api/mls/group?path={}", query(&stored)),
+    )
+    .await;
+    assert_eq!(group["epoch"], 1, "{group}");
+
+    unshare_path(
+        &alice,
+        "/",
+        "Private/Team",
+        ShareTarget::User("bob".to_string()),
+    )
+    .await
+    .unwrap();
+    let (_, group) = get_json(
+        &server.url,
+        "alice",
+        &format!("/api/mls/group?path={}", query(&stored)),
+    )
+    .await;
+    assert_eq!(group["epoch"], 2, "{group}");
+    assert_eq!(group["keyring"]["epoch"], 2, "{group}");
+    let report = sync_once(&bob).await.unwrap();
+    assert!(report.removed_local >= 1, "{report:?}");
+    assert!(!bob_dir.join("Shared with me/Team/a.txt").exists());
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn encrypted_single_file_share_uses_mls() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let alice_dir = root.path().join("alice");
+    let bob_dir = root.path().join("bob");
+    std::fs::create_dir_all(alice_dir.join("Private")).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
+    setup_keyring(&server.url, "alice", &alice_dir).await;
+    setup_keyring(&server.url, "bob", &bob_dir).await;
+    let alice = config(&server.url, "alice", &alice_dir);
+    let bob = config(&server.url, "bob", &bob_dir);
+    sync_once(&bob).await.unwrap();
+    std::fs::write(alice_dir.join("Private/secret.bin"), b"file secret").unwrap();
+    sync_once(&alice).await.unwrap();
+    let wrapped = share_path_with_permission(
+        &alice,
+        "/",
+        "Private/secret.bin",
+        ShareTarget::User("bob".to_string()),
+        SharePermission::Read,
+    )
+    .await
+    .unwrap();
+    assert_eq!(wrapped, 0, "single-file MLS shares use the keyring");
+    let report = sync_once(&bob).await.unwrap();
+    assert!(report.pulled >= 1, "{report:?}");
+    assert_eq!(
+        std::fs::read(bob_dir.join("Shared with me/secret.bin")).unwrap(),
+        b"file secret"
+    );
     server.handle.abort();
 }

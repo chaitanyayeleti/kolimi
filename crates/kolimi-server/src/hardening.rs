@@ -27,6 +27,10 @@ pub const LINK_LIMIT: u32 = 30;
 pub const LINK_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// Preview requests allowed per window, per client.
 pub const PREVIEW_LIMIT: u32 = 120;
+/// MLS protocol/keyring requests allowed per window, per client.
+pub const MLS_LIMIT: u32 = 600;
+/// Window for [`MLS_LIMIT`].
+pub const MLS_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// Window for [`PREVIEW_LIMIT`].
 pub const PREVIEW_WINDOW: Duration = Duration::from_secs(60);
 /// TOTP enable/disable attempts allowed per window, per client.
@@ -147,6 +151,8 @@ pub async fn limit(State(state): State<AppState>, req: Request, next: Next) -> R
         ("link", LINK_LIMIT, LINK_WINDOW)
     } else if path == "/api/preview" {
         ("preview", PREVIEW_LIMIT, PREVIEW_WINDOW)
+    } else if path.starts_with("/api/mls/") {
+        ("mls", MLS_LIMIT, MLS_WINDOW)
     } else {
         return next.run(req).await;
     };

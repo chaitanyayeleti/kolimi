@@ -113,9 +113,18 @@ struct Cli {
     #[arg(long)]
     write: bool,
 
+    /// Change an existing share to the requested permission (`--write` or
+    /// `--read`) instead of creating it.
+    #[arg(long)]
+    update_permission: bool,
+
     /// Create MLS groups + keyrings for existing encrypted folder shares.
     #[arg(long)]
     mls_migrate: bool,
+
+    /// Print the MLS epoch and members for a path.
+    #[arg(long = "mls-status", value_name = "PATH")]
+    mls_status: Option<String>,
 }
 
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
@@ -214,6 +223,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    if let Some(path) = cli.mls_status.clone() {
+        match kolimi_sync::mls_status(&config, &cli.remote, &path).await? {
+            None => println!("no MLS group for {path}"),
+            Some((epoch, members)) => {
+                println!("{path}: epoch {epoch}");
+                for (name, index) in members {
+                    println!("  {name} (leaf {index})");
+                }
+            }
+        }
+        return Ok(());
+    }
+
     if cli.mls_migrate {
         let migrated = migrate_mls_shares(&config).await?;
         if migrated.is_empty() {
@@ -239,6 +261,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if cli.unshare {
             unshare_path(&config, &cli.remote, &path, target.clone()).await?;
             println!("revoked {path} for {} {}", target.kind(), target.name());
+        } else if cli.update_permission {
+            let permission = if cli.write {
+                SharePermission::Write
+            } else {
+                SharePermission::Read
+            };
+            kolimi_sync::set_share_permission(&config, &cli.remote, &path, &target, permission)
+                .await?;
+            println!(
+                "updated {path} for {} {} to {}",
+                target.kind(),
+                target.name(),
+                permission.as_str()
+            );
         } else {
             let permission = if cli.write {
                 SharePermission::Write

@@ -20,6 +20,9 @@ path = "../crates/kolimi-crypto"
 [dependencies.kolimi-preview]
 path = "../crates/kolimi-preview"
 
+[dependencies.kolimi-mls]
+path = "../crates/kolimi-mls"
+
 [[bin]]
 name = "chunk_roundtrip"
 path = "fuzz_targets/chunk_roundtrip.rs"
@@ -42,3 +45,10 @@ doc = false
 bench = false
 
 [workspace]
+
+[[bin]]
+name = "mls_keyring"
+path = "fuzz_targets/mls_keyring.rs"
+test = false
+doc = false
+bench = false

@@ -4,6 +4,56 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-10-24
+
+### Added
+- **MLS membership lifecycle**: re-sharing an existing group adds new
+  devices at a new epoch, unsharing removes every device of the recipient
+  and re-encrypts the keyring, and `--update-permission` changes read/write
+  access (upgrading a folder to write creates/joins the group).
+- **Key-package pool**: the server keeps multiple unconsumed packages per
+  device; clients publish a small pool, consume the packages actually used
+  in a commit, and hide expired/consumed packages. Duplicate devices are
+  skipped by signature key.
+- **Keyring revisions**: `mls_share_keyrings.revision` and
+  `if_revision` prevent two same-epoch writers from silently overwriting
+  each other's file keys. Clients retry after a 409.
+- **Browser IndexedDB**: web MLS state is now sealed in IndexedDB (with a
+  one-time migration from the previous localStorage slot), so it survives
+  reloads and browser restarts. Device state creation is serialized to
+  avoid two UI effects creating incompatible devices.
+- **Single-file MLS shares**: groups can attach to a file node; a shared
+  encrypted file uses the `"."` keyring entry and no per-file v1 wrap.
+- **Path integrity**: keyring entries are moved/removed on web rename,
+  move, delete and bulk delete; sync removes keys when a remote file is
+  deleted.
+- **Web migration UI**: Settings → Encryption → *Upgrade shares to MLS*.
+- **Desktop share UI**: per-pair Share / Unshare / MLS status / Migrate MLS
+  actions, plus Tauri commands for the same operations.
+- **Conflict handling**: web shared uploads use `if_content_id` so a
+  concurrent edit becomes a conflict instead of an overwrite.
+- **Rate limiting and fuzzing**: `/api/mls/*` is in the per-client rate
+  limiter, and `fuzz/mls_keyring` exercises the keyring parser.
+
+### Changed
+- Web device credentials now use the account username instead of a shared
+  `kolimi-web` identity, enabling user-level membership removal.
+- The desktop sync pair config records the MLS opt-in; the UI commands
+  force MLS for share/migrate/status actions.
+- Sync caches group lookups within a pass and invalidates on keyring
+  writes/membership changes.
+
+### Security / limitations
+- **The external MLS audit is still pending.** `docs/audit/mls-delta.md`
+  remains the review package; the 89 openmls `cargo-vet` exemptions are
+  temporary.
+- Removal rotates the keyring and ACL; a removed member's already-downloaded
+  plaintext cannot be recalled.
+- Device-state loss still requires a remaining member to re-add the new
+  device with a fresh key package.
+- Same-epoch keyring updates are now revision-guarded, but a client that
+  loses its local MLS state cannot recover group membership without re-add.
+
 ## [0.2.0] - 2026-10-24
 
 ### Added

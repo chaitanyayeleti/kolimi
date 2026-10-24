@@ -1064,7 +1064,7 @@ pub async fn share_path_with_permission(
 
     // MLS is authoritative for encrypted folders when enabled: the group
     // keyring replaces per-file wrapping (which cannot cover new files).
-    let use_mls = encrypted && is_dir && e2ee.mls;
+    let use_mls = encrypted && e2ee.mls;
     // Wrap keys inside an async block so any failure rolls the share back.
     let result: Result<u64, SyncError> = async {
         let mut wrapped_count = 0u64;
@@ -1093,14 +1093,16 @@ pub async fn share_path_with_permission(
                     })?)
                     .map_err(|error| SyncError::E2ee(format!("file key: {error}")))?;
             let file_key = e2ee.master.unwrap_file_key(&wrapped)?;
-            if encrypted
-                && is_dir
-                && let Some(relative) = stored_path.strip_prefix(&server_path)
-            {
+            if encrypted && let Some(relative) = stored_path.strip_prefix(&server_path) {
                 let relative = relative.trim_start_matches('/');
-                if !relative.is_empty() {
-                    mls_keys.push((relative.to_string(), *file_key.as_bytes()));
-                }
+                mls_keys.push((
+                    if relative.is_empty() {
+                        ".".to_string()
+                    } else {
+                        relative.to_string()
+                    },
+                    *file_key.as_bytes(),
+                ));
             }
             if !use_mls {
                 for (member, public_key) in &recipients {
@@ -1178,6 +1180,47 @@ pub async fn share_path_with_permission(
     result
 }
 
+/// Reports the MLS epoch and members for an owned/joined path.
+///
+/// `root` is the scoped remote root and `rel_path` the local relative path,
+/// matching [`share_path`].
+pub async fn mls_status(
+    config: &SyncConfig,
+    root: &str,
+    rel_path: &str,
+) -> Result<Option<(u64, Vec<(String, u32)>)>, SyncError> {
+    let http = Http::new(config)?;
+    let Some(e2ee) = unlock_e2ee(&http, config).await? else {
+        return Ok(None);
+    };
+    if !e2ee.mls {
+        return Err(SyncError::E2ee(
+            "enable MLS (E2eeOptions::mls) first".to_string(),
+        ));
+    }
+    let root = remote_prefix(root);
+    let rel_path = rel_path.trim_start_matches('/');
+    let server_paths = server_path_map(&http, &root, Some(&e2ee)).await?;
+    let server_path = server_paths
+        .get(rel_path)
+        .cloned()
+        .unwrap_or_else(|| format!("{root}/{rel_path}"));
+    let mut mls = crate::mls::MlsClient::load(config, &e2ee.master)?;
+    let Some((epoch, members)) = mls.status(&http, &e2ee.master, &server_path).await? else {
+        return Ok(None);
+    };
+    let members = members
+        .into_iter()
+        .map(|member| {
+            (
+                String::from_utf8_lossy(&member.identity).to_string(),
+                member.index,
+            )
+        })
+        .collect();
+    Ok(Some((epoch, members)))
+}
+
 /// Migrates existing encrypted folder shares to MLS groups + keyrings.
 ///
 /// The ACL and permission are left untouched; only the key path changes.
@@ -1249,11 +1292,13 @@ pub async fn migrate_mls_shares(config: &SyncConfig) -> Result<Vec<String>, Sync
         let Ok((200, info)) = http.get_json(&info_path).await else {
             continue;
         };
-        if info["kind"].as_str() != Some("dir") {
-            continue;
-        }
+        let is_dir = info["kind"].as_str() == Some("dir");
         let mut files = Vec::new();
-        collect_server_files(&http, &path, &mut files).await?;
+        if is_dir {
+            collect_server_files(&http, &path, &mut files).await?;
+        } else if info["encrypted"].as_bool() == Some(true) {
+            files.push(path.clone());
+        }
         // Sync-created folders may not carry the server's encrypted flag;
         // at least one encrypted file is proof the tree uses client keys.
         if info["encrypted"].as_bool() != Some(true) && files.is_empty() {
@@ -1280,9 +1325,10 @@ pub async fn migrate_mls_shares(config: &SyncConfig) -> Result<Vec<String>, Sync
             };
             if let Some(relative) = file.strip_prefix(&path) {
                 let relative = relative.trim_start_matches('/');
-                if !relative.is_empty() {
-                    keyring.insert(relative, file_key.as_bytes());
-                }
+                keyring.insert(
+                    if relative.is_empty() { "." } else { relative },
+                    file_key.as_bytes(),
+                );
             }
         }
         mls.publish_keyring(&http, &e2ee.master, &path, &keyring)
@@ -1324,6 +1370,66 @@ async fn rollback_share(http: &Http, share_id: Option<i64>) {
     if let Some(id) = share_id {
         let _ = http.delete(&format!("/api/shares/{id}")).await;
     }
+}
+
+/// Changes an existing share's permission. Upgrading an encrypted folder
+/// to write also creates/joins the MLS group and keyring.
+pub async fn set_share_permission(
+    config: &SyncConfig,
+    root: &str,
+    rel_path: &str,
+    target: &ShareTarget,
+    permission: SharePermission,
+) -> Result<(), SyncError> {
+    let http = Http::new(config)?;
+    let root = remote_prefix(root);
+    let rel_path = rel_path.trim_start_matches('/');
+    let e2ee = unlock_e2ee(&http, config).await?;
+    let server_paths = server_path_map(&http, &root, e2ee.as_ref()).await?;
+    let server_path = server_paths
+        .get(rel_path)
+        .cloned()
+        .unwrap_or_else(|| format!("{root}/{rel_path}"));
+    let list_path = format!("/api/shares?path={}", encode(&server_path));
+    let (status, body) = http.get_json(&list_path).await?;
+    if status != 200 {
+        return Err(SyncError::Server {
+            status,
+            path: list_path,
+        });
+    }
+    let share_id = body["shares"]
+        .as_array()
+        .and_then(|shares| {
+            shares.iter().find(|share| {
+                share["kind"] == target.kind() && share["recipient"].as_str() == Some(target.name())
+            })
+        })
+        .and_then(|share| share["id"].as_i64())
+        .ok_or_else(|| {
+            SyncError::E2ee(format!(
+                "no share of {server_path} with {} {}",
+                target.kind(),
+                target.name()
+            ))
+        })?;
+    let path = format!("/api/shares/{share_id}");
+    let response = http
+        .auth(http.client.patch(http.url(&path)))
+        .json(&serde_json::json!({ "permission": permission.as_str() }))
+        .send()
+        .await?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(SyncError::Server { status, path });
+    }
+    if permission == SharePermission::Write && e2ee.as_ref().is_some_and(|e2ee| e2ee.mls) {
+        // Reuse the share flow for the group/keyring side effects. The POST
+        // returns 409 for the existing share; that is fine.
+        let _ =
+            share_path_with_permission(config, &root, rel_path, target.clone(), permission).await?;
+    }
+    Ok(())
 }
 
 /// Revokes a user share of `rel_path` (the server also drops the
@@ -1384,10 +1490,82 @@ pub async fn unshare_path(
             target.name()
         )));
     };
+    // Who was covered by the share being revoked (expand groups before the
+    // share row disappears).
+    let candidates: Vec<String> = match &target {
+        ShareTarget::User(name) => vec![name.clone()],
+        ShareTarget::Group(name) => {
+            let response = http
+                .get_json(&format!("/api/groups/{}/members", encode(name)))
+                .await?;
+            if response.0 == 200 {
+                response.1["members"]
+                    .as_array()
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|name| name.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        }
+    };
     let path = format!("/api/shares/{share_id}");
     let status = http.delete(&path).await?;
     if status != 204 {
         return Err(SyncError::Server { status, path });
+    }
+    // Rotate the MLS group when nobody else still has this node shared.
+    if let Some(e2ee) = e2ee.filter(|e2ee| e2ee.mls) {
+        let mut remaining: BTreeSet<String> = BTreeSet::new();
+        if let Ok((200, body)) = http.get_json(&list_path).await {
+            for share in body["shares"].as_array().cloned().unwrap_or_default() {
+                match share["kind"].as_str() {
+                    Some("user") => {
+                        if let Some(name) = share["recipient"].as_str() {
+                            remaining.insert(name.to_string());
+                        }
+                    }
+                    Some("group") => {
+                        if let Some(name) = share["recipient"].as_str()
+                            && let Ok((200, body)) = http
+                                .get_json(&format!("/api/groups/{}/members", encode(name)))
+                                .await
+                        {
+                            for member in body["members"].as_array().cloned().unwrap_or_default() {
+                                if let Some(member) = member.as_str() {
+                                    remaining.insert(member.to_string());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let remove: Vec<String> = candidates
+            .into_iter()
+            .filter(|name| name != &config.username && !remaining.contains(name))
+            .collect();
+        if !remove.is_empty() {
+            match crate::mls::MlsClient::load(config, &e2ee.master) {
+                Ok(mut mls) => {
+                    if let Err(error) = mls
+                        .remove_recipients(&http, &e2ee.master, &server_path, &remove)
+                        .await
+                    {
+                        // The ACL is already revoked; a failed rotation is
+                        // logged rather than resurrecting the share.
+                        eprintln!("kolimi-sync: MLS removal failed for {server_path}: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("kolimi-sync: could not load MLS state: {error}");
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -3203,6 +3381,9 @@ async fn push(
         let status = http.delete(&path).await?;
         if status != 204 && status != 404 {
             return Err(SyncError::Server { status, path });
+        }
+        if let (Some(mls), Some(e2ee)) = (mls.as_deref_mut(), e2ee) {
+            mls.remove_file_key(http, &e2ee.master, &target).await?;
         }
         state.files.remove(&rel);
         state.keys.remove(&rel);

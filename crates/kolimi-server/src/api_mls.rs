@@ -43,6 +43,9 @@ pub struct PageQuery {
 pub struct KeyringQuery {
     path: String,
     if_epoch: i64,
+    /// Optimistic revision from the last GET; `0` means "no keyring yet".
+    #[serde(default)]
+    if_revision: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +61,11 @@ pub struct KeyPackageRequest {
 pub struct InitGroupRequest {
     /// Base64-encoded random MLS group id.
     group_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct ConsumeKeyPackagesRequest {
+    ids: Vec<i64>,
 }
 
 #[derive(Deserialize)]
@@ -123,6 +131,7 @@ pub async fn get_key_packages(
                 .into_iter()
                 .map(|package| {
                     json!({
+                        "id": package.id,
                         "device_id": package.device_id,
                         "payload": STANDARD.encode(&package.payload),
                         "created_at": package.created_at,
@@ -132,6 +141,49 @@ pub async fn get_key_packages(
                 .collect();
             Json(json!({ "user": target.username, "packages": packages })).into_response()
         }
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `GET /api/mls/key-packages` — this caller's own packages (pool status).
+pub async fn get_own_key_packages(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    match state.db.mls_key_packages(user.user_id).await {
+        Ok(packages) => {
+            let packages: Vec<_> = packages
+                .into_iter()
+                .map(|package| {
+                    json!({
+                        "id": package.id,
+                        "device_id": package.device_id,
+                        "payload": STANDARD.encode(&package.payload),
+                        "created_at": package.created_at,
+                        "expires_at": package.expires_at,
+                    })
+                })
+                .collect();
+            Json(json!({ "packages": packages })).into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `POST /api/mls/key-packages/consume` — mark packages as used.
+///
+/// Key packages are single-use in MLS. The adding client consumes the
+/// packages it actually put into a commit so no other group reuses them.
+pub async fn consume_key_packages(
+    State(state): State<AppState>,
+    Extension(_user): Extension<CurrentUser>,
+    Json(req): Json<ConsumeKeyPackagesRequest>,
+) -> Response {
+    if req.ids.is_empty() || req.ids.len() > 64 {
+        return api::bad_request("ids must contain 1–64 entries");
+    }
+    match state.db.consume_mls_key_packages(&req.ids).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => api::internal_error(),
     }
 }
@@ -150,9 +202,7 @@ pub async fn init_group(
     if access.owner_id != user.user_id || access.is_mount_root {
         return api::forbidden("only the owner can initialize the group");
     }
-    if !access.node.is_dir() {
-        return api::bad_request("MLS groups are attached to folders");
-    }
+    // Groups are node-scoped. A file node is valid for a single-file share.
     let Ok(group_id) = STANDARD.decode(req.group_id.as_bytes()) else {
         return api::bad_request("group_id must be base64");
     };
@@ -233,6 +283,7 @@ pub async fn get_group(
             "payload": STANDARD.encode(&keyring.payload),
             "updated_by": keyring.updated_by,
             "updated_at": keyring.updated_at,
+            "revision": keyring.revision,
         })),
     }))
     .into_response()
@@ -303,6 +354,7 @@ pub async fn put_keyring(
             &payload,
             user.user_id,
             query.if_epoch,
+            query.if_revision,
         )
         .await
     {

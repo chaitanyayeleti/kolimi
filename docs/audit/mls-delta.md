@@ -1,6 +1,6 @@
 # MLS (RFC 9420) audit delta — package
 
-Status: prepared for review · Applies to: `crates/kolimi-mls`, `/api/mls`,
+Status: prepared for review (0.3.0) · Applies to: `crates/kolimi-mls`, `/api/mls`,
 sync/desktop client wiring and the web client. **External review has not
 been performed.**
 
@@ -24,6 +24,11 @@ Nothing here is a substitute for the review itself.
   group share/join, shared read/write).
 - Server mount-aware write paths for write shares: `commit_manifest`,
   chunk upload/existence, node keys, mkdir, move and delete.
+- Membership lifecycle: re-share adds devices, unshare/revoke removes all
+  of a user's leaves, rotates the keyring epoch, and permission updates.
+- Key-package pool + consume endpoints; keyring `revision`/`if_revision`.
+- Browser IndexedDB state, single-file node groups, keyring path updates on
+  rename/delete, MLS request rate limiting and a keyring parser fuzz target.
 
 ## Server invariants
 
@@ -97,7 +102,7 @@ Nothing here is a substitute for the review itself.
    device id string, not an attested device key. The device-enrollment
    identity should sign or authorize the package.
 5. Client state persistence: desktop/sync uses a UMK-sealed 0600 file and
-   the web client uses UMK-sealed `localStorage`. Both need a rollback /
+   the web client uses UMK-sealed IndexedDB. Both still need a rollback /
    device-cloning story (a stale state file is detected only by the epoch
    check, not by a monotonic counter).
 6. Concurrent commits: server orders by sequence, but clients must
@@ -112,12 +117,15 @@ Nothing here is a substitute for the review itself.
 - [ ] Rate-limit `/api/mls/*` and cap per-group messages
 - [ ] Janitor pruning for expired key packages and old messages
 - [x] Desktop/sync group-state wiring + tests
-- [x] Web group-state wiring + tests (sealed browser state, locked state)
+- [x] Web group-state wiring + tests (IndexedDB, locked state, reload persistence)
 - [x] Write-share enablement behind a feature flag, with a migration path
 - [x] Browser E2E: owner share → recipient read → recipient write → owner read
+- [x] Membership add/remove, keyring rotation, permission updates
+- [x] Consumable key-package pool and same-epoch keyring revisions
+- [x] Single-file MLS shares, keyring path updates, web conflict guards
 - [ ] External review signed off; only then treat MLS as audited
-- [ ] Membership removal/rotation UX and state-loss recovery
-- [ ] Cross-device key-package pool (one package per device today)
+- [ ] State-loss recovery UX beyond re-adding a new device
+- [ ] Janitor pruning for consumed/expired key packages and stale messages
 
 ## Known limitations
 

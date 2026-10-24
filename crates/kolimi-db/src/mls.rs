@@ -11,6 +11,7 @@ use crate::{Db, DbError, now_millis};
 /// A published device key package.
 #[derive(Debug, Clone, FromRow)]
 pub struct MlsKeyPackage {
+    pub id: i64,
     pub user_id: i64,
     pub device_id: String,
     pub payload: Vec<u8>,
@@ -45,6 +46,7 @@ pub struct MlsKeyring {
     pub payload: Vec<u8>,
     pub updated_by: i64,
     pub updated_at: i64,
+    pub revision: i64,
 }
 
 impl Db {
@@ -58,11 +60,7 @@ impl Db {
     ) -> Result<(), DbError> {
         sqlx::query(
             "INSERT INTO mls_key_packages (user_id, device_id, payload, created_at, expires_at)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(user_id, device_id) DO UPDATE SET
-                 payload = excluded.payload,
-                 created_at = excluded.created_at,
-                 expires_at = excluded.expires_at",
+             VALUES (?, ?, ?, ?, ?)",
         )
         .bind(user_id)
         .bind(device_id)
@@ -74,15 +72,37 @@ impl Db {
         Ok(())
     }
 
-    /// Lists one user's published key packages (public material).
+    /// Lists one user's unconsumed, unexpired key packages (public material).
     pub async fn mls_key_packages(&self, user_id: i64) -> Result<Vec<MlsKeyPackage>, DbError> {
         Ok(sqlx::query_as::<_, MlsKeyPackage>(
-            "SELECT user_id, device_id, payload, created_at, expires_at
-             FROM mls_key_packages WHERE user_id = ? ORDER BY device_id",
+            "SELECT id, user_id, device_id, payload, created_at, expires_at
+             FROM mls_key_packages
+             WHERE user_id = ? AND consumed_at IS NULL
+               AND (expires_at IS NULL OR expires_at > ?)
+             ORDER BY id",
         )
         .bind(user_id)
+        .bind(now_millis())
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// Marks key packages as used so they are never added to another group.
+    pub async fn consume_mls_key_packages(&self, ids: &[i64]) -> Result<u64, DbError> {
+        let mut consumed = 0u64;
+        let now = now_millis();
+        for id in ids {
+            let result = sqlx::query(
+                "UPDATE mls_key_packages SET consumed_at = ?
+                 WHERE id = ? AND consumed_at IS NULL",
+            )
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+            consumed += result.rows_affected();
+        }
+        Ok(consumed)
     }
 
     /// Creates the MLS group for a node, or returns the existing one.
@@ -227,6 +247,7 @@ impl Db {
         payload: &[u8],
         updated_by: i64,
         if_epoch: i64,
+        if_revision: Option<i64>,
     ) -> Result<bool, DbError> {
         let Some(group) = self.mls_group(node_id).await? else {
             return Err(DbError::NotFound("mls group".to_string()));
@@ -234,22 +255,64 @@ impl Db {
         if group.epoch != if_epoch || epoch != if_epoch {
             return Ok(false);
         }
-        sqlx::query(
-            "INSERT INTO mls_share_keyrings (node_id, epoch, payload, updated_by, updated_at)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(node_id, epoch) DO UPDATE SET
-                 payload = excluded.payload,
-                 updated_by = excluded.updated_by,
-                 updated_at = excluded.updated_at",
-        )
-        .bind(node_id)
-        .bind(epoch)
-        .bind(payload)
-        .bind(updated_by)
-        .bind(now_millis())
-        .execute(&self.pool)
-        .await?;
-        Ok(true)
+        let now = now_millis();
+        match if_revision {
+            Some(0) => {
+                // The caller saw no keyring. Insert revision 1 atomically;
+                // a concurrent creator makes this a conflict.
+                let result = sqlx::query(
+                    "INSERT INTO mls_share_keyrings
+                         (node_id, epoch, payload, updated_by, updated_at, revision)
+                     VALUES (?, ?, ?, ?, ?, 1)
+                     ON CONFLICT(node_id, epoch) DO NOTHING",
+                )
+                .bind(node_id)
+                .bind(epoch)
+                .bind(payload)
+                .bind(updated_by)
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            Some(revision) => {
+                let result = sqlx::query(
+                    "UPDATE mls_share_keyrings
+                     SET payload = ?, updated_by = ?, updated_at = ?, revision = revision + 1
+                     WHERE node_id = ? AND epoch = ? AND revision = ?",
+                )
+                .bind(payload)
+                .bind(updated_by)
+                .bind(now)
+                .bind(node_id)
+                .bind(epoch)
+                .bind(revision)
+                .execute(&self.pool)
+                .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            None => {
+                // Legacy unconditional write (still bumps the revision).
+                let result = sqlx::query(
+                    "INSERT INTO mls_share_keyrings
+                         (node_id, epoch, payload, updated_by, updated_at, revision)
+                     VALUES (?, ?, ?, ?, ?, 1)
+                     ON CONFLICT(node_id, epoch) DO UPDATE SET
+                         payload = excluded.payload,
+                         updated_by = excluded.updated_by,
+                         updated_at = excluded.updated_at,
+                         revision = mls_share_keyrings.revision + 1",
+                )
+                .bind(node_id)
+                .bind(epoch)
+                .bind(payload)
+                .bind(updated_by)
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+                Ok(result.rows_affected() == 1)
+            }
+        }
     }
 
     /// The **current epoch's** encrypted share keyring.
@@ -259,7 +322,7 @@ impl Db {
     /// accidentally use a stale key set.
     pub async fn mls_keyring(&self, node_id: i64) -> Result<Option<MlsKeyring>, DbError> {
         Ok(sqlx::query_as::<_, MlsKeyring>(
-            "SELECT k.epoch, k.payload, k.updated_by, k.updated_at
+            "SELECT k.epoch, k.payload, k.updated_by, k.updated_at, k.revision
              FROM mls_share_keyrings k
              JOIN mls_node_groups g ON g.node_id = k.node_id
              WHERE k.node_id = ? AND k.epoch = g.epoch",

@@ -1492,6 +1492,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                     {
                         undo.set(Some((entry_name.clone(), id)));
                     }
+                    if let Some(master) = e2ee_master.get_untracked() {
+                        let _ = crate::mls::remove_path_prefix(&master, &entry_path).await;
+                    }
                     load(current);
                     refresh_usage();
                 }
@@ -1528,7 +1531,12 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                         let url = format!("/dav{}", encode_path(&source));
                         let dest_dav = format!("/dav{}", encode_path(&destination));
                         match api::dav("MOVE", &url, None, &[("destination", &dest_dav)]).await {
-                            Ok(r) if matches!(r.status, 201 | 204) => load(current),
+                            Ok(r) if matches!(r.status, 201 | 204) => {
+                                let _ =
+                                    crate::mls::rename_path_prefix(&master, &source, &destination)
+                                        .await;
+                                load(current);
+                            }
                             Ok(r) => error.set(format!("Rename failed (HTTP {})", r.status)),
                             Err(e) => error.set(e),
                         }
@@ -1559,7 +1567,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 // Metadata-only server move: works on ciphertext.
                 let destination = format!("{}/{}", current.trim_end_matches('/'), encoded);
                 match crate::e2ee::move_file(&source, &destination).await {
-                    Ok(()) => load(current),
+                    Ok(()) => {
+                        let _ =
+                            crate::mls::rename_path_prefix(&master, &source, &destination).await;
+                        load(current);
+                    }
                     Err(e) => error.set(e),
                 }
                 return;
@@ -1629,8 +1641,15 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                 return;
             }
             if encrypted {
+                let Some(master) = e2ee_master.get_untracked() else {
+                    error.set("Vault is locked — unlock encryption first.".to_string());
+                    e2ee_open.set(true);
+                    return;
+                };
                 match crate::e2ee::move_file(&source, &destination).await {
                     Ok(()) => {
+                        let _ =
+                            crate::mls::rename_path_prefix(&master, &source, &destination).await;
                         notice.set(format!("Moved {name}"));
                         load(path.get_untracked());
                     }
@@ -1681,7 +1700,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
             for target in &paths {
                 let url = format!("/dav{}", encode_path(target));
                 match api::dav("DELETE", &url, None, &[]).await {
-                    Ok(r) if (200..300).contains(&r.status) => {}
+                    Ok(r) if (200..300).contains(&r.status) => {
+                        if let Some(master) = e2ee_master.get_untracked() {
+                            let _ = crate::mls::remove_path_prefix(&master, target).await;
+                        }
+                    }
                     Ok(r) => {
                         failed += 1;
                         error.set(format!("Delete failed (HTTP {})", r.status));
@@ -3784,6 +3807,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let error = RwSignal::new(String::new());
     let notice = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
+    let migrating = RwSignal::new(false);
     let enrollments = RwSignal::new(Vec::<Value>::new());
     let devices = RwSignal::new(Vec::<Value>::new());
     let device_name = RwSignal::new(String::new());
@@ -3857,6 +3881,25 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let new_pass = RwSignal::new(String::new());
     let new_confirm = RwSignal::new(String::new());
     let recovery = RwSignal::new(Option::<String>::None);
+    let migrate_mls = move |_| {
+        let Some(master) = master.get_untracked() else {
+            error.set("Unlock encryption first.".to_string());
+            return;
+        };
+        migrating.set(true);
+        spawn_local(async move {
+            match crate::mls::migrate_shares(&master).await {
+                Ok(paths) if paths.is_empty() => {
+                    notice.set("No encrypted folder shares needed migration.".to_string())
+                }
+                Ok(paths) => {
+                    notice.set(format!("Upgraded {} folder share(s) to MLS.", paths.len()))
+                }
+                Err(e) => error.set(e),
+            }
+            migrating.set(false);
+        });
+    };
     let close = move |_| on_close.run(());
 
     let load_devices = Callback::new(move |_: ()| {
@@ -4254,6 +4297,16 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                     <div class="row-actions">
                         <button disabled=move || busy.get() on:click=migrate_names>
                             "Encrypt existing names"
+                        </button>
+                    </div>
+
+                    <h3>"MLS shares"</h3>
+                    <p class="muted">
+                        "Upgrade existing encrypted folder shares to MLS groups and epoch keyrings. Recipients must have unlocked the web app once so they have a key package."
+                    </p>
+                    <div class="row-actions">
+                        <button disabled=move || migrating.get() on:click=migrate_mls>
+                            "Upgrade shares to MLS"
                         </button>
                     </div>
 
@@ -5028,12 +5081,8 @@ fn ShareDialog(
                                         .map(|u| vec![u.to_string()])
                                         .unwrap_or_default()
                                 };
-                                let is_dir = crate::e2ee::file_info(&path)
-                                    .await
-                                    .map(|info| info["kind"].as_str() == Some("dir"))
-                                    .unwrap_or(false);
                                 let permission_now = permission.get_untracked();
-                                if is_dir {
+                                {
                                     match crate::mls::share_folder(
                                         master,
                                         &path,
@@ -5083,21 +5132,6 @@ fn ShareDialog(
                                             }
                                         }
                                     }
-                                } else {
-                                    let mut skipped = Vec::new();
-                                    for username in &recipients {
-                                        if crate::e2ee::share_encrypted_with(
-                                            master, &path, username,
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            skipped.push(username.clone());
-                                        }
-                                    }
-                                    if !skipped.is_empty() {
-                                        error.set(format!("Shared, but {} recipient(s) have not set up encryption yet ({}). They can read only plaintext files.", skipped.len(), skipped.join(", ")));
-                                    }
                                 }
                             } else {
                                 error.set("Shared, but the file key was not wrapped (encryption is locked). Unlock encryption, then revoke and re-share to grant file access.".to_string());
@@ -5112,15 +5146,54 @@ fn ShareDialog(
         }
     };
 
-    let revoke = move |id: i64| {
+    let revoke = Callback::new(move |(id, kind, recipient): (i64, String, String)| {
+        let path = path.clone();
+        let master = master.clone();
         spawn_local(async move {
+            let mut members = if kind == "group" {
+                crate::e2ee::group_members(&recipient)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                vec![recipient.clone()]
+            };
+            // A user may still have access through another share of the
+            // same node; only remove members that are not covered.
+            let mut keep = std::collections::BTreeSet::new();
+            for share in shares.get_untracked() {
+                if share["id"].as_i64() == Some(id) {
+                    continue;
+                }
+                match share["kind"].as_str() {
+                    Some("user") => {
+                        if let Some(name) = share["recipient"].as_str() {
+                            keep.insert(name.to_string());
+                        }
+                    }
+                    Some("group") => {
+                        if let Some(name) = share["recipient"].as_str() {
+                            for member in crate::e2ee::group_members(name).await.unwrap_or_default()
+                            {
+                                keep.insert(member);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            members.retain(|member| !keep.contains(member));
             match api::delete(&format!("/api/shares/{id}")).await {
-                Ok(r) if r.status == 204 => load.run(()),
+                Ok(r) if r.status == 204 => {
+                    if let Some(master) = &master {
+                        let _ = crate::mls::remove_recipients(master, &path, &members).await;
+                    }
+                    load.run(());
+                }
                 Ok(r) => error.set(r.error().unwrap_or("Could not revoke share").to_string()),
                 Err(e) => error.set(e),
             }
         });
-    };
+    });
 
     let close = move |_| on_close.run(());
 
@@ -5180,7 +5253,7 @@ fn ShareDialog(
                                                     </button>
                                                 }
                                             })}
-                                        <button class="danger" on:click=move |_| revoke(id)>
+                                        <button class="danger" on:click=move |_| revoke.run((id, kind.clone(), recipient.clone()))>
                                             <Icon name="trash"/>
                                             "Revoke"
                                         </button>

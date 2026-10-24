@@ -246,7 +246,14 @@ pub fn build_app(state: AppState) -> Router {
             "/api/e2ee/share-name",
             get(api_e2ee::get_share_name).put(api_e2ee::put_share_name),
         )
-        .route("/api/mls/key-packages", put(api_mls::put_key_package))
+        .route(
+            "/api/mls/key-packages",
+            put(api_mls::put_key_package).get(api_mls::get_own_key_packages),
+        )
+        .route(
+            "/api/mls/key-packages/consume",
+            post(api_mls::consume_key_packages),
+        )
         .route(
             "/api/mls/key-packages/{username}",
             get(api_mls::get_key_packages),

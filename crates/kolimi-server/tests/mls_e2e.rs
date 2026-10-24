@@ -242,11 +242,33 @@ async fn mls_group_share_roundtrip_and_writer_keyring() {
         "PUT",
         "/api/mls/keyring?path=%2FTeam&if_epoch=1",
         "alice",
-        Some(blob),
+        Some(blob.clone()),
         Some("application/octet-stream"),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Same-epoch revisions prevent lost updates between writers.
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/mls/keyring?path=%2FTeam&if_epoch=1&if_revision=1",
+        "alice",
+        Some(blob.clone()),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/mls/keyring?path=%2FTeam&if_epoch=1&if_revision=1",
+        "alice",
+        Some(blob.clone()),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
 
     // Bob (a writer) reads it and adds his own file key in a new keyring.
     let (status, group) = send(

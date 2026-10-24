@@ -151,6 +151,58 @@
       children.push(
         el("div", { class: "row" },
           el("button", { class: "ghost", onclick: edit }, "Edit"),
+          el("button", { class: "ghost", onclick: async () => {
+            const path = prompt("Relative path to share (e.g. Private/Team)");
+            if (!path) return;
+            const target = prompt("Recipient username, or group:<name>");
+            if (!target) return;
+            const write = confirm("Allow the recipient to write (MLS write share)?");
+            const group = target.startsWith("group:");
+            try {
+              const wrapped = await invoke("share_mls", {
+                server: account.server, username: account.username, dir: pair.local_dir,
+                path, kind: group ? "group" : "user",
+                recipient: group ? target.slice(6) : target, write
+              });
+              setMsg("Shared " + path + " (" + wrapped + " legacy wraps)", "ok");
+              refresh();
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "Share"),
+          el("button", { class: "ghost", onclick: async () => {
+            const path = prompt("Relative path to unshare");
+            if (!path) return;
+            const target = prompt("Recipient username, or group:<name>");
+            if (!target) return;
+            const group = target.startsWith("group:");
+            try {
+              await invoke("unshare_mls", {
+                server: account.server, username: account.username, dir: pair.local_dir,
+                path, kind: group ? "group" : "user",
+                recipient: group ? target.slice(6) : target
+              });
+              setMsg("Revoked " + path + " for " + target, "ok");
+              refresh();
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "Unshare"),
+          el("button", { class: "ghost", onclick: async () => {
+            const path = prompt("Relative path to inspect");
+            if (!path) return;
+            try {
+              const status = await invoke("mls_status", {
+                server: account.server, username: account.username, dir: pair.local_dir, path
+              });
+              setMsg(status ? "MLS epoch " + status.epoch + ": " + status.members.join(", ") : "No MLS group", "ok");
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "MLS status"),
+          el("button", { class: "ghost", onclick: async () => {
+            try {
+              const paths = await invoke("migrate_mls", {
+                server: account.server, username: account.username, dir: pair.local_dir
+              });
+              setMsg(paths.length ? "Migrated " + paths.length + " share(s) to MLS" : "Nothing to migrate", "ok");
+              refresh();
+            } catch (e) { setMsg(String(e), "err"); }
+          } }, "Migrate MLS"),
           el("button", { class: "danger", onclick: async () => {
             try {
               await invoke("remove_pair", { server: account.server, username: account.username, dir: pair.local_dir });

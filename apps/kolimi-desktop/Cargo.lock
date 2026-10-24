@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-chunk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -2919,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-crypto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "keyring",
  "kolimi-sync",
@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-mls"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
@@ -2972,7 +2972,7 @@ dependencies = [
 
 [[package]]
 name = "kolimi-sync"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "clap",
