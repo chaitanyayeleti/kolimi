@@ -3,11 +3,16 @@
 Status: design + spike (not wired) · Depends on: RFC 0007 (E2EE), RFC 0008
 (device enrollment), RFC 0010 (DAV boundary) · Requires: external audit delta
 
-> **Spike (0.1.40):** `spikes/mls` (package `kolimi-mls`, openmls 0.9)
-> validates device credentials/key packages, Welcome-based adds, application
-> messages, the `kolimi-share-keyring-v1` epoch exporter and epoch rotation.
-> Host tests pass and the crate checks for wasm32. It lives outside the
-> workspace so the audited build does not pull openmls yet.
+> **Spike + server slice (0.1.40–0.1.42):** `spikes/mls` (package
+> `kolimi-mls`, openmls 0.9) validates device credentials/key packages,
+> Welcome-based adds, application messages, the
+> `kolimi-share-keyring-v1` epoch exporter, epoch rotation, and the
+> epoch-bound encrypted share-keyring format. Host tests pass and the crate
+> checks for wasm32. The server now stores node-scoped MLS group state:
+> key packages, ordered messages with exact epoch advancement, and one
+> encrypted share keyring per epoch (`/api/mls/*`). It lives outside the
+> workspace so the audited build does not pull openmls yet; see
+> [`docs/audit/mls-delta.md`](../audit/mls-delta.md).
 
 ## Why
 

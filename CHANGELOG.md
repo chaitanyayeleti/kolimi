@@ -6,6 +6,27 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.42] - 2026-10-24
+
+### Added
+- **MLS group-state API** (`/api/mls/*`): device key packages, node-scoped
+  groups, ordered proposals/commits/welcomes, and one encrypted share
+  keyring per epoch. The server validates VFS ACLs, exact epoch advancement
+  and optimistic keyring concurrency, but never parses MLS plaintext.
+- **Share-keyring format** in `spikes/mls`: file keys serialized as a map,
+  encrypted with XChaCha20-Poly1305 under an HKDF of the MLS epoch
+  exporter, bound to the group id and epoch. New-epoch re-encryption and
+  tamper/rollback rejection are tested.
+- **MLS audit delta package** (`docs/audit/mls-delta.md`) with invariants,
+  test evidence, open review questions and a promotion checklist.
+
+### Changed
+- The MLS spike and server API are groundwork: encrypted shares remain
+  **read-only** until the desktop/web group-state clients are wired and
+  the review checklist is complete. No client behavior changed in this
+  release.
+
+## [0.1.41] - 2026-10-24
 ## [0.1.41] - 2026-10-24
 
 ### Changed

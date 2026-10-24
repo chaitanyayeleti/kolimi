@@ -112,7 +112,7 @@ is silently skipped.
 
 | Item | Why it matters | Plan |
 | --- | --- | --- |
-| **MLS groups (RFC 9420)** | Group E2EE today is per-member X25519 wrapping: no forward secrecy or post-compromise security across membership changes | **Spike landed (0.1.40)** in `spikes/mls` (`kolimi-mls`, openmls 0.9): key packages, Welcome add, application messages, epoch exporter and rotation; host tests + wasm32 check pass. Next: group-state/message API, share keyring, desktop then web, external audit. Not wired into the shipped server yet |
+| **MLS groups (RFC 9420)** | Group E2EE today is per-member X25519 wrapping: no forward secrecy or post-compromise security across membership changes | **Spike + server slice landed (0.1.40–0.1.42)**: `spikes/mls` (openmls 0.9) covers key packages, Welcome adds, exporter/epoch rotation and the epoch-bound share keyring; `/api/mls/*` stores node-scoped group state, ordered messages, exact epoch advancement and epoch-guarded keyrings. Next: desktop group state, web group state, then the external audit delta (`docs/audit/mls-delta.md`). Write shares stay off until this completes |
 | **External crypto audit** | The v1+v2 crypto is internally reviewed only | Audit package ready (`docs/audit/`); freeze the surface, engage a reviewer; MLS changes land as a reviewed delta |
 | **Account recovery** | ✅ **Landed**: `kolimi-server user recover <user>` sets a new password, drops live sessions, clears TOTP by default, and can remove all passkeys; audited as `user.recover` (see [docs/operations.md](docs/operations.md)) | — |
 | **Web-UI E2EE** | ✅ **Landed**: unlock the keyring in the browser and decrypt files with wasm `kolimi-crypto` (sidebar → Encryption → Decrypt) | — |

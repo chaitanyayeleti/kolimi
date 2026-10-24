@@ -8,6 +8,7 @@ pub mod api;
 pub mod api_2fa;
 pub mod api_browse;
 pub mod api_e2ee;
+pub mod api_mls;
 pub mod api_passkey;
 pub mod api_shares;
 pub mod api_sync;
@@ -23,7 +24,7 @@ use std::{path::Path, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Router,
-    routing::{any, delete, get, patch, post},
+    routing::{any, delete, get, patch, post, put},
 };
 use kolimi_auth::{cache::CredentialCache, lockout::FailedAuthTracker, passkey::Passkeys};
 use kolimi_db::Db;
@@ -245,6 +246,17 @@ pub fn build_app(state: AppState) -> Router {
             "/api/e2ee/share-name",
             get(api_e2ee::get_share_name).put(api_e2ee::put_share_name),
         )
+        .route("/api/mls/key-packages", put(api_mls::put_key_package))
+        .route(
+            "/api/mls/key-packages/{username}",
+            get(api_mls::get_key_packages),
+        )
+        .route(
+            "/api/mls/group",
+            get(api_mls::get_group).put(api_mls::init_group),
+        )
+        .route("/api/mls/messages", post(api_mls::post_message))
+        .route("/api/mls/keyring", put(api_mls::put_keyring))
         .route(
             "/api/e2ee/enrollments",
             get(api_e2ee::list_enrollments).post(api_e2ee::create_enrollment),
