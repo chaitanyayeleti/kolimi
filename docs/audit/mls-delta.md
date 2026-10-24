@@ -1,7 +1,7 @@
 # MLS (RFC 9420) audit delta — package
 
-Status: prepared for review · Applies to: `spikes/mls` + `/api/mls` (not yet
-used by shipped clients)
+Status: prepared for review · Applies to: `crates/kolimi-mls` + `/api/mls`
+(not yet used by shipped sync clients)
 
 This is the delta an external reviewer needs for the group-E2EE milestone.
 Nothing here is a substitute for the review itself.
@@ -9,7 +9,9 @@ Nothing here is a substitute for the review itself.
 ## Scope
 
 - `openmls` 0.9.2 with `openmls_rust_crypto` 0.6 and
-  `openmls_basic_credential` 0.6 (MIT).
+  `openmls_basic_credential` 0.6 (MIT). The crate is now a workspace member;
+  `cargo-vet` has **89 new exemptions** for this tree (724 total, none are
+  audits). They are temporary until the review replaces them.
 - Key packages, group creation/add/remove, application messages, epoch
   exporter, share-keyring encryption.
 - Server storage and epoch validation in `crates/kolimi-db/src/mls.rs`
@@ -47,8 +49,11 @@ Nothing here is a substitute for the review itself.
 
 ## Test evidence
 
-- `spikes/mls`: host tests for group create/add/message/exporter/epoch
+- `crates/kolimi-mls`: host tests for group create/add/message/exporter/epoch
   rotation and share-keyring roundtrip, epoch binding, tamper rejection.
+- `crates/kolimi-server/tests/mls_e2e.rs`: the full protocol over HTTP —
+  key packages, init, commit/welcome, Bob joining, matching exporter, and a
+  write recipient updating the keyring that the owner then decrypts.
 - `cargo check --target wasm32-unknown-unknown` for the spike.
 - `crates/kolimi-server/tests/mls.rs`: owner-only init, read-vs-write
   ACLs, epoch rules, keyring conflict, key packages, non-member denial.

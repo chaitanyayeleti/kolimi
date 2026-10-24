@@ -199,9 +199,12 @@ pub async fn get_group(
         Ok(None) => return api::not_found(),
         Err(_) => return api::internal_error(),
     };
+    // `limit` defaults to 0 from query decoding; return a useful page
+    // rather than clamping it to a single message.
+    let limit = if query.limit <= 0 { 100 } else { query.limit };
     let messages = match state
         .db
-        .mls_messages(access.node.id, query.after.max(0), query.limit)
+        .mls_messages(access.node.id, query.after.max(0), limit)
         .await
     {
         Ok(messages) => messages,

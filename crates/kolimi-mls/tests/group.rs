@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 //! Two-device MLS roundtrip: create, add via Welcome, application message,
 //! and the epoch exporter that will key the share keyring.
 
@@ -83,7 +85,12 @@ fn add_member_exchange_message_and_export_share_key() {
     // The exporter is epoch-bound and identical on both members. The
     // milestone will AES-GCM the share keyring with this secret.
     let alice_export = alice_group
-        .export_secret(alice_provider.crypto(), SHARE_KEYRING_EXPORTER, b"kolimi", 32)
+        .export_secret(
+            alice_provider.crypto(),
+            SHARE_KEYRING_EXPORTER,
+            b"kolimi",
+            32,
+        )
         .unwrap();
     let bob_export = bob_group
         .export_secret(bob_provider.crypto(), SHARE_KEYRING_EXPORTER, b"kolimi", 32)
@@ -118,7 +125,7 @@ fn add_member_exchange_message_and_export_share_key() {
         MlsMessageBodyIn::Welcome(welcome) => welcome,
         _ => panic!("expected a Welcome message"),
     };
-    let mut charlie_group = StagedWelcome::new_from_welcome(
+    let charlie_group = StagedWelcome::new_from_welcome(
         &charlie_provider,
         config.join_config(),
         welcome,
@@ -128,13 +135,23 @@ fn add_member_exchange_message_and_export_share_key() {
     .into_group(&charlie_provider)
     .unwrap();
     let next_export = alice_group
-        .export_secret(alice_provider.crypto(), SHARE_KEYRING_EXPORTER, b"kolimi", 32)
+        .export_secret(
+            alice_provider.crypto(),
+            SHARE_KEYRING_EXPORTER,
+            b"kolimi",
+            32,
+        )
         .unwrap();
     assert_ne!(alice_export, next_export, "a new epoch must rotate the key");
     assert_eq!(
         next_export,
         charlie_group
-            .export_secret(charlie_provider.crypto(), SHARE_KEYRING_EXPORTER, b"kolimi", 32)
+            .export_secret(
+                charlie_provider.crypto(),
+                SHARE_KEYRING_EXPORTER,
+                b"kolimi",
+                32
+            )
             .unwrap()
     );
 }

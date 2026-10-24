@@ -63,11 +63,7 @@ impl ShareKeyring {
     }
 }
 
-fn derive_key(
-    exporter: &[u8; 32],
-    group_id: &[u8],
-    epoch: u64,
-) -> Result<[u8; 32], &'static str> {
+fn derive_key(exporter: &[u8; 32], group_id: &[u8], epoch: u64) -> Result<[u8; 32], &'static str> {
     let hkdf = Hkdf::<Sha256>::new(Some(group_id), exporter);
     let mut info = Vec::with_capacity(INFO.len() + 8);
     info.extend_from_slice(INFO);
@@ -169,9 +165,18 @@ mod tests {
         assert_eq!(opened, keyring);
         assert_eq!(opened.get("/docs/a.txt"), Some([1u8; 32]));
 
-        assert!(decrypt(&exporter(7), group_id, 4, &blob).is_err(), "wrong epoch");
-        assert!(decrypt(&exporter(8), group_id, 3, &blob).is_err(), "wrong key");
-        assert!(decrypt(&exporter(7), b"group-2", 3, &blob).is_err(), "wrong group");
+        assert!(
+            decrypt(&exporter(7), group_id, 4, &blob).is_err(),
+            "wrong epoch"
+        );
+        assert!(
+            decrypt(&exporter(8), group_id, 3, &blob).is_err(),
+            "wrong key"
+        );
+        assert!(
+            decrypt(&exporter(7), b"group-2", 3, &blob).is_err(),
+            "wrong group"
+        );
 
         let mut tampered = blob.clone();
         let last = tampered.len() - 1;

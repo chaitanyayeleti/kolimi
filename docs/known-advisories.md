@@ -40,3 +40,28 @@ and `cargo audit` allows them by default. They are listed explicitly in
 - Every accepted advisory must have a reason and a **revisit condition**.
 - Prefer an actual upgrade or removal; accept only when upstream blocks a
   fix, and document why the path is unreachable.
+
+## RUSTSEC-2026-0387 — `crypto-bigint` timing variability
+
+- **Crate:** `crypto-bigint` 0.5.5 · **Via:** `hpke-rs-rust-crypto` 0.7
+  (P-256/P-384 HPKE) → `openmls_rust_crypto`.
+- **What it is:** timing variability in operations intended to be
+  constant-time. Fixed in `crypto-bigint >= 0.7.6`.
+- **Why accepted:** `elliptic-curve 0.13` (used by `hpke-rs-rust-crypto`)
+  requires `crypto-bigint 0.5`; there is no in-range upgrade. Kolimi’s MLS
+  ciphersuite is `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`; the
+  P-curve HPKE code is linked but not exercised by the group path.
+- **Revisit when:** `hpke-rs` moves to `elliptic-curve 0.14` /
+  `crypto-bigint >= 0.7.6`, or when a P-curve ciphersuite is enabled.
+
+## RUSTSEC-2026-0330 / RUSTSEC-2026-0331 — `libcrux-kem`
+
+- **Crate:** `libcrux-kem` 0.0.9 · **Via:** the optional
+  `hpke-rs-libcrux` backend.
+- **What it is:** a panic on a short seed and on decoding short hybrid
+  keys; fixed in `libcrux-kem >= 0.0.10`.
+- **Why accepted:** the `libcrux` feature is not enabled; the crate is in
+  the lockfile because Cargo resolves optional dependencies, but it is
+  absent from the host build graph. The RustCrypto backend is used instead.
+- **Revisit when:** `openmls`/`hpke-rs` updates the optional backend or
+  Cargo prunes the unused lock entry.

@@ -1,6 +1,6 @@
 # `kolimi-mls` — OpenMLS spike (RFC 9420)
 
-This is a **spike**, not shipped code. It validates the protocol pieces for
+This crate is the MLS groundwork. It is not yet wired into the sync/desktop/web clients. It validates the protocol pieces for
 Kolimi's group-E2EE milestone using `openmls` 0.9:
 
 - a device credential + key package,
@@ -10,14 +10,13 @@ Kolimi's group-E2EE milestone using `openmls` 0.9:
   folder's file-key keyring,
 - epoch rotation when a member is added.
 
-It lives outside the main Cargo workspace on purpose: the audited release
-does not pull `openmls` (MIT, large dependency tree) until the security
-review and `cargo-vet` delta are ready.
+It is now a workspace member (option A). `cargo-vet` exemptions for the
+openmls tree are temporary and tracked in `docs/audit/mls-delta.md`.
 
 Run:
 
 ```sh
-cd spikes/mls
+cd crates/kolimi-mls
 cargo test
 cargo check --target wasm32-unknown-unknown   # web feasibility
 ```

@@ -6,6 +6,28 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.43] - 2026-10-24
+
+### Added
+- **`kolimi-mls` is now a workspace crate.** It provides device
+  credentials/key packages, group create/add, Welcome joins,
+  `kolimi-share-keyring-v1` exporter access and the epoch-bound encrypted
+  share-keyring format.
+- **End-to-end MLS share test** (`crates/kolimi-server/tests/mls_e2e.rs`):
+  publish key packages over HTTP, initialize a group, add a member via a
+  Welcome, agree on the exporter, publish a keyring, then have a **write
+  recipient** add a second file key that the owner decrypts.
+- The server's group-state GET now defaults to a 100-message page instead
+  of clamping a missing `limit` to one message.
+
+### Changed
+- `cargo-vet` has 89 new temporary exemptions for the openmls tree (724
+  total, no audits); tracked in `docs/audit/mls-delta.md` for the review.
+- Encrypted shares remain **read-only**. The protocol/keyring pieces are
+  ready, but desktop/web group-state persistence is not wired yet; enabling
+  writes before that would make writer-created files unreadable to others.
+
+## [0.1.42] - 2026-10-24
 ## [0.1.42] - 2026-10-24
 
 ### Added

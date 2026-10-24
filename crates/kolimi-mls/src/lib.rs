@@ -13,6 +13,7 @@
 //! `openmls` and its dependency tree before the security review. See
 //! `README.md` and `docs/rfc/0012-mls-groups.md`.
 
+pub mod client;
 pub mod keyring;
 
 pub use openmls;
