@@ -1273,6 +1273,7 @@ async fn set_e2ee_passphrase(
             recovery_code: None,
             prf_secret: None,
             encrypted_roots: Vec::new(),
+            mls: false,
         });
         kolimi_sync::verify_unlock(&config)
             .await
