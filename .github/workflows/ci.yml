@@ -33,6 +33,13 @@ jobs:
               - 'crates/kolimi-sync/**'
               - 'crates/kolimi-crypto/**'
 
+  docs:
+    name: docs (links)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: chmod +x scripts/check-docs.sh && scripts/check-docs.sh
+
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest

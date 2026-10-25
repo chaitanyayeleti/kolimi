@@ -1,10 +1,11 @@
 # cargo-audit configuration.
 #
-# Both advisories are accepted, upstream-blocked risks, not exploitable
+# The advisories below are accepted, upstream-blocked risks, not exploitable
 # vulnerabilities. See docs/known-advisories.md for the analysis and the
-# conditions under which to revisit. cargo-audit already treats them as
-# allowed warnings; listing them here makes the acceptance explicit and
-# keeps `cargo audit --deny warnings` green.
+# conditions under which to revisit. Listing them here makes the acceptance
+# explicit and keeps `cargo deny` green. `cargo audit` runs without
+# `--deny warnings`; the unmaintained-crate warnings it reports are documented
+# in docs/known-advisories.md.
 [advisories]
 ignore = [
     "RUSTSEC-2024-0436", # paste (unmaintained) via the Leptos UI stack

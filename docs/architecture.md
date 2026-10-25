@@ -1,102 +1,100 @@
 # Architecture
 
-## The short answer: a deliverable monolith, not a code monolith
+Kolimi ships **one server binary** on purpose — no PHP-FPM, nginx, Redis or
+MySQL chain. The workspace has **15 crates** with a strict dependency
+direction; `apps/kolimi-desktop` (Tauri) and `fuzz` are separate workspaces
+with their own lockfiles.
 
-Kolimi ships **one server binary** on purpose — that is principle #1
-("one static binary; no PHP-FPM, nginx, Redis, MySQL chain"). But the
-code is 14 crates with a strict dependency direction, and the
-composition root is the only place that knows about all of them.
+## Boundaries that matter
 
-A few facts that make this concrete:
-
-- The production server **does not link the crypto crate**.
-  `kolimi-crypto` is a dev-dependency of `kolimi-server`: the running
-  server can only store opaque E2EE blobs, so it physically cannot use
-  key material. That boundary is enforced by the compiler.
-- `kolimi-auth` does not depend on the database crate: the server hands
-  it rows. Auth logic cannot reach into your file tree.
-- Third-party code never links into the binary. (The former WebAssembly
-  plugin host was removed in 0.1.26 as unused.) Previews decode in a sandbox whose
-  capabilities are the import list.
-- The desktop client is a **separate workspace** (`apps/kolimi-desktop`), so
-  the Tauri/webkit dependency tree never touches the server build.
+- **The server is the composition root.** Route modules (`api_*.rs`), the
+  janitor, metrics and the binary live in `kolimi-server`; business logic
+  stays in the domain crates. The server crate is large because it wires
+  everything together, not because it owns the rules.
+- **The server stores ciphertext, not plaintext.** `kolimi-server` links
+  `kolimi-crypto` for one narrow purpose: validating public keys in
+  `api_e2ee.rs`. It never receives a file key, a master key or an MLS
+  secret; E2EE/MLS payloads are opaque blobs to it.
+- **`kolimi-auth` does not depend on `kolimi-db`.** The server hands it
+  rows, so authentication logic cannot reach into the file tree.
+- **One permission engine.** Every file/share lookup for WebDAV, the JSON
+  API, public links and the UI is authorized inside `kolimi-vfs` (its
+  internal `authz` module). Route handlers must not invent their own
+  checks.
+- **MLS state belongs to clients.** `kolimi-mls` wraps `openmls`; sync and
+  the web UI create/join groups and hold the epoch secrets. The server
+  stores key packages, commits, Welcomes and the encrypted keyring, and
+  enforces ordering/epoch rules.
+- **Third-party code never links into the server.** Previews decode in a
+  re-executed worker sandboxed with landlock + seccomp + rlimits.
+- **The desktop client is a separate workspace.** The Tauri/WebKit
+  dependency tree never touches the server build.
 
 ## Crate map
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
 | `kolimi-chunk` | FastCDC chunking, manifests, content ids | — |
-| `kolimi-crypto` | E2EE primitives (keyring, file keys, X25519) | — |
-| `kolimi-db` | SQLite persistence, migrations, all repositories | — |
+| `kolimi-crypto` | E2EE primitives: keyring, file keys, chunk AEAD, X25519 sharing | — |
+| `kolimi-db` | SQLite persistence and migrations (users, tree, shares, DAV, E2EE, MLS, audit) | — |
 | `kolimi-store` | Content-addressed blob store, GC, scrub | `chunk` |
-| `kolimi-auth` | Passwords, tokens, passkeys, TOTP, lockout | — |
-| `kolimi-vfs` | File tree operations + the single permission engine | `db`, `store` |
-| `kolimi-webdav` | WebDAV + CalDAV/CardDAV protocol surfaces | `vfs` |
-| `kolimi-search` | tantivy full-text index | — |
-| `kolimi-preview` | Sandboxed preview decoder (re-exec worker) | — |
+| `kolimi-auth` | Passwords, sessions, passkeys, TOTP, lockout | — |
+| `kolimi-vfs` | Path-safe filesystem + the single permission engine | `chunk`, `db`, `store` |
+| `kolimi-webdav` | WebDAV, CalDAV and CardDAV protocol surfaces | `auth`, `db`, `store`, `vfs` |
+| `kolimi-search` | tantivy full-text index fed from the change feed | — |
+| `kolimi-preview` | Sandboxed preview decoder | — |
+| `kolimi-mls` | MLS (RFC 9420) helpers: devices, key packages, groups, exporter, keyring | — (`openmls`) |
+| `kolimi-kdf` | Argon2id Web Worker wasm module | — |
+| `kolimi-ui` | Leptos web UI, compiled to wasm and embedded as assets | `chunk`, `crypto`, `mls` (wasm only) |
+| `kolimi-sync` | Desktop sync core + `kolimi-sync` CLI | `chunk`, `crypto`, `mls` |
+| `kolimi-ffi` | UniFFI bindings for mobile shells | `crypto`, `sync` |
+| `kolimi-server` | HTTP routes, `AppState`, janitor, metrics, binary | all workspace crates |
+| `apps/kolimi-desktop` | Tauri desktop client (separate workspace) | `sync` + OS keychain |
+| `fuzz` | cargo-fuzz targets (separate nightly workspace) | selected crates |
 
-| `kolimi-server` | Composition root: HTTP routes, AppState, janitor, metrics, binary | everything above |
-| `kolimi-ui` | Leptos web UI, compiled to wasm and embedded as assets | (wasm only) |
-| `kolimi-sync` | Desktop sync core + CLI | `chunk`, `crypto` |
-| `kolimi-ffi` | UniFFI bindings for mobile shells | `sync`, `crypto` |
-| `apps/kolimi-desktop` | Tauri desktop client (own workspace) | `sync` |
-
-Dependency direction is acyclic and points one way: leaf utilities →
-domain → protocols → composition root. The server crate is large
-because it is the only integration point; it contains route modules
-(`api_*.rs`), the janitor loop, and the binary — not business logic,
-which lives in the domain crates.
-
-## What the single binary buys
-
-- No service mesh to operate: no database server, cache, or worker
-  processes. `install.sh` and systemd are enough.
-- Atomic upgrades and one security boundary: authz is evaluated by one
-  engine (`kolimi-vfs::authz`) for WebDAV, the JSON API, public links,
-  and the UI alike.
-- No serialization tax between components: the permission engine, store,
-  and DB are function calls, not RPC.
-- Predictable resources: ~40 MiB stripped binary, one process, one
-  SQLite file, one blob tree.
-
-## Where coupling honestly exists (and the plan)
-
-- **`kolimi-server` route modules** are the busiest files. If they grow
-  further, the split is mechanical: extract `api_*` groups into a
-  `kolimi-api` crate that the binary wires up.
-- **`kolimi-db` holds many tables** (users, nodes, shares, DAV, search
-  state, audit, E2EE keys, and the scrub cursor are file-based).
-  Single-file SQLite is the deployment story; the repositories are
-  already separated by module and could move behind traits if a
-  Postgres backend lands (pending work).
-- **Feature flags** are currently compile-time-free: search,
-  and previews are always built in. If binary size or attack surface
-  becomes a concern, `--features` gates are straightforward (the
-  crates are already optional in principle).
+Dependency direction is acyclic and one-way: leaf utilities → domain →
+protocols → composition root. The browser build is wasm32-only and must not
+pull in the server, database or Tokio.
 
 ## Runtime shape
 
 ```
                  ┌──────────────────────── kolimi-server ───────────────────────┐
  client ──TLS──▶ │ axum router: /dav /api /public /app /metrics                 │
-                 │   auth middleware ─▶ kolimi-auth        (sessions/passkeys)  │
-                 │   route handlers ─▶ kolimi-vfs::authz ─▶ permission engine   │
-                 │                        │                                     │
-                 │                        ├─▶ kolimi-db     (SQLite WAL)       │
-                 │                        └─▶ kolimi-store  (CAS blobs)       │
-                 │   background: janitor (retention, GC, BLAKE3 scrub)          │
-                 │   background: search indexer (change feed → tantivy)         │
-                 │   sandbox: preview worker (re-exec, landlock+seccomp+rlimits)│
-                 │   sandbox: preview worker (landlock/seccomp/rlimits)         │
-                 └──────────────────────────────────────────────────────────────┘
+                 │   auth middleware ─▶ kolimi-auth        (sessions/passkeys) │
+                 │   route handlers ─▶ kolimi-vfs::authz ─▶ permission engine  │
+                 │                        │                                    │
+                 │                        ├─▶ kolimi-db     (SQLite WAL)      │
+                 │                        └─▶ kolimi-store  (CAS blobs)      │
+                 │   background: janitor (retention, GC, BLAKE3 scrub)         │
+                 │   background: search indexer (change feed → tantivy)        │
+                 │   on demand: preview worker (landlock/seccomp/rlimits)      │
+                 └─────────────────────────────────────────────────────────────┘
 ```
 
-Clients (`kolimi-sync`, tray, mobile FFI) speak the delta protocol over
-HTTP and never need a shared library with the server.
+`/api/mls/*` follows the same path as files: the node ACL is checked, the
+payload is stored as an opaque blob, and epochs/order are validated. The
+server never has the group secret or the share keyring plaintext.
 
-## See also
+## Where coupling honestly exists
 
-- [ROADMAP.md](../ROADMAP.md) — milestones and the pending-work table
-- [rfc/0001-storage-engine.md](rfc/0001-storage-engine.md) — why the
-  storage engine is content-addressed
-- [threat-model.md](threat-model.md) — the security boundaries above
+- **`kolimi-server` route modules** are the busiest files. If they grow
+  further, the split is mechanical: extract an API crate and keep the
+  binary as the composition root.
+- **`kolimi-db` holds many tables** (users, nodes, shares, DAV, search
+  state, audit, E2EE keys, MLS state). A Postgres backend would keep the
+  same repository API and swap migrations/connection plumbing; it is not
+  on the current critical path.
+- **Feature flags** are deliberately small: `otel` enables OTLP trace
+  export. Search and previews are always built in.
+- **MLS is not externally audited.** The code and invariants are in
+  `crates/kolimi-mls`, `crates/kolimi-sync/src/mls.rs`,
+  `crates/kolimi-ui/src/mls.rs` and `/api/mls/*`; the review package is
+  [`docs/audit/mls-delta.md`](audit/mls-delta.md).
+
+## Read next
+
+- [Crate-level design specs](rfc/README.md)
+- [Threat model](threat-model.md)
+- [E2EE design](rfc/0007-e2ee.md) and [MLS groups](rfc/0012-mls-groups.md)
+- [Operations](operations.md) and [reference](reference.md)

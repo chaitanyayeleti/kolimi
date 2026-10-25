@@ -61,23 +61,23 @@ client ──(TLS, untrusted network)──> kolimi-server
 | A2 DAV object injection | iCalendar parsed + UID rules enforced; vCards structurally validated; raw payloads stored byte-for-byte (no re-serialization); 10 MiB cap; XML parsers size-capped | M4 |
 | A2 DAV namespace shadowing | `principals`/`calendars`/`addressbooks` reserved at the root; principals/homes are owner-only and 404 for everyone else | M4 |
 | A4 third-party app | Authenticated API/DAV only, per-user permission checks | M7 |
-| A5 operator reads content | optional client-side E2EE (per-file keys; MLS groups in v2); metadata remains visible in v1 — documented honestly (RFC 0007) | M6 |
+| A5 operator reads content | optional client-side E2EE (v1/v2 per-file keys; MLS groups in 0.3.0, not externally audited); encrypted names supported, but sizes/timestamps/structure remain visible | 0.3.0 |
 | Operator tampers with or deletes audit records | BLAKE3 hash-chained append-only audit log; `audit verify` detects edits, deletions, and reordering (`audit_log` rows are only ever inserted) | landed (M6) |
 | A6 MITM | rustls, TLS 1.3 only, HSTS, no mixed content in UI | M1 |
 | A7 memory scraping | `zeroize`/`secrecy` for secrets, no keys in logs; full-disk encryption is the operator's responsibility | M1+ |
 | A8 malicious dependency | `cargo-deny`, `cargo-audit`, `cargo-vet`, minimal dep tree, pinned lockfile in CI | M0 |
 | Secrets in memory / swap | `zeroize` on master/file keys and KEK locals; wrapped keys only on disk; internal review in `docs/crypto-review.md` | landed (M6) |
 | Silent bit-rot or tampering in the blob store | background janitor scrubber re-hashes chunks (BLAKE3) and re-derives manifest ids incrementally; corruption is logged and audited | landed (M2/M6) |
-| A8 build/release tampering | reproducible builds, signed release artifacts, tagged builds from CI only | M7 |
+| A8 build/release tampering | tagged CI builds, signed release artifacts and SBOM, cosign keyless signing | 0.3.0 |
 | Replay/CSRF | CSRF double-submit tokens, SameSite=Strict cookies, no state-changing GETs | M1 |
 | Log leakage | never log content or full URLs with tokens; structured logs with redaction | M1 |
 
 ## Explicit non-goals / honest limitations
 
 - **OpenSSL is in the tree** via `webauthn-rs-core` (unconditional upstream dependency) for WebAuthn signature verification. It is not used for TLS (rustls), hashing (BLAKE3), or password hashing (Argon2id). This is a tracked, documented exception in `deny.toml`; revisit when upstream offers a pure-Rust backend.
-- **Metadata is not hidden** from the server operator in v1 (names, sizes,
-  structure). E2EE hides content; hiding metadata needs encrypted search
-  (a research problem) and is not claimed.
+- **Metadata is only partially hidden.** Encrypted nodes can use encrypted
+  names (`k1_…`), but sizes, timestamps, structure and access patterns
+  remain visible. Content search over encrypted data is not possible.
 - **Traffic analysis** is not defended against beyond TLS.
 - **Endpoint compromise** (client malware) is out of scope.
 - **Deniability**: no plausible deniability engineered; do not claim it.

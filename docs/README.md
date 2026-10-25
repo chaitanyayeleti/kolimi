@@ -1,73 +1,83 @@
 # Kolimi documentation
 
-Kolimi's docs fall into four kinds:
+This page is the map. The top-level [README](../README.md) is the product
+overview and quick start; everything below goes deeper.
 
-- **Guides** — how to install and run it.
-- **Design & security** — how it works and why it is safe.
-- **Plans** — what is being built next.
-- **Specifications** — `rfc/` design specs and `decisions/` records (ADRs).
+Last full verification: **0.3.0** (2026-10-25).
 
 ## Start here
 
-| Document | What it covers |
-| --- | --- |
-| [../README.md](../README.md) | What Kolimi is, feature highlights, quick start |
-| [install.md](install.md) | Every way to install and run the server (script, AUR, `.deb`, Docker/Podman, Helm, systemd), Docker Compose with Traefik, TLS, Caddy/nginx/Traefik proxies, first-run |
-| [operations.md](operations.md) | Day-2 administration: users, groups, TOTP, passkeys, backups, scrub/verify, audit, E2EE operations, metrics/tracing, quota warnings, upgrades, troubleshooting |
+- **New installation** → [install.md](install.md)
+- **Day-2 administration** → [operations.md](operations.md)
+- **CLI, environment and HTTP API** → [reference.md](reference.md)
+- **How the code is organized** → [architecture.md](architecture.md)
+- **Security review / audit** → [audit/README.md](audit/README.md) and
+  [audit/mls-delta.md](audit/mls-delta.md)
+- **Contributing** → [../AGENTS.md](../AGENTS.md) and the
+  [RFC index](rfc/README.md)
 
-## Design & security
-
-| Document | What it covers |
-| --- | --- |
-| [architecture.md](architecture.md) | Crate map, dependency rules, and why the single binary is not a code monolith |
-| [threat-model.md](threat-model.md) | Assets, adversaries, and mitigations |
-| [crypto-review.md](crypto-review.md) | Internal review of the E2EE design (invariants, attacks, gaps) |
-| [known-advisories.md](known-advisories.md) | Accepted dependency advisories (`paste`, `lru`) with revisit conditions |
-| [audit/README.md](audit/README.md) | External audit package: scope, artifacts, reproduction |
-
-## Plans
+## Guides
 
 | Document | What it covers |
 | --- | --- |
-| [../ROADMAP.md](../ROADMAP.md) | Milestones, ship-blockers, and pending work with plans |
-| [plans/clients.md](plans/clients.md) | Client roadmap — desktop first (Linux → Windows/macOS), then mobile (Android first, F-Droid), then iOS |
-| [plans/releases.md](plans/releases.md) | Release & distribution — GitHub Releases (tarballs, `.deb`, Helm, SBOM), GHCR image, Arch (AUR), `install.sh` |
+| [install.md](install.md) | One-command install, Docker/Podman, Compose + Traefik, Helm, AUR, `.deb`, desktop client, source builds, TLS/reverse proxies, first run, upgrades, uninstall |
+| [operations.md](operations.md) | Users and groups, account recovery, 2FA, backup/restore, audit log, metrics/tracing, quotas, hardening, E2EE/MLS operations, desktop/mobile clients, upgrades, troubleshooting |
+| [reference.md](reference.md) | `kolimi-server` and `kolimi-sync` commands, environment variables, HTTP endpoint groups, data-directory layout |
 
-## Specifications — RFCs
+## Design and security
 
-Design specs. Status is noted in each file (`draft` / `implemented`).
-
-| RFC | What it covers |
+| Document | What it covers |
 | --- | --- |
-| [rfc/0001-storage-engine.md](rfc/0001-storage-engine.md) | Chunked CAS storage |
-| [rfc/0002-sync-protocol.md](rfc/0002-sync-protocol.md) | Delta sync protocol |
-| [rfc/0003-sharing-and-permissions.md](rfc/0003-sharing-and-permissions.md) | One permission engine, shares, public links |
-| [rfc/0004-caldav-carddav.md](rfc/0004-caldav-carddav.md) | CalDAV/CardDAV + sync-collection |
-| [rfc/0005-search-and-previews.md](rfc/0005-search-and-previews.md) | Search index and sandboxed previews |
-| [rfc/0006-sync-client.md](rfc/0006-sync-client.md) | The desktop sync client |
-| [rfc/0007-e2ee.md](rfc/0007-e2ee.md) | End-to-end encryption (v1 core, v2 sharing, pre-MLS groups) |
-| [rfc/0008-device-enrollment.md](rfc/0008-device-enrollment.md) | Multi-device E2EE enrollment |
-| [rfc/0009-e2ee-onboarding.md](rfc/0009-e2ee-onboarding.md) | E2EE onboarding: first-login browser keyring setup, encrypt by default *(draft)* |
-| [rfc/0010-webdav-e2ee-boundary.md](rfc/0010-webdav-e2ee-boundary.md) | WebDAV / E2EE boundary: a plaintext-only DAV surface *(draft)* |
+| [architecture.md](architecture.md) | Crate map, dependency direction, runtime shape, where coupling exists |
+| [threat-model.md](threat-model.md) | Assets, adversaries, trust boundaries, mitigations, honest limitations |
+| [crypto-review.md](crypto-review.md) | Internal review of the v1/v2 E2EE design: primitives, invariants, attacks, gaps |
+| [known-advisories.md](known-advisories.md) | Accepted RustSec warnings with reasons and revisit conditions |
+| [audit/README.md](audit/README.md) | External crypto audit package: scope, artifacts, reproduction, review asks |
+| [audit/mls-delta.md](audit/mls-delta.md) | MLS delta for the reviewer: invariants, server rules, tests, open questions |
 
-## Decision records
+MLS is implemented but **not externally audited**. The audit package is
+the source of truth for what has and has not been reviewed.
 
-Short ADRs capturing a decision, its alternatives, and its status.
+## Specifications
 
-| Decision | What it covers |
+- [rfc/README.md](rfc/README.md) — all RFCs with design and implementation
+  status. Start there rather than assuming an RFC title reflects today's
+  behavior.
+- [decisions/0001-e2ee-dav-scope.md](decisions/0001-e2ee-dav-scope.md) —
+  E2EE / WebDAV boundary decision.
+- [decisions/0002-client-stack.md](decisions/0002-client-stack.md) — desktop
+  and mobile client stack.
+
+## Plans and history
+
+| Document | What it covers |
 | --- | --- |
-| [decisions/0001-e2ee-dav-scope.md](decisions/0001-e2ee-dav-scope.md) | E2EE scope + WebDAV boundary *(proposed)* |
-| [decisions/0002-client-stack.md](decisions/0002-client-stack.md) | Desktop client stack + phase-1 plan *(proposed)* |
+| [../ROADMAP.md](../ROADMAP.md) | Current state, next work, deferred items, non-goals |
+| [plans/clients.md](plans/clients.md) | Desktop → mobile client roadmap |
+| [plans/android.md](plans/android.md) | Android/F-Droid client plan |
+| [plans/releases.md](plans/releases.md) | Release channels, tag pipeline, version-bump checklist |
+| [../CHANGELOG.md](../CHANGELOG.md) | What shipped in each release |
 
 ## Conventions
 
-- **RFCs** (`rfc/NNNN-*.md`) specify *designs*: problem, threat model,
-  protocol, data model, non-goals. They are living documents — a landed
-  design keeps its RFC and marks status.
-- **Decision records** (`decisions/NNNN-*.md`) capture a single *decision*
-  with the alternatives considered and an explicit status
-  (proposed / accepted / superseded).
-- **Plans** (`plans/`) are forward-looking roadmaps; the authoritative
-  backlog is [../ROADMAP.md](../ROADMAP.md).
-- Prefer cross-links over duplication; when a design changes, update the
-  RFC and reference it from the changelog.
+- **RFCs** (`rfc/NNNN-*.md`) specify designs: problem, threat model,
+  protocol, data model, non-goals. They are living documents and carry a
+  `Status:` line with the last verified release.
+- **Decision records** (`decisions/NNNN-*.md`) capture one decision, its
+  alternatives and its status (proposed / accepted / superseded).
+- **Plans** (`plans/`) look forward; [ROADMAP.md](../ROADMAP.md) is the
+  authoritative backlog. Shipped history belongs in `CHANGELOG.md`, not in
+  the roadmap.
+- **Status words** mean:
+  - *design*: `draft` (still changing), `accepted` (agreed, not fully
+    built), `implemented` (the design is what the code follows);
+  - *implementation*: `shipped`, `partial`, or `not started`, always with
+    the release it was last verified against.
+- Prefer cross-links over duplication. Update the RFC when a design
+  changes and add a `CHANGELOG.md` entry when behavior changes.
+
+## Checks
+
+`scripts/check-docs.sh` (also run in CI) verifies that relative links
+resolve, every RFC appears in the RFC index, and current-facing guides do
+not reintroduce known stale claims. Run it before sending a docs change.

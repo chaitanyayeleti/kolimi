@@ -1,6 +1,7 @@
 # RFC 0008: Multi-device E2EE enrollment
 
-Status: draft (design) · Depends on: RFC 0007 (E2EE), RFC 0006 (sync client)
+Status: implemented (0.3.0) · Last verified: 0.3.0 · Depends on:
+RFC 0007 (E2EE), RFC 0006 (sync client)
 
 ## Summary
 
@@ -27,7 +28,7 @@ UMK, the device keys, or any file key.
 
 ## Crypto
 
-Reuses the audited ECIES primitive (X25519 + HKDF-SHA256 +
+Reuses the reviewed ECIES primitive (X25519 + HKDF-SHA256 +
 XChaCha20-Poly1305) with a new domain separator, `kolimi-device-v1`:
 
 ```text
