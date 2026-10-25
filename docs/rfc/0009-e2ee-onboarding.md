@@ -1,7 +1,14 @@
 # RFC 0009: E2EE onboarding — first-login keyring setup, encrypt by default
 
-Status: draft (design) · Depends on: RFC 0007 (E2EE), RFC 0008 (device
+Status: partially implemented (0.3.0: web Vault setup and
+encrypt-by-default folder; passkey-PRF browser unlock pending) ·
+Last verified: 0.3.0 · Depends on: RFC 0007 (E2EE), RFC 0008 (device
 enrollment), RFC 0006 (sync client)
+
+> **Implementation note (0.3.0):** web first-login Vault setup and the
+> encrypt-by-default `Vault/` landed; the passkey-PRF browser unlock
+> remains pending. The “current state” below is the baseline this RFC was
+> written against.
 
 ## Summary
 
@@ -24,13 +31,13 @@ rejected — it is not E2EE (see *Alternatives*).
 
 ## Motivation
 
-Current state (as shipped):
+Baseline when this RFC was written:
 
 1. Admin creates the login (`kolimi-server user add` / `POST /api/users`)
    — password only, no crypto.
 2. *Separately*, the user runs `kolimi-sync --e2ee-setup` to generate and
    upload a keyring, and `--e2ee-root Private` to choose what is encrypted.
-3. The web UI can only *unlock* an existing keyring, not create one.
+3. The web UI could only *unlock* an existing keyring, not create one.
 
 Problems:
 

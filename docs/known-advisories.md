@@ -1,10 +1,24 @@
 # Known dependency advisories (accepted)
 
-Both entries below are accepted, upstream-blocked risks. They are RustSec
+The entries below are accepted, upstream-blocked risks. They are RustSec
 **warnings** (unmaintained / unsound), not exploitable vulnerabilities,
-and `cargo audit` allows them by default. They are listed explicitly in
-`.cargo/audit.toml` and `deny.toml` so the acceptance is intentional and
-`cargo audit --deny warnings` / `cargo deny` stay green.
+and `cargo audit` allows them by default. The explicitly ignored ones are
+listed in `.cargo/audit.toml` and `deny.toml` so the acceptance is
+intentional and `cargo deny` stays green.
+
+## Unmaintained warnings reported by cargo-audit
+
+`cargo audit` also reports these five unmaintained crates as warnings. They
+are not vulnerabilities and are not ignored in `.cargo/audit.toml`; keep
+them visible and revisit when the upstream dependency moves.
+
+| Advisory | Crate | Exposure | Revisit when |
+| --- | --- | --- | --- |
+| RUSTSEC-2026-0374 | `basic-toml` 0.1.10 | `askama_derive` → `uniffi_bindgen` (build-time FFI binding generation) | uniffi/askama updates |
+| RUSTSEC-2026-0173 | `proc-macro-error2` 2.0.1 | `hax-lib-macros` → `libcrux-sha3` → `hpke-rs` → `openmls_rust_crypto` (MLS build graph) | upstream updates the macro |
+| RUSTSEC-2026-0370 | `zvariant` 5.15.0 | `keyring` keystore feature (Secret Service); glibc releases/desktop, not server core | keyring/zbus updates |
+| RUSTSEC-2026-0371 | `zbus_names` 4.3.4 | same keystore path | keyring/zbus updates |
+| RUSTSEC-2026-0372 | `zvariant_derive` 5.15.0 | same keystore path (proc-macro) | keyring/zbus updates |
 
 ## RUSTSEC-2024-0436 — `paste` unmaintained
 

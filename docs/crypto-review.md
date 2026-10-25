@@ -1,9 +1,13 @@
-# Internal crypto review: Kolimi E2EE (M6)
+# Internal crypto review: Kolimi E2EE (v1/v2)
 
 Status: internal review complete (external review still required before
 calling E2EE production-ready). Scope: `crates/kolimi-crypto`, the
-server E2EE surface (`api_e2ee`, `e2ee_file_keys`, `e2ee_keyrings`),
-and the `kolimi-sync` integration. Spec: RFC 0007.
+server E2EE surface (`api_e2ee`, `e2ee_file_keys`, `e2ee_keyrings`), and
+the `kolimi-sync`/desktop/web integration. Spec: RFC 0007.
+
+**MLS (RFC 0012) is a separate implementation and is not covered by this
+document.** It is implemented but not externally audited; see
+[`docs/audit/mls-delta.md`](audit/mls-delta.md).
 
 ## What we are defending against
 
@@ -14,9 +18,10 @@ and the `kolimi-sync` integration. Spec: RFC 0007.
 - **Credential theft on the server:** password hashes and sessions leak
   nothing about E2EE content; the keyring is useless without a secret.
 
-Not in scope (documented non-goals): hiding metadata (paths, sizes,
-mtimes, chunk counts, chunk-equality within one file's history),
-multi-user key sharing, forward secrecy, rollback protection.
+Not in scope (documented non-goals): hiding sizes, mtimes, chunk counts,
+chunk-equality within one file's history, or access patterns; forward
+secrecy and post-compromise security for groups (MLS); rollback
+protection; MLS group state/epoch handling.
 
 ## Primitives and parameters
 
@@ -73,19 +78,23 @@ multi-user key sharing, forward secrecy, rollback protection.
 ## Metadata leakage (accepted, documented)
 
 Chunk count and ciphertext lengths (plaintext + 40 bytes/chunk),
-manifest structure (hashes of ciphertext), file names, sizes, mtimes,
-and access patterns are visible to the server. Encrypted nodes are
-excluded from content search and previews; name/path search still
-works and reports no content.
+manifest structure (hashes of ciphertext), mtimes, and access patterns
+are visible to the server. Encrypted nodes can use encrypted names
+(`k1_…`), so names are not visible for those nodes, but name lengths and
+the access graph still leak. Encrypted nodes are excluded from content
+search and previews; name/path search works on the client-side
+supplement and reports no content.
 
 ## Known gaps
 
-- Manifest is structurally plaintext in v1 (GC/verify depend on it);
-  encrypting it is a v2 candidate.
-- No E2EE sharing (recipient key wrapping) or MLS groups (v2).
-- The web UI has no E2EE; clients are `kolimi-sync` (desktop/tray/FFI).
+- Manifest is structurally plaintext in v1/v2 (GC/verify depend on it);
+  encrypting it is still a candidate.
+- MLS group sharing is implemented in RFC 0012 but is outside this review
+  and is not externally audited.
 - No external audit yet; this document lists the invariants such an
   audit should target first.
+- Rollback/freshness of server responses is not protected beyond content
+  ids and chunk hashes.
 - Zeroization is best-effort: allocator copies and swap are outside
   our control.
 
@@ -97,5 +106,9 @@ works and reports no content.
   server data dir (marker scan), passphrase/recovery/PRF unlock,
   encrypted edit/conflict flows, and an independent raw-HTTP decoder
   reading client uploads.
+- `e2ee_share`, `e2ee_devices`, `e2ee_enroll` and `e2ee_group` cover
+  recipient wrapping, device enrollment, revocation and group shares.
+- The WASM UI has wasm-bindgen tests; browser flows are exercised
+  manually (no committed browser E2E suite yet).
 - Unit tests cover determinism, tamper detection, wrong-key failure,
   keyring JSON round-trips, and length validation.

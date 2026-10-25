@@ -1,7 +1,14 @@
 # RFC 0010: WebDAV / E2EE boundary — a plaintext-only DAV surface
 
-Status: draft (design) · Depends on: RFC 0007 (E2EE), RFC 0001 (storage
-engine), RFC 0003 (sharing and permissions), RFC 0009 (E2EE onboarding)
+Status: partially implemented (0.3.0: DAV refuses encrypted nodes;
+marker-based directory boundary deferred) · Last verified: 0.3.0 ·
+Depends on: RFC 0007 (E2EE), RFC 0001 (storage engine),
+RFC 0003 (sharing and permissions), RFC 0009 (E2EE onboarding)
+
+> **Implementation note (0.3.0):** the basic boundary is enforced — DAV
+> refuses `GET`/`HEAD`/`PUT`/`COPY`/`MOVE` on encrypted nodes. The
+> “current behavior” section below is the pre-RFC baseline; the
+> marker-based directory boundary remains deferred.
 
 ## Summary
 
@@ -11,16 +18,16 @@ DAV can only ever move plaintext. This RFC draws a hard boundary:
 from it.** DAV never encrypts, never decrypts, and never touches key
 material.
 
-Today the boundary is unenforced. `kolimi-webdav` does not consult the
-encryption flag at all, so a generic DAV client can download ciphertext
-(an opaque blob) and — worse — `PUT` plaintext into an encrypted path,
-storing plaintext on the server while the node stays flagged `encrypted`,
-which corrupts it for the sync client and breaks confidentiality. This
-RFC makes the separation explicit and safe.
+When this RFC was written, the boundary was unenforced: `kolimi-webdav`
+did not consult the encryption flag, so a generic DAV client could
+download ciphertext (an opaque blob) and — worse — `PUT` plaintext into
+an encrypted path, storing plaintext on the server while the node stayed
+flagged `encrypted`. This RFC made the separation explicit and safe; the
+basic rule below is now implemented.
 
 ## Motivation
 
-Current behavior (as shipped):
+Behavior before the boundary was enforced:
 
 - `GET`/`PROPFIND`/ranges stream the raw CAS bytes, which for an encrypted
   file are `nonce || AEAD(plaintext)` chunks concatenated — unusable to a

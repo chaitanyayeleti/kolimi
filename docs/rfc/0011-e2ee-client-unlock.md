@@ -1,6 +1,7 @@
 # RFC 0011: E2EE in sync clients — locked state and per-client unlock
 
-Status: draft (design) · Depends on: RFC 0007 (E2EE), RFC 0008 (device
+Status: implemented (desktop, 0.3.0) · Last verified: 0.3.0 ·
+Depends on: RFC 0007 (E2EE), RFC 0008 (device
 enrollment), RFC 0009 (E2EE onboarding), RFC 0006 (sync client)
 
 ## Summary

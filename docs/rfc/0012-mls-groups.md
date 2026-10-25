@@ -1,8 +1,8 @@
 # RFC 0012: MLS group E2EE (RFC 9420)
 
-Status: client + server hardening landed (0.3.0); external audit pending ·
-Depends on: RFC 0007 (E2EE), RFC 0008 (device enrollment), RFC 0010 (DAV
-boundary)
+Status: implemented (0.3.0); external audit pending · Last verified:
+0.3.0 · Depends on: RFC 0007 (E2EE), RFC 0008 (device enrollment),
+RFC 0010 (DAV boundary)
 
 > **Client + server hardening (0.3.0):** `crates/kolimi-mls` (openmls 0.9)
 > provides device credentials/key packages, group create/add, Welcome
@@ -26,10 +26,11 @@ boundary)
 
 ## Why
 
-Group shares today wrap **each file key for each member** with X25519. That
+The v1/v2 design wraps **each file key for each member** with X25519. That
 is simple and works offline, but it has no forward secrecy or
 post-compromise security: adding or removing a member does not rotate
-anything, and a stolen device keeps every file key it ever received.
+anything, and a stolen device keeps every file key it ever received. MLS
+replaces that path for new group shares while legacy wraps remain readable.
 
 MLS replaces the per-member wrapping with a group key schedule. Membership
 changes create a new epoch; the exporter secret from that epoch protects a
@@ -55,8 +56,8 @@ participating in a commit.
 
 ## Model
 
-- A shared **node** (folder) gets an `mls_group_id` (random 32 bytes) and a
-  monotonically increasing `epoch` (`mls_node_groups`).
+- A shared **node** (folder or single file) gets an `mls_group_id` (random
+  32 bytes) and a monotonically increasing `epoch` (`mls_node_groups`).
 - Each **enrolled device** publishes a key package (credential: username +
   device public key; lifetime bounded).
 - Membership = all devices of all users in the group. Adding a user adds
@@ -92,10 +93,14 @@ stored_blob   = AEAD(MLS exporter(epoch, "kolimi-share-keyring-v1"), share_keyri
 ## Server schema
 
 ```sql
-mls_key_packages (user_id, device_id, payload BLOB, expires_at, ...)
-mls_groups (group_id BLOB PRIMARY KEY, epoch INTEGER, ...)
-mls_messages (group_id, epoch, seq, kind, payload BLOB, ...)
-mls_share_keyrings (group_id, epoch, payload BLOB, ...)
+mls_key_packages (id, user_id, device_id, payload BLOB, expires_at,
+                  consumed_at)
+mls_node_groups (node_id PRIMARY KEY, mls_group_id BLOB UNIQUE, epoch,
+                 updated_at)
+mls_messages (id, node_id, seq, epoch, kind, payload BLOB, sender_id,
+              created_at, UNIQUE(node_id, seq))
+mls_share_keyrings (node_id, epoch, payload BLOB, updated_by, updated_at,
+                    revision, PRIMARY KEY(node_id, epoch))
 ```
 
 The server validates shapes/sizes, orders messages, prevents epoch
@@ -130,7 +135,8 @@ regression, and stores blobs. It never parses MLS plaintext.
 - Web/desktop interop: a browser creates a group, a sync recipient reads
   and writes, and the owner reads the recipient's file (browser E2E).
 - Server sees only opaque payloads; no plaintext names/keys in logs.
-- Fuzz the message parser and state transitions.
+- Fuzz the keyring parser (landed as `fuzz/fuzz_targets/mls_keyring.rs`);
+  message-parser and state-transition fuzzing are still pending.
 
 ## Rollout
 
@@ -147,6 +153,9 @@ regression, and stores blobs. It never parses MLS plaintext.
 - `openmls` API/version churn and wasm provider support.
 - Asynchronous commits: a member can be several epochs behind; the client
   must replay commits/welcomes in order.
+- Two clients committing at the same epoch can fork a group. The current
+  design assumes one active committer per membership change; fork
+  detection/repair is still open.
 - Multi-device membership can make groups large; bound devices per user.
 - Revocation is still not a remote wipe: a device that already holds old
   file keys retains them. Future epochs are protected.

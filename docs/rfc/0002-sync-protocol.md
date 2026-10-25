@@ -1,6 +1,6 @@
 # RFC 0002 — Sync Protocol
 
-- **Status:** Server side implemented (M2); client implementations pending (M5)
+- **Status:** Implemented (server + `kolimi-sync`/desktop; mobile uses the FFI core) · Last verified: 0.3.0
 - **Milestone:** M2 (server), M5 (clients)
 - **Related:** RFC 0001 (Storage Engine), `docs/threat-model.md`
 
