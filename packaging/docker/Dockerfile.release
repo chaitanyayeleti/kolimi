@@ -1,0 +1,18 @@
+# Release image built from the already-compiled glibc binaries.
+#
+# The CI build jobs upload `dist/kolimi-<target>/` and the container step
+# uses that directory as its context, so the release no longer compiles the
+# server a second time inside Docker.
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+COPY kolimi-server /usr/local/bin/kolimi-server
+COPY kolimi-sync /usr/local/bin/kolimi-sync
+COPY --chown=nonroot:nonroot README.md /data/.keep
+
+ENV KOLIMI_DATA=/data \
+    KOLIMI_BIND=0.0.0.0:8080 \
+    KOLIMI_ORIGIN=http://localhost:8080 \
+    RUST_LOG=info
+VOLUME /data
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/kolimi-server", "serve"]

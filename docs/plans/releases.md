@@ -22,7 +22,7 @@ separate workflows but should be tagged together when both changed.
 | Helm | chart tarball, `version`/`appVersion` set from the tag | `release.yml` |
 | AUR | `kolimi-server` source package (PKGBUILD + `.SRCINFO`) | `release.yml`, gated on `AUR_SSH_KEY` |
 | One-command installer | `scripts/install.sh` downloads the release tarball and verifies it | `install.sh` against the tag |
-| Desktop | `.deb` + AppImage, AUR `kolimi-desktop` | `desktop-release.yml` |
+| Desktop | Linux `.deb`/AppImage, Windows `.msi`/NSIS, macOS `.dmg`/`.app.tar.gz`, AUR `kolimi-desktop` | `desktop-release.yml` |
 
 ## Server release pipeline (`v*`)
 
@@ -30,27 +30,30 @@ separate workflows but should be tagged together when both changed.
    `aarch64-unknown-linux-gnu` (native arm runner). Stages the WASM UI
    first, builds `kolimi-server` + `kolimi-sync`, packages tarballs, builds
    the x86_64 `.deb`, emits a CycloneDX SBOM and signs the tarballs with
-   cosign (keyless).
-2. **container** — builds amd64 and arm64 images by digest and merges them
-   into one manifest with the `X.Y.Z`, `X.Y` and `latest` tags.
+   cosign (keyless). The two glibc jobs also build their container image
+   from those release binaries; there is no second Rust compile in Docker.
+2. **container manifest** — merges the amd64/arm64 digests into one manifest
+   with the `X.Y.Z`, `X.Y` and `latest` tags.
 3. **helm** — sets chart `version`/`appVersion` from the tag and packages
    the chart.
 4. **publish** — attaches binaries, `.deb`, Helm chart, SBOMs and
    signatures to the GitHub release.
-5. **aur** — updates `pkgver`, `pkgrel`, `sha256sums` and `.SRCINFO` and
-   pushes to `aur.archlinux.org/kolimi-server` (skipped when the secret is
-   absent).
+5. **aur** — waits for publish, then updates `pkgver`, `pkgrel`,
+   `sha256sums` and `.SRCINFO` and pushes to
+   `aur.archlinux.org/kolimi-server` (skipped when the secret is absent).
 
 ## Desktop release pipeline (`desktop-v*`)
 
-1. Checks the desktop lockfile with
-   `cargo metadata --locked --manifest-path apps/kolimi-desktop/Cargo.toml`.
-2. Builds one release per platform, serially so the release exists before
-   assets are attached:
+1. **build** — three platform jobs run in parallel; each checks the desktop
+   lockfile, runs the desktop tests, builds its bundles and uploads them as
+   workflow artifacts:
    - Linux (Ubuntu 22.04): `.deb` and AppImage;
    - Windows (`windows-latest`): `.msi` and NSIS `-setup.exe`;
-   - macOS (`macos-latest`): `.app` and `.dmg`.
-3. Updates the `kolimi-desktop` AUR package when `AUR_SSH_KEY` is present.
+   - macOS (`macos-latest`): `.dmg` and `.app.tar.gz`.
+2. **publish** — one job downloads all platform artifacts and creates or
+   updates the GitHub release, avoiding concurrent release creation.
+3. **aur** — waits for publish, then updates the `kolimi-desktop` AUR
+   package when `AUR_SSH_KEY` is present.
 
 Windows and macOS bundles are **unsigned** until signing certificates are
 configured; SmartScreen/Gatekeeper warnings are expected. The desktop client
@@ -60,7 +63,9 @@ has its own workspace and lockfile; it is not built by the server workspace.
 
 Before tagging:
 
-- [ ] `main` is green: CI, supply-chain, fuzz, litmus, packaging, desktop.
+- [ ] `main` is green. CI path filters skip unrelated expensive jobs; run
+      `workflow_dispatch` for packaging/fuzz/litmus/perf when the changed
+      files did not trigger them.
 - [ ] `CHANGELOG.md` has an entry for the version.
 - [ ] `[workspace.package] version` and every `version =` in
       `[workspace.dependencies]` are bumped in the root `Cargo.toml`

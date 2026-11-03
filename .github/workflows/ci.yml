@@ -15,23 +15,77 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The desktop job dominates runtime (Tauri/WebKit). Run it only when
-  # desktop code changed, or on demand; every tag still builds it in the
-  # release workflow.
+  # Path filters keep expensive, platform-specific jobs off unrelated PRs.
+  # Every job is still forced on workflow_dispatch.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      desktop: ${{ steps.filter.outputs.desktop }}
+      desktop_app: ${{ steps.filter.outputs.desktop_app }}
+      desktop_deps: ${{ steps.filter.outputs.desktop_deps }}
+      browser: ${{ steps.filter.outputs.browser }}
+      ui: ${{ steps.filter.outputs.ui }}
+      packaging: ${{ steps.filter.outputs.packaging }}
+      perf: ${{ steps.filter.outputs.perf }}
+      litmus: ${{ steps.filter.outputs.litmus }}
+      fuzz: ${{ steps.filter.outputs.fuzz }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
-            desktop:
+            desktop_app:
               - 'apps/kolimi-desktop/**'
+              - '.github/workflows/desktop-release.yml'
+            desktop_deps:
               - 'crates/kolimi-sync/**'
               - 'crates/kolimi-crypto/**'
+              - 'crates/kolimi-mls/**'
+              - 'crates/kolimi-chunk/**'
+            browser:
+              - 'crates/kolimi-ui/**'
+              - 'crates/kolimi-kdf/**'
+              - 'crates/kolimi-server/**'
+              - 'crates/kolimi-sync/**'
+              - 'crates/kolimi-db/**'
+              - 'crates/kolimi-crypto/**'
+              - 'crates/kolimi-mls/**'
+              - 'crates/kolimi-vfs/**'
+              - 'browser-e2e/**'
+              - 'scripts/browser-e2e-server.sh'
+              - 'scripts/build-ui.sh'
+              - '.github/workflows/ci.yml'
+            ui:
+              - 'crates/kolimi-ui/**'
+              - 'crates/kolimi-kdf/**'
+              - 'crates/kolimi-server/assets/**'
+              - 'crates/kolimi-server/src/ui.rs'
+              - 'scripts/build-ui.sh'
+              - '.github/workflows/ci.yml'
+            packaging:
+              - 'packaging/**'
+              - 'scripts/install.sh'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/desktop-release.yml'
+            perf:
+              - 'crates/kolimi-chunk/**'
+              - 'crates/kolimi-store/**'
+              - 'crates/kolimi-vfs/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            litmus:
+              - 'crates/kolimi-webdav/**'
+              - 'crates/kolimi-vfs/**'
+              - 'scripts/litmus.sh'
+              - '.github/workflows/ci.yml'
+            fuzz:
+              - 'crates/kolimi-chunk/**'
+              - 'crates/kolimi-crypto/**'
+              - 'crates/kolimi-mls/**'
+              - 'crates/kolimi-preview/**'
+              - 'fuzz/**'
+              - '.github/workflows/ci.yml'
 
   docs:
     name: docs (links)
@@ -50,6 +104,8 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo clippy -p kolimi-ui --target wasm32-unknown-unknown -- -D warnings
@@ -62,6 +118,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace --all-features
       # Bindings are generated here rather than on a separate runner: that
       # job spent most of its ~70 s on checkout, toolchain and cache setup.
@@ -98,7 +156,8 @@ jobs:
 
   fuzz:
     name: fuzz (30s smoke)
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (needs.changes.outputs.fuzz == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: nightly
@@ -108,7 +167,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo install cargo-fuzz --locked
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - run: cargo fuzz build
         working-directory: fuzz
       - run: cargo fuzz run chunk_roundtrip -- -max_total_time=30 -max_len=4194304
@@ -120,6 +182,8 @@ jobs:
 
   ui:
     name: ui (wasm)
+    needs: changes
+    if: needs.changes.outputs.ui == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -127,6 +191,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen@0.2.129
@@ -160,6 +226,8 @@ jobs:
 
   browser:
     name: browser (Playwright)
+    needs: changes
+    if: needs.changes.outputs.browser == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -167,6 +235,9 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: browser
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen@0.2.129
@@ -181,10 +252,37 @@ jobs:
       - run: npx --prefix browser-e2e playwright install --with-deps chromium
       - run: npm --prefix browser-e2e test
 
+  # A sync/crypto change must still compile the desktop app, but it does not
+  # need three OS bundle builds. Linux gives that signal in a few minutes.
+  desktop-check:
+    name: desktop (Linux check)
+    needs: changes
+    if: needs.changes.outputs.desktop_deps == 'true' && needs.changes.outputs.desktop_app != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/kolimi-desktop
+          key: desktop-linux-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Linux Tauri dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+      - run: cargo test --locked --manifest-path apps/kolimi-desktop/Cargo.toml
+      - name: Packaging check (deb)
+        working-directory: apps/kolimi-desktop
+        run: cargo tauri build --bundles deb
+
   desktop:
     name: desktop (${{ matrix.name }})
     needs: changes
-    if: needs.changes.outputs.desktop == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.desktop_app == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -205,6 +303,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/kolimi-desktop
+          key: desktop-${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
         run: |
@@ -222,7 +322,8 @@ jobs:
 
   packaging:
     name: packaging (deb, helm, install smoke)
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -230,6 +331,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen@0.2.129
@@ -267,9 +370,11 @@ jobs:
             -d "{\"password\":\"$PW\"}" "http://127.0.0.1:18080/public/$TOKEN/unlock" -o /dev/null
           curl -fsS -b "$JAR" "http://127.0.0.1:18080/public/$TOKEN/download" | grep -q 'one-command install'
           kill %1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
       - name: Build .deb
         run: |
-          cargo install cargo-deb --locked
           cargo deb -p kolimi-server --no-build
           ls target/debian/*.deb
       - name: Lint Helm chart
@@ -278,7 +383,8 @@ jobs:
 
   perf:
     name: perf (load gates)
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (needs.changes.outputs.perf == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -286,6 +392,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen@0.2.129
@@ -302,12 +410,15 @@ jobs:
 
   litmus:
     name: litmus (WebDAV compliance)
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: needs.changes.outputs.litmus == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libexpat1-dev zlib1g-dev
       - name: Cache neon + litmus builds
