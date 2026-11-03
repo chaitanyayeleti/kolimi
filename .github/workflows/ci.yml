@@ -20,6 +20,7 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
+      code: ${{ steps.filter.outputs.code }}
       desktop_app: ${{ steps.filter.outputs.desktop_app }}
       desktop_deps: ${{ steps.filter.outputs.desktop_deps }}
       browser: ${{ steps.filter.outputs.browser }}
@@ -34,6 +35,18 @@ jobs:
         id: filter
         with:
           filters: |
+            code:
+              - 'crates/**'
+              - 'apps/**'
+              - 'packaging/**'
+              - 'scripts/**'
+              - 'browser-e2e/**'
+              - 'fuzz/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - '.cargo/**'
+              - '.github/workflows/**'
             desktop_app:
               - 'apps/kolimi-desktop/**'
               - '.github/workflows/desktop-release.yml'
@@ -96,6 +109,8 @@ jobs:
 
   lint:
     name: fmt + clippy
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -113,6 +128,8 @@ jobs:
 
   test:
     name: test
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -144,6 +161,8 @@ jobs:
   # runners spent more time on setup than on the checks themselves.
   supply-chain:
     name: supply-chain (deny, audit, vet)
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
