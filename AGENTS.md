@@ -58,6 +58,9 @@ cargo vet --locked
   `cargo test --release -p kolimi-server --test load -- --ignored`.
 - Docs: `scripts/check-docs.sh` checks relative links, the RFC index and
   known stale claims (also a CI job).
+- Browser: `./scripts/build-ui.sh && cargo build -p kolimi-server -p kolimi-sync`,
+  then `npm ci --prefix browser-e2e && npm --prefix browser-e2e test`
+  (Playwright Chromium; also a CI job).
 - `cargo vet --locked` fails on a new dependency until it has an audit or
   exemption in `supply-chain/`. There are 724 exemptions, 89 of them the
   temporary openmls tree — none are audits.

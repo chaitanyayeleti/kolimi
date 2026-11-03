@@ -12,7 +12,7 @@ matches your host.
 - [Kubernetes (Helm)](#kubernetes-helm)
 - [Arch Linux (AUR)](#arch-linux-aur)
 - [Debian / Ubuntu (.deb)](#debian--ubuntu-deb)
-- [Desktop client (Linux)](#desktop-client-linux)
+- [Desktop client](#desktop-client)
 - [Manual / from source](#manual--from-source)
 - [TLS and reverse proxies](#tls-and-reverse-proxies)
 - [First run](#first-run)
@@ -221,37 +221,45 @@ sudo dpkg -i target/debian/kolimi-server_*.deb
 The postinst creates the `kolimi` system user and `/var/lib/kolimi`.
 Configure `/etc/kolimi/kolimi.env`, then enable `kolimi.service`.
 
-## Desktop client (Linux)
+## Desktop client
 
 The native desktop client lives in `apps/kolimi-desktop` (Tauri). It loads
 the server's `/app/` UI, adds a tray and background sync, and keeps
-credentials in the OS keychain.
+credentials in the OS keychain. Desktop releases attach Linux `.deb` and
+AppImage, Windows `.msi` and NSIS installers, and macOS `.app`/`.dmg`.
 
-Install from AUR:
+**Linux:**
 
 ```sh
 yay -S kolimi-desktop       # or paru -S kolimi-desktop
-```
 
-Or use the `.deb` / AppImage attached to a **Desktop Release**
-(`desktop-v*` tag):
-
-```sh
+# or from a Desktop Release (desktop-v* tag)
 sudo dpkg -i kolimi-desktop_*.deb
 chmod +x kolimi-desktop_*.AppImage && ./kolimi-desktop_*.AppImage
 ```
 
-Build from source:
+**Windows:** download the `.msi` or `-setup.exe` from the Desktop Release
+and run it. The build is currently unsigned, so SmartScreen may warn.
+
+**macOS:** open the `.dmg`, drag Kolimi to Applications, and allow it in
+**System Settings → Privacy & Security** if Gatekeeper blocks the unsigned
+app.
+
+Build from source (the target bundle command is platform-specific):
 
 ```sh
 cargo install tauri-cli --version "^2" --locked
 cd apps/kolimi-desktop
-cargo tauri build --bundles deb      # -> target/release/bundle/
+
+cargo tauri build --bundles deb,appimage   # Linux
+cargo tauri build --bundles nsis,msi       # Windows
+cargo tauri build --bundles app,dmg        # macOS
 ```
 
-On first run the setup window writes `~/.config/kolimi/desktop.json`
-(non-secret fields only); the account password and E2EE passphrase go to
-the system keychain, with a session-keyring and warned file fallback. See
+On first run the setup window writes `desktop.json` under the platform
+config directory (non-secret fields only); the account password and E2EE
+passphrase go to the system keychain. Linux has a session-keyring and
+warned file fallback; autostart is currently XDG-only on Linux. See
 [operations.md](operations.md#desktop-and-mobile-clients).
 
 ## Manual / from source

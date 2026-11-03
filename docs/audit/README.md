@@ -1,6 +1,6 @@
 # External crypto audit package
 
-Status: prepared for **0.3.0**. **External review has not been performed.**
+Status: prepared for **0.3.1**. **External review has not been performed.**
 This directory is written so a reviewer can start from one commit and
 reproduce every claim.
 
@@ -66,8 +66,15 @@ cargo test -p kolimi-server \
   --test e2ee --test e2ee_share --test e2ee_devices \
   --test e2ee_enroll --test e2ee_group
 
-# MLS group state, membership and sync/desktop flows.
+# MLS group state, membership, pruning and sync/desktop flows.
 cargo test -p kolimi-server --test mls --test mls_e2e --test mls_sync
+
+# Browser flows (rename/delete/share/revoke/migration/reset).
+./scripts/build-ui.sh
+cargo build -p kolimi-server -p kolimi-sync
+npm ci --prefix browser-e2e
+npx --prefix browser-e2e playwright install --with-deps chromium
+npm --prefix browser-e2e test
 
 # Decryption and keyring parser fuzzing (nightly).
 cargo install cargo-fuzz --locked
@@ -103,7 +110,7 @@ vectors and the exact commit hash.
 
 - The crypto surface is small and self-contained; `kolimi-crypto` has no
   I/O beyond `getrandom`, which keeps the review tractable.
-- We can freeze the 0.3.0 surface for the duration of a review and land
+- We can freeze the 0.3.1 surface for the duration of a review and land
   only fixes.
 - The `openmls` tree currently carries **89 temporary `cargo-vet`
   exemptions** (724 total); none are audits. They should be replaced by

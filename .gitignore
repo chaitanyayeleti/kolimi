@@ -22,3 +22,8 @@ packaging/docker/.env
 
 # MLS spike build output
 spikes/mls/target/
+
+# Playwright browser suite
+browser-e2e/node_modules/
+browser-e2e/test-results/
+browser-e2e/playwright-report/

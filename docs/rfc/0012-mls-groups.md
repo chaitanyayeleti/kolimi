@@ -1,7 +1,7 @@
 # RFC 0012: MLS group E2EE (RFC 9420)
 
-Status: implemented (0.3.0); external audit pending · Last verified:
-0.3.0 · Depends on: RFC 0007 (E2EE), RFC 0008 (device enrollment),
+Status: implemented (0.3.1); external audit pending · Last verified:
+0.3.1 · Depends on: RFC 0007 (E2EE), RFC 0008 (device enrollment),
 RFC 0010 (DAV boundary)
 
 > **Client + server hardening (0.3.0):** `crates/kolimi-mls` (openmls 0.9)
@@ -20,9 +20,10 @@ RFC 0010 (DAV boundary)
 > Membership add/remove rotates the keyring, key packages are a consumable
 > pool, keyrings carry a revision, commits are serialized server-side
 > (`BEGIN IMMEDIATE` + an epoch compare-and-swap), consumed/expired key
-> packages are pruned by the janitor, and single-file write shares are
-> supported for sync/desktop and WebDAV (the file node holds its own group;
-> the web UI has no inline editor for a single-file share). The 89 temporary
+> packages are pruned by the janitor, clients report their last processed
+> epoch so old messages/keyrings can be pruned safely, and single-file write
+> shares are supported for sync/desktop and WebDAV (the file node holds its
+> own group; the web UI has no inline editor for a single-file share). The 89 temporary
 > `cargo-vet` exemptions and the review checklist live in
 > [`docs/audit/mls-delta.md`](../audit/mls-delta.md). **External review is
 > still required before treating MLS as audited.**
@@ -104,6 +105,8 @@ mls_messages (id, node_id, seq, epoch, kind, payload BLOB, sender_id,
               created_at, UNIQUE(node_id, seq))
 mls_share_keyrings (node_id, epoch, payload BLOB, updated_by, updated_at,
                     revision, PRIMARY KEY(node_id, epoch))
+mls_member_epochs (node_id, user_id, device_id, last_epoch, updated_at,
+                   PRIMARY KEY(node_id, user_id, device_id))
 ```
 
 The server validates shapes/sizes, orders messages, prevents epoch
@@ -135,9 +138,8 @@ regression, and stores blobs. It never parses MLS plaintext.
   after removal (integration test).
 - A stolen old epoch state cannot derive the next exporter secret (vector
   test).
-- Web/desktop interop: browser read/write/reload and the sync recipient
-  flow are covered by wasm and integration tests. A full browser E2E suite
-  for rename/delete/revoke/migration is still pending.
+- Web/desktop interop: browser read/write/reload, sync recipient flows, and
+  a Playwright suite for web rename/delete/share/revoke/migration/reset.
 - Server sees only opaque payloads; no plaintext names/keys in logs.
 - Fuzz the keyring parser (landed as `fuzz/fuzz_targets/mls_keyring.rs`);
   message-parser and state-transition fuzzing are still pending.

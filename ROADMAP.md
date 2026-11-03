@@ -1,6 +1,6 @@
 # Kolimi Roadmap
 
-Current release: **0.3.0** (2026-10-24). This file is the forward-looking
+Current release: **0.3.1** (2026-11-03). This file is the forward-looking
 backlog and the honest list of limitations. Shipped history lives in
 [CHANGELOG.md](CHANGELOG.md); design details live in [docs/rfc/](docs/rfc/).
 
@@ -17,7 +17,7 @@ backlog and the honest list of limitations. Shipped history lives in
 5. **No speculative platform work.** A plugin host or extra backend is
    added only with a concrete use case.
 
-## Current state (0.3.0)
+## Current state (0.3.1)
 
 | Area | Status |
 | --- | --- |
@@ -25,10 +25,10 @@ backlog and the honest list of limitations. Shipped history lives in
 | CalDAV / CardDAV | Discovery, collections, multiget, filters, `sync-collection` |
 | Delta sync | `kolimi-sync` CLI, desktop app, FFI core; chunk-level deltas, conflicts, shared mounts |
 | E2EE v1/v2 | Per-file keys, encrypted names, sharing, device enrollment, browser/sync/desktop clients |
-| MLS group E2EE | Node-scoped groups, membership add/remove, epoch keyring, folder + single-file write shares, serialized commits, key-package pool, web/desktop/CLI |
+| MLS group E2EE | Node-scoped groups, membership add/remove, epoch keyring, folder + single-file write shares, serialized commits, key-package/message janitor, web/desktop/CLI |
 | Auth | Passwords, passkeys, passwordless accounts, TOTP, sessions, CSRF, lockout, rate limiting |
 | Operations | Backup/verify, hash-chained audit log, Prometheus metrics, OTel traces, quotas, janitor |
-| Packaging | Release tarballs (gnu/musl/aarch64), `.deb`, multi-arch GHCR, Helm, AUR, AppImage, desktop `.deb` |
+| Packaging | Release tarballs (gnu/musl/aarch64), `.deb`, multi-arch GHCR, Helm, AUR, AppImage; desktop `.deb`/AppImage, Windows `.msi`/NSIS and macOS `.dmg` |
 
 E2EE is **alpha** and MLS is **not externally audited**. That is the main
 ship-blocker for calling group E2EE production-grade.
@@ -39,23 +39,22 @@ ship-blocker for calling group E2EE production-grade.
 
 The review package is [`docs/audit/mls-delta.md`](docs/audit/mls-delta.md).
 The 89 openmls `cargo-vet` exemptions (724 total) are temporary and are
-not audits. Freeze the 0.3.0 surface, engage an independent reviewer, land
+not audits. Freeze the 0.3.1 surface, engage an independent reviewer, land
 only fixes during the review, then replace the exemptions with real audit
 entries. Do not describe MLS as audited before this completes.
 
 ### 2. MLS operational hardening
 
-- **State-loss recovery UX**: `--mls-reset` clears corrupt/lost device
-  state and the docs describe re-adding; a guided flow and automatic
-  re-join are still missing.
-- **Janitor**: consumed/expired key packages are pruned after seven days;
-  old MLS messages are retained until per-member epoch tracking exists.
-- **Browser E2E** for web rename, delete, revoke and the migration UI
-  (read/write/reload is covered today; no committed browser suite).
+- **Automatic MLS re-join**: `--mls-reset` and the web reset button guide a
+  manual re-add; automatically re-establishing every group after state loss
+  is still open.
 - **Concurrent committers**: commits are serialized server-side and the
   loser gets `409`; client-side same-epoch fork detection and automatic
   recovery remain.
-- **Deployment validation**: upgrade from 0.2.x to 0.3.0 with real data,
+- **MLS message retention tuning**: per-device epoch reports now drive
+  pruning (7-day grace, 30-day report freshness); review the thresholds
+  with the external auditor.
+- **Deployment validation**: upgrade from 0.2.x to 0.3.1 with real data,
   restore drill in CI, and a post-upgrade `verify` run.
 
 ### 3. Clients
@@ -63,7 +62,8 @@ entries. Do not describe MLS as audited before this completes.
 - **Android / F-Droid** first, then iOS: [docs/plans/android.md](docs/plans/android.md)
   and [docs/plans/clients.md](docs/plans/clients.md). The FFI core exists;
   background scheduling and the Compose/SwiftUI shells remain.
-- Desktop Windows/macOS packaging, signing and platform secret-store glue.
+- Desktop Windows/macOS signing/notarization and native autostart glue
+  (bundles and OS keychain storage are in place).
 - **Browser passkey-PRF key wrap** (issue #16): the CLI already uses the OS
   keystore with a `0600` fallback; the web client still keeps enrollment
   and unlocked state only for the tab session. Needs a WebAuthn PRF

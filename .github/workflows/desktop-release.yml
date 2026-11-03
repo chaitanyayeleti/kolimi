@@ -14,14 +14,31 @@ permissions:
 
 jobs:
   build:
-    name: build bundles (deb, AppImage)
-    runs-on: ubuntu-22.04
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    # One release job at a time: the first creates the GitHub release and
+    # the others attach their platform bundles to it.
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-22.04
+            bundles: deb,appimage
+          - name: Windows
+            os: windows-latest
+            bundles: nsis,msi
+          - name: macOS
+            os: macos-latest
+            bundles: app,dmg
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Tauri build dependencies
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
@@ -34,10 +51,10 @@ jobs:
           projectPath: apps/kolimi-desktop
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: "Kolimi Desktop ${{ inputs.tag || github.ref_name }}"
-          releaseBody: "Native Kolimi desktop client — Linux `.deb` and AppImage."
+          releaseBody: "Native Kolimi desktop client — Linux `.deb`/AppImage, Windows `.msi`/NSIS, macOS `.app`/`.dmg`. Windows and macOS builds are unsigned until signing certificates are configured."
           releaseDraft: false
           prerelease: false
-          args: "--bundles deb,appimage"
+          args: "--bundles ${{ matrix.bundles }}"
 
   aur:
     name: AUR update (kolimi-desktop)

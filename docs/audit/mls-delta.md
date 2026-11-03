@@ -1,6 +1,6 @@
 # MLS (RFC 9420) audit delta — package
 
-Status: prepared for review (0.3.0) · Applies to: `crates/kolimi-mls`, `/api/mls`,
+Status: prepared for review (0.3.1) · Applies to: `crates/kolimi-mls`, `/api/mls`,
 sync/desktop client wiring and the web client. **External review has not
 been performed.**
 
@@ -48,9 +48,13 @@ Nothing here is a substitute for the review itself.
   only with `if_epoch == group.epoch`, so a concurrent writer loses
   instead of overwriting newer keys.
 - Unused key packages get a 30-day expiry; the janitor deletes
-  consumed/expired rows after a further seven-day grace period. Protocol
-  messages are retained (no per-member epoch tracking to prove they are no
-  longer needed).
+  consumed/expired rows after a further seven-day grace period.
+- Clients report the last processed epoch per device
+  (`mls_member_epochs`). The janitor prunes protocol messages and keyrings
+  older than seven days and below the minimum fresh report; reports older
+  than 30 days are ignored so an abandoned device cannot block pruning.
+  A device offline longer than 30 days must rejoin rather than replay all
+  history.
 - Message and keyring sizes are capped (256 KiB / 1 MiB); key packages
   64 KiB.
 
@@ -94,12 +98,11 @@ Nothing here is a substitute for the review itself.
 - `crates/kolimi-server/tests/mls.rs`: owner-only init, read-vs-write
   ACLs, epoch rules, keyring conflict, key packages, non-member denial.
 - `crates/kolimi-db/src/mls.rs`: a concurrent-commit test proves exactly
-  one of two same-epoch commits wins; a key-package purge test covers the
-  janitor.
-- `crates/kolimi-ui` wasm tests and the existing integration tests cover
-  browser read/write/reload logic. A full browser E2E suite (Chromium, two
-  authenticated contexts) for web rename/delete/revoke/migration is **not
-  committed yet**.
+  one of two same-epoch commits wins; epoch-report tests cover safe message
+  pruning; a key-package purge test covers the janitor.
+- `browser-e2e/` (Playwright, Chromium): a real server with two users
+  exercises web rename, delete, share, revoke, legacy-share migration to
+  MLS, and the browser MLS reset flow.
 - `crates/kolimi-ui` compiles to wasm32 and passes clippy; `cargo test
   --workspace`, clippy, fmt, vet, audit/deny exceptions and smoke remain
   green.
@@ -109,8 +112,9 @@ Nothing here is a substitute for the review itself.
 1. Key-package lifetime/rotation: unused packages expire after 30 days and
    expired/consumed ones are hidden. Confirm the TTL and pool size are
    appropriate for offline devices.
-2. Message retention/pruning and a per-group message cap; consumed/expired
-   key packages are pruned, but the server keeps every protocol message.
+2. Message retention/pruning now uses per-device epoch reports; review the
+   seven-day grace, the 30-day report freshness cutoff, and whether the
+   minimum-report rule is safe for all client rollback cases.
 3. Any authenticated user can list another user's **public** key packages;
    confirm this matches the add-member threat model.
 4. Device credential binding: a key package is currently bound to a
@@ -132,18 +136,18 @@ Nothing here is a substitute for the review itself.
 - [ ] cargo-vet exemptions/audits for the openmls tree
 - [ ] Fuzz MLS message parsing and client state transitions
 - [ ] Rate-limit `/api/mls/*` and cap per-group messages
-- [x] Janitor pruning for consumed/expired key packages (messages remain)
+- [x] Janitor pruning for consumed/expired key packages
 - [x] Desktop/sync group-state wiring + tests
 - [x] Web group-state wiring + tests (IndexedDB, locked state, reload persistence)
 - [x] Write-share enablement behind a feature flag, with a migration path
-- [ ] Browser E2E suite: web rename, delete, revoke and migration
+- [x] Browser E2E suite: web rename, delete, revoke and migration
 - [x] Membership add/remove, keyring rotation, permission updates
 - [x] Consumable key-package pool and same-epoch keyring revisions
 - [x] Single-file MLS shares, single-file write shares, keyring path updates, web conflict guards
 - [x] Server-side serialization of same-epoch commits
 - [ ] External review signed off; only then treat MLS as audited
-- [x] State-loss recovery via `--mls-reset` + documented re-add (guided UX still open)
-- [ ] Message pruning (needs per-member epoch tracking)
+- [x] Guided state-loss recovery (`--mls-reset` and the web reset button)
+- [x] Message pruning with per-device epoch reports
 
 ## Known limitations
 
@@ -154,5 +158,9 @@ Nothing here is a substitute for the review itself.
 - Removing a member and re-encrypting the keyring is implemented in the
   CLI, desktop and web flows; a removed device keeps old keys/plaintext.
 - Losing the sealed device state (cleared browser storage, deleted
-  `.kolimi`) means losing that device's MLS membership. `--mls-reset`
-  clears the state; a remaining member must re-add the new package.
+  `.kolimi`) means losing that device's MLS membership. `--mls-reset` or
+  the web reset button clears the state; a remaining member must re-add the
+  new package.
+- A device that does not report an epoch for 30 days is ignored when
+  calculating the pruning floor. It may then be too far behind to replay
+  history and must be re-added.

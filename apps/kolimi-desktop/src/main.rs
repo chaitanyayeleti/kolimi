@@ -440,6 +440,29 @@ fn config_path() -> PathBuf {
     config_base().join("kolimi").join("desktop.json")
 }
 
+#[cfg(target_os = "windows")]
+fn config_base() -> PathBuf {
+    std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|_| {
+            std::env::var("USERPROFILE")
+                .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
+        })
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(target_os = "macos")]
+fn config_base() -> PathBuf {
+    std::env::var("HOME")
+        .map(|home| {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+        })
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn config_base() -> PathBuf {
     std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -449,11 +472,16 @@ fn config_base() -> PathBuf {
         })
 }
 
+fn home_dir() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into())
+}
+
 fn expand_home(path: &str) -> String {
     let trimmed = path.trim();
     if let Some(rest) = trimmed.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        return format!("{home}/{rest}");
+        return format!("{}/{rest}", home_dir());
     }
     trimmed.to_string()
 }
@@ -578,12 +606,14 @@ fn save_settings_file(settings: &Settings) -> Result<(), String> {
 // Autostart
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "linux")]
 fn autostart_path() -> PathBuf {
     config_base()
         .join("autostart")
         .join("kolimi-desktop.desktop")
 }
 
+#[cfg(target_os = "linux")]
 fn set_autostart(enabled: bool) -> Result<(), String> {
     let path = autostart_path();
     if enabled {
@@ -613,6 +643,17 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// Autostart integration is currently Linux-only (XDG autostart).
+#[cfg(not(target_os = "linux"))]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    if enabled {
+        eprintln!(
+            "kolimi-desktop: autostart is not wired on this platform yet; launch Kolimi at login manually"
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

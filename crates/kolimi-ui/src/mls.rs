@@ -139,6 +139,38 @@ async fn idb_set(key: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn idb_delete(key: &str) -> Result<(), String> {
+    let db = open_db().await?;
+    let transaction = db
+        .transaction_with_str_and_mode(STORE, web_sys::IdbTransactionMode::Readwrite)
+        .map_err(|_| "IndexedDB transaction failed".to_string())?;
+    let store = transaction
+        .object_store(STORE)
+        .map_err(|_| "IndexedDB store failed".to_string())?;
+    let request = store
+        .delete(&JsValue::from_str(key))
+        .map_err(|_| "IndexedDB delete failed".to_string())?;
+    JsFuture::from(request_promise(&request))
+        .await
+        .map_err(|_| "IndexedDB delete failed".to_string())?;
+    Ok(())
+}
+
+async fn delete_db() -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "no browser window".to_string())?;
+    let factory = window
+        .indexed_db()
+        .map_err(|_| "IndexedDB is unavailable".to_string())?
+        .ok_or_else(|| "IndexedDB is unavailable".to_string())?;
+    let request = factory
+        .delete_database(DB_NAME)
+        .map_err(|_| "could not open IndexedDB".to_string())?;
+    JsFuture::from(request_promise(&request))
+        .await
+        .map_err(|_| "could not delete IndexedDB".to_string())?;
+    Ok(())
+}
+
 fn slot(master: &MasterKey) -> String {
     // A short, non-secret account fingerprint so several accounts in one
     // browser don't overwrite each other's state.
@@ -185,6 +217,40 @@ async fn save_state(master: &MasterKey, state: &State) -> Result<(), String> {
         .seal_local(&plain, STATE_AAD)
         .map_err(|_| "could not seal MLS state".to_string())?;
     idb_set(&slot(master), &STANDARD.encode(blob)).await
+}
+
+/// Deletes this browser's sealed MLS state.
+///
+/// With an unlocked master key, only this account's slot is removed. When
+/// the key is unavailable (the usual state-loss case), the whole browser
+/// MLS database is cleared. The caller must warn the user and explain the
+/// re-add flow; the E2EE keyring and sync state are untouched.
+pub async fn reset_state(master: Option<&MasterKey>) -> Result<bool, String> {
+    if let Some(master) = master {
+        let key = slot(master);
+        let existed = idb_get(&key).await?.is_some();
+        idb_delete(&key).await?;
+        if let Some(storage) = storage() {
+            let _ = storage.remove_item(&key);
+        }
+        Ok(existed)
+    } else {
+        delete_db().await?;
+        if let Some(storage) = storage() {
+            let mut keys = Vec::new();
+            for index in 0..storage.length().unwrap_or(0) {
+                if let Ok(Some(key)) = storage.key(index)
+                    && key.starts_with(STATE_KEY)
+                {
+                    keys.push(key);
+                }
+            }
+            for key in keys {
+                let _ = storage.remove_item(&key);
+            }
+        }
+        Ok(true)
+    }
 }
 
 async fn load_or_create(master: &MasterKey) -> Result<State, String> {
@@ -413,6 +479,7 @@ async fn fetch_group(path: &str) -> Result<Option<RemoteGroup>, String> {
 async fn join_or_load(
     state: &mut State,
     master: &MasterKey,
+    path: &str,
     remote: &RemoteGroup,
 ) -> Result<Group, String> {
     let mut group = match Group::load(&state.device, &remote.group_id) {
@@ -470,6 +537,17 @@ async fn join_or_load(
         state.groups.push(remote.group_id.clone());
         save_state(master, state).await?;
     }
+    // Advisory: lets the server prune history without blocking the UI if
+    // the endpoint is unavailable or the server is older.
+    let _ = api::send_json(
+        "POST",
+        &format!("/api/mls/epoch?path={}", encode(path)),
+        &json!({
+            "device_id": state.device.device_id(),
+            "epoch": group.epoch(),
+        }),
+    )
+    .await;
     Ok(group)
 }
 
@@ -516,7 +594,7 @@ pub async fn decrypt_shared_file(
         return Err("this share has no MLS group".to_string());
     };
     let mut state = load_or_create(master).await?;
-    let group = join_or_load(&mut state, master, &remote).await?;
+    let group = join_or_load(&mut state, master, server_path, &remote).await?;
     let (keyring, _revision) = open_keyring(&group, &state.device, &remote)?;
     let rel = server_path
         .strip_prefix(&mount.mount)
@@ -561,7 +639,7 @@ async fn ancestor_group(
     loop {
         if let Some(remote) = fetch_group(&current).await? {
             let mut state = load_or_create(master).await?;
-            let group = join_or_load(&mut state, master, &remote).await?;
+            let group = join_or_load(&mut state, master, &current, &remote).await?;
             return Ok(Some((current, group, remote)));
         }
         let Some((parent, _)) = current.rsplit_once('/') else {
@@ -635,7 +713,7 @@ pub async fn record_owned_file_key(
             return Err("the MLS group disappeared".to_string());
         };
         remote = fresh;
-        group = join_or_load(&mut state, master, &remote).await?;
+        group = join_or_load(&mut state, master, &root, &remote).await?;
     }
     Err("share keyring stayed busy after retries".to_string())
 }
@@ -703,7 +781,7 @@ async fn take_path_prefix(
             return Err("the MLS group disappeared".to_string());
         };
         remote = fresh;
-        group = join_or_load(&mut state, master, &remote).await?;
+        group = join_or_load(&mut state, master, &root, &remote).await?;
     }
     Err("share keyring stayed busy after retries".to_string())
 }
@@ -880,7 +958,7 @@ pub async fn remove_recipients(
         return Ok(0);
     };
     let mut state = load_or_create(master).await?;
-    let mut group = join_or_load(&mut state, master, &remote).await?;
+    let mut group = join_or_load(&mut state, master, path, &remote).await?;
     let indices: Vec<u32> = group
         .members()
         .into_iter()
@@ -994,7 +1072,7 @@ pub async fn share_folder(
         }
     }
     if let Some(mut remote) = remote {
-        let mut group = join_or_load(&mut state, master, &remote).await?;
+        let mut group = join_or_load(&mut state, master, path, &remote).await?;
         let old_epoch = group.epoch();
         let old_keyring = open_keyring(&group, &state.device, &remote)
             .ok()
@@ -1024,7 +1102,7 @@ pub async fn share_folder(
                 return Err("the MLS group disappeared".to_string());
             };
             remote = fresh;
-            group = join_or_load(&mut state, master, &remote).await?;
+            group = join_or_load(&mut state, master, path, &remote).await?;
         }
         let mut revision = 0;
         if let Ok((existing, current_revision)) = open_keyring(&group, &state.device, &remote) {
@@ -1191,7 +1269,7 @@ pub async fn upload_shared(
         return Err("this share has no MLS group".to_string());
     };
     let mut state = load_or_create(master).await?;
-    let group = join_or_load(&mut state, master, &remote).await?;
+    let group = join_or_load(&mut state, master, &target, &remote).await?;
     let (keyring, _revision) = open_keyring(&group, &state.device, &remote)?;
     let rel = target
         .strip_prefix(&mount.mount)

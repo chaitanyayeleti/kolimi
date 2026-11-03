@@ -54,6 +54,8 @@ pub(crate) struct MlsClient {
     keyrings: BTreeMap<Vec<u8>, (u64, ShareKeyring)>,
     groups_cache: BTreeMap<String, RemoteGroup>,
     mounts: Option<Vec<ReceivedMount>>,
+    /// Highest epoch reported to the server in this pass, per group.
+    reported_epochs: BTreeMap<Vec<u8>, u64>,
 }
 
 impl MlsClient {
@@ -81,6 +83,7 @@ impl MlsClient {
             keyrings: BTreeMap::new(),
             groups_cache: BTreeMap::new(),
             mounts: None,
+            reported_epochs: BTreeMap::new(),
         })
     }
 
@@ -227,7 +230,7 @@ impl MlsClient {
     /// Ensures the local group is joined and at the server's epoch.
     async fn ensure_group(
         &mut self,
-        _http: &Http,
+        http: &Http,
         master: &MasterKey,
         server_path: &str,
         remote: &RemoteGroup,
@@ -299,9 +302,50 @@ impl MlsClient {
                 remote.epoch
             )));
         }
+        self.report_epoch(http, server_path, &group_id, group.epoch())
+            .await;
         self.groups.insert(group_id);
         self.save(master)?;
         Ok(group)
+    }
+
+    /// Reports the processed epoch so the server can prune old messages.
+    ///
+    /// Advisory: a missing endpoint or a rejected report must not break
+    /// syncing. The next pass retries if the server still needs it.
+    async fn report_epoch(&mut self, http: &Http, server_path: &str, group_id: &[u8], epoch: u64) {
+        if self
+            .reported_epochs
+            .get(group_id)
+            .is_some_and(|reported| *reported >= epoch)
+        {
+            return;
+        }
+        let path = format!("/api/mls/epoch?path={}", encode(server_path));
+        match http
+            .post_json(
+                &path,
+                &serde_json::json!({
+                    "device_id": self.device.device_id(),
+                    "epoch": epoch,
+                }),
+            )
+            .await
+        {
+            Ok((204, _)) => {
+                self.reported_epochs.insert(group_id.to_vec(), epoch);
+            }
+            Ok((404, _)) => {}
+            Ok((status, body)) => {
+                eprintln!(
+                    "kolimi-sync: epoch report for {server_path} failed ({status}): {}",
+                    body["error"].as_str().unwrap_or_default()
+                );
+            }
+            Err(error) => {
+                eprintln!("kolimi-sync: epoch report for {server_path} failed: {error}");
+            }
+        }
     }
 
     /// Loads and decrypts the current share keyring for a path, if the

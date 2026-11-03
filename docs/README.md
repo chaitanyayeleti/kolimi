@@ -3,7 +3,7 @@
 This page is the map. The top-level [README](../README.md) is the product
 overview and quick start; everything below goes deeper.
 
-Last full verification: **0.3.0** (2026-10-25).
+Last full verification: **0.3.1** (2026-11-03).
 
 ## Start here
 
@@ -81,3 +81,8 @@ the source of truth for what has and has not been reviewed.
 `scripts/check-docs.sh` (also run in CI) verifies that relative links
 resolve, every RFC appears in the RFC index, and current-facing guides do
 not reintroduce known stale claims. Run it before sending a docs change.
+
+`browser-e2e/` (Playwright) drives the real web UI against a fixture server
+for rename, delete, share/revoke, MLS migration and reset. It runs in the
+`browser (Playwright)` CI job; build the UI and server binaries first when
+running it locally.

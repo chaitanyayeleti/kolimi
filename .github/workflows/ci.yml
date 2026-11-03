@@ -158,18 +158,55 @@ jobs:
           curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/s/sometoken | grep -q 200
           kill %1
 
+  browser:
+    name: browser (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: browser-e2e/package-lock.json
+      - run: chmod +x scripts/build-ui.sh && scripts/build-ui.sh
+      - run: cargo build -p kolimi-server -p kolimi-sync
+      - run: npm ci --prefix browser-e2e
+      - run: npx --prefix browser-e2e playwright install --with-deps chromium
+      - run: npm --prefix browser-e2e test
+
   desktop:
-    name: desktop (Tauri)
+    name: desktop (${{ matrix.name }})
     needs: changes
     if: needs.changes.outputs.desktop == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            bundles: deb
+          - name: Windows
+            os: windows-latest
+            bundles: nsis
+          - name: macOS
+            os: macos-latest
+            bundles: app
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/kolimi-desktop
-      - name: Install Tauri build dependencies
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
@@ -179,9 +216,9 @@ jobs:
         with:
           tool: tauri-cli
       - run: cargo test --locked --manifest-path apps/kolimi-desktop/Cargo.toml
-      - name: Packaging check (.deb)
+      - name: Packaging check (${{ matrix.bundles }})
         working-directory: apps/kolimi-desktop
-        run: cargo tauri build --bundles deb
+        run: cargo tauri build --bundles ${{ matrix.bundles }}
 
   packaging:
     name: packaging (deb, helm, install smoke)

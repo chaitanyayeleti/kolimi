@@ -87,6 +87,86 @@ impl Db {
         .await?)
     }
 
+    /// Records the epoch this device has successfully processed.
+    ///
+    /// Reports are monotonic: a stale report cannot lower the recorded epoch.
+    /// A report for an epoch beyond the group's current epoch is rejected.
+    pub async fn report_mls_epoch(
+        &self,
+        node_id: i64,
+        user_id: i64,
+        device_id: &str,
+        epoch: i64,
+    ) -> Result<bool, DbError> {
+        let Some(group) = self.mls_group(node_id).await? else {
+            return Err(DbError::NotFound("mls group".to_string()));
+        };
+        if epoch < 0 || epoch > group.epoch {
+            return Err(DbError::Conflict(format!(
+                "epoch {epoch} is outside the group epoch 0..={}",
+                group.epoch
+            )));
+        }
+        let result = sqlx::query(
+            "INSERT INTO mls_member_epochs (node_id, user_id, device_id, last_epoch, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, user_id, device_id) DO UPDATE SET
+                 last_epoch = MAX(mls_member_epochs.last_epoch, excluded.last_epoch),
+                 updated_at = excluded.updated_at",
+        )
+        .bind(node_id)
+        .bind(user_id)
+        .bind(device_id)
+        .bind(epoch)
+        .bind(now_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Prunes MLS protocol messages and old keyrings.
+    ///
+    /// `message_cutoff` is the age floor (messages newer than this are kept),
+    /// and `report_cutoff` ignores stale device reports so an abandoned
+    /// device cannot block pruning forever. A node is pruned only when at
+    /// least one fresh report exists and every fresh reporter is past the
+    /// deleted epochs.
+    pub async fn prune_mls_messages(
+        &self,
+        message_cutoff: i64,
+        report_cutoff: i64,
+    ) -> Result<(u64, u64), DbError> {
+        let messages = sqlx::query(
+            "DELETE FROM mls_messages
+             WHERE created_at < ?
+               AND epoch < COALESCE((
+                   SELECT MIN(e.last_epoch) FROM mls_member_epochs e
+                   WHERE e.node_id = mls_messages.node_id
+                     AND e.updated_at >= ?
+               ), 0)",
+        )
+        .bind(message_cutoff)
+        .bind(report_cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        let keyrings = sqlx::query(
+            "DELETE FROM mls_share_keyrings
+             WHERE updated_at < ?
+               AND epoch < COALESCE((
+                   SELECT MIN(e.last_epoch) FROM mls_member_epochs e
+                   WHERE e.node_id = mls_share_keyrings.node_id
+                     AND e.updated_at >= ?
+               ), 0)",
+        )
+        .bind(message_cutoff)
+        .bind(report_cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok((messages, keyrings))
+    }
+
     /// Removes consumed or expired key packages older than `cutoff`.
     ///
     /// Consumed packages are never served again; expired ones are already
@@ -408,6 +488,52 @@ mod tests {
         let left = db.mls_key_packages(user).await.unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].device_id, "live");
+    }
+
+    #[tokio::test]
+    async fn epoch_reports_allow_safe_message_pruning() {
+        let (_dir, db, user) = test_db().await;
+        let root = db.root_node(user).await.unwrap();
+        db.init_mls_group(root.id, b"group-id").await.unwrap();
+        for epoch in 1..=4 {
+            db.append_mls_message(root.id, epoch, "commit", b"commit", user)
+                .await
+                .unwrap();
+        }
+
+        // Without reports, nothing is pruned.
+        let now = now_millis();
+        let (messages, _) = db
+            .prune_mls_messages(now + 1_000, now - 1_000)
+            .await
+            .unwrap();
+        assert_eq!(messages, 0);
+        assert_eq!(db.mls_messages(root.id, 0, 10).await.unwrap().len(), 4);
+
+        // A device at epoch 2 protects everything from epoch 2 onward.
+        assert!(
+            db.report_mls_epoch(root.id, user, "device-a", 2)
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            db.report_mls_epoch(root.id, user, "device-a", 5).await,
+            Err(DbError::Conflict(_))
+        ));
+        assert!(matches!(
+            db.report_mls_epoch(root.id, user, "device-a", -1).await,
+            Err(DbError::Conflict(_))
+        ));
+
+        let (messages, keyrings) = db
+            .prune_mls_messages(now + 1_000, now - 1_000)
+            .await
+            .unwrap();
+        assert_eq!(messages, 1, "only the epoch below the minimum report goes");
+        assert_eq!(keyrings, 0);
+        let left = db.mls_messages(root.id, 0, 10).await.unwrap();
+        assert_eq!(left.len(), 3);
+        assert_eq!(left[0].epoch, 2);
     }
 
     #[tokio::test]

@@ -222,6 +222,46 @@ async fn group_state_acl_epochs_and_share_keyring() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
+    // Devices report their processed epoch for safe pruning. A read member
+    // may report; a non-member may not, and an ahead epoch is rejected.
+    let report = json!({ "device_id": "bob-laptop", "epoch": 0 })
+        .to_string()
+        .into_bytes();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/mls/epoch?path=%2FShared%20with%20me%2FTeam",
+        "bob",
+        Some(report.clone()),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/mls/epoch?path=%2FShared%20with%20me%2FTeam",
+        "bob",
+        Some(
+            json!({ "device_id": "bob-laptop", "epoch": 2 })
+                .to_string()
+                .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/mls/epoch?path=%2FTeam",
+        "carol",
+        Some(report),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     // Keyring writes are epoch-guarded.
     let (status, _) = send(
         &app,
