@@ -18,8 +18,11 @@ RFC 0010 (DAV boundary)
 > still read. Write shares are opt-in in sync/desktop and on by default in
 > the web UI (IndexedDB; localStorage kill switch `kolimi-mls=0`).
 > Membership add/remove rotates the keyring, key packages are a consumable
-> pool, keyrings carry a revision, and single-file shares use a group on the
-> file node. The 89 temporary
+> pool, keyrings carry a revision, commits are serialized server-side
+> (`BEGIN IMMEDIATE` + an epoch compare-and-swap), consumed/expired key
+> packages are pruned by the janitor, and single-file write shares are
+> supported for sync/desktop and WebDAV (the file node holds its own group;
+> the web UI has no inline editor for a single-file share). The 89 temporary
 > `cargo-vet` exemptions and the review checklist live in
 > [`docs/audit/mls-delta.md`](../audit/mls-delta.md). **External review is
 > still required before treating MLS as audited.**
@@ -132,8 +135,9 @@ regression, and stores blobs. It never parses MLS plaintext.
   after removal (integration test).
 - A stolen old epoch state cannot derive the next exporter secret (vector
   test).
-- Web/desktop interop: a browser creates a group, a sync recipient reads
-  and writes, and the owner reads the recipient's file (browser E2E).
+- Web/desktop interop: browser read/write/reload and the sync recipient
+  flow are covered by wasm and integration tests. A full browser E2E suite
+  for rename/delete/revoke/migration is still pending.
 - Server sees only opaque payloads; no plaintext names/keys in logs.
 - Fuzz the keyring parser (landed as `fuzz/fuzz_targets/mls_keyring.rs`);
   message-parser and state-transition fuzzing are still pending.
@@ -153,9 +157,11 @@ regression, and stores blobs. It never parses MLS plaintext.
 - `openmls` API/version churn and wasm provider support.
 - Asynchronous commits: a member can be several epochs behind; the client
   must replay commits/welcomes in order.
-- Two clients committing at the same epoch can fork a group. The current
-  design assumes one active committer per membership change; fork
-  detection/repair is still open.
+- Two clients committing at the same epoch are serialized server-side:
+  the second commit gets a `409`, so only one epoch-N+1 transcript is
+  accepted. A client that had already advanced its **local** group state
+  still needs recovery (reset and re-add), and same-epoch fork detection
+  beyond the epoch number is still open.
 - Multi-device membership can make groups large; bound devices per user.
 - Revocation is still not a remote wipe: a device that already holds old
   file keys retains them. Future epochs are protected.

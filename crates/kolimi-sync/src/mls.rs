@@ -104,8 +104,17 @@ impl MlsClient {
         // Keep a small pool so two groups can be shared before the next
         // pass. The server filters consumed/expired packages.
         let (status, body) = http.get_json("/api/mls/key-packages").await?;
+        let device_id = self.device.device_id();
         let have = if status == 200 {
-            body["packages"].as_array().map_or(0, Vec::len) as i64
+            body["packages"]
+                .as_array()
+                .map(|packages| {
+                    packages
+                        .iter()
+                        .filter(|package| package["device_id"].as_str() == Some(&device_id))
+                        .count()
+                })
+                .unwrap_or(0) as i64
         } else {
             0
         };

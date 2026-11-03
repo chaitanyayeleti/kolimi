@@ -473,3 +473,107 @@ async fn encrypted_single_file_share_uses_mls() {
     );
     server.handle.abort();
 }
+
+#[tokio::test]
+async fn reset_and_reshare_recovers_lost_mls_state() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let alice_dir = root.path().join("alice");
+    let bob_dir = root.path().join("bob");
+    std::fs::create_dir_all(alice_dir.join("Private/Team")).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
+    setup_keyring(&server.url, "alice", &alice_dir).await;
+    setup_keyring(&server.url, "bob", &bob_dir).await;
+    let alice = config(&server.url, "alice", &alice_dir);
+    let bob = config(&server.url, "bob", &bob_dir);
+    sync_once(&bob).await.unwrap();
+
+    std::fs::write(alice_dir.join("Private/Team/a.txt"), b"before").unwrap();
+    sync_once(&alice).await.unwrap();
+    share_path_with_permission(
+        &alice,
+        "/",
+        "Private/Team",
+        ShareTarget::User("bob".to_string()),
+        SharePermission::Read,
+    )
+    .await
+    .unwrap();
+    sync_once(&bob).await.unwrap();
+    assert_eq!(
+        std::fs::read(bob_dir.join("Shared with me/Team/a.txt")).unwrap(),
+        b"before"
+    );
+
+    // Lose/corrupt the sealed MLS state, then publish a fresh key package.
+    assert!(
+        kolimi_sync::mls_store::MlsStore::new(&bob_dir)
+            .reset()
+            .unwrap()
+    );
+    // This pass publishes the new package but cannot read the old group's
+    // files until an existing member re-adds the new device.
+    let first = sync_once(&bob).await;
+    assert!(first.is_err() || first.as_ref().unwrap().pulled == 0);
+
+    // Re-sharing adds the new device at a new epoch; the next sync reads
+    // content added after the recovery.
+    share_path_with_permission(
+        &alice,
+        "/",
+        "Private/Team",
+        ShareTarget::User("bob".to_string()),
+        SharePermission::Read,
+    )
+    .await
+    .unwrap();
+    std::fs::write(alice_dir.join("Private/Team/a.txt"), b"after recovery").unwrap();
+    sync_once(&alice).await.unwrap();
+    sync_once(&bob).await.unwrap();
+    assert_eq!(
+        std::fs::read(bob_dir.join("Shared with me/Team/a.txt")).unwrap(),
+        b"after recovery"
+    );
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn encrypted_single_file_write_share_roundtrips() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let alice_dir = root.path().join("alice");
+    let bob_dir = root.path().join("bob");
+    std::fs::create_dir_all(alice_dir.join("Private")).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
+    setup_keyring(&server.url, "alice", &alice_dir).await;
+    setup_keyring(&server.url, "bob", &bob_dir).await;
+    let alice = config(&server.url, "alice", &alice_dir);
+    let bob = config(&server.url, "bob", &bob_dir);
+    sync_once(&bob).await.unwrap();
+
+    std::fs::write(alice_dir.join("Private/secret.bin"), b"original").unwrap();
+    sync_once(&alice).await.unwrap();
+    let wrapped = share_path_with_permission(
+        &alice,
+        "/",
+        "Private/secret.bin",
+        ShareTarget::User("bob".to_string()),
+        SharePermission::Write,
+    )
+    .await
+    .unwrap();
+    assert_eq!(wrapped, 0, "single-file MLS shares use the keyring");
+
+    sync_once(&bob).await.unwrap();
+    let shared = bob_dir.join("Shared with me/secret.bin");
+    assert_eq!(std::fs::read(&shared).unwrap(), b"original");
+
+    std::fs::write(&shared, b"edited by bob").unwrap();
+    sync_once(&bob).await.unwrap();
+    sync_once(&alice).await.unwrap();
+    assert_eq!(
+        std::fs::read(alice_dir.join("Private/secret.bin")).unwrap(),
+        b"edited by bob"
+    );
+    server.handle.abort();
+}

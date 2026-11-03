@@ -614,11 +614,39 @@ impl Vfs {
         }
         // Mount-aware: a write-recipient commits into the owner's tree, and
         // chunks/manifests live in the owner's blob namespace.
-        let (access, name) = self.resolve_parent_access(caller_id, raw).await?;
-        access.perm.require(crate::Perm::Write)?;
-        let owner_id = access.owner_id;
-        let parent = access.node;
-        let owner_path = self.change_path(owner_id, parent.id, &name).await?;
+        //
+        // A write share of a **single file** is addressed by the file itself
+        // (the mount root), not by a parent directory, so resolve that case
+        // directly. A mount root that is a directory is a folder share and
+        // must use the normal parent path (which also prevents replacing the
+        // shared folder itself).
+        let existing_access = self.stat_access(caller_id, raw).await?;
+        let (owner_id, parent_id, name, owner_path) = match &existing_access {
+            Some(access) if access.is_mount_root => {
+                access.perm.require(crate::Perm::Write)?;
+                if access.node.is_dir() {
+                    return Err(VfsError::IsCollection);
+                }
+                let parent_id = access.node.parent_id.ok_or(VfsError::Root)?;
+                let owner_path = self
+                    .change_path(access.owner_id, parent_id, &access.node.name)
+                    .await?;
+                (
+                    access.owner_id,
+                    parent_id,
+                    access.node.name.clone(),
+                    owner_path,
+                )
+            }
+            _ => {
+                let (access, name) = self.resolve_parent_access(caller_id, raw).await?;
+                access.perm.require(crate::Perm::Write)?;
+                let owner_path = self
+                    .change_path(access.owner_id, access.node.id, &name)
+                    .await?;
+                (access.owner_id, access.node.id, name, owner_path)
+            }
+        };
         // Encrypted folders must receive a wrapped key with the content.
         // A file without one would be unreadable ciphertext, and accepting
         // it would also let a plaintext client write into an encrypted tree.
@@ -628,10 +656,7 @@ impl Vfs {
                     .to_string(),
             ));
         }
-        let current = self
-            .stat_access(caller_id, raw)
-            .await?
-            .map(|access| access.node);
+        let current = existing_access.map(|access| access.node);
         // Whether the file already had a wrapped key decides whether its old
         // version history is ciphertext (safe to keep) or plaintext (must be
         // purged below).
@@ -663,11 +688,11 @@ impl Vfs {
         // node can reference it.
         self.store.put_manifest(owner_id, manifest).await?;
         let existing = match &current {
-            Some(_) => self.db.find_child(owner_id, parent.id, &name).await?,
+            Some(_) => self.db.find_child(owner_id, parent_id, &name).await?,
             None => None,
         };
         let node = self
-            .finalize_put_at(owner_id, parent.id, &name, existing, manifest)
+            .finalize_put_at(owner_id, parent_id, &name, existing, manifest)
             .await?;
         if let Some(wrapped) = wrapped_key {
             self.db.set_file_key(owner_id, node.id, wrapped).await?;

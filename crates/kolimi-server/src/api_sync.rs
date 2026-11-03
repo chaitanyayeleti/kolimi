@@ -398,6 +398,39 @@ pub async fn get_chunk(
     }
 }
 
+/// Resolves the tree owner for a chunk upload.
+///
+/// A write share of a single file addresses the file itself (the mount
+/// root), while a new file or a child of a shared folder resolves through
+/// its parent. Both paths must have write permission.
+#[allow(clippy::result_large_err)]
+async fn chunk_owner(state: &AppState, user: &CurrentUser, path: &str) -> Result<i64, Response> {
+    let existing = match state.vfs.stat_access(user.user_id, path).await {
+        Ok(existing) => existing,
+        Err(_) => return Err(internal_error()),
+    };
+    if let Some(access) = existing
+        && access.is_mount_root
+    {
+        if !access.perm.allows(kolimi_vfs::Perm::Write) {
+            return Err(forbidden("write access is required"));
+        }
+        if access.node.is_dir() {
+            return Err(bad_request("not a file"));
+        }
+        return Ok(access.owner_id);
+    }
+    let (access, _name) = match state.vfs.resolve_parent_access(user.user_id, path).await {
+        Ok(value) => value,
+        Err(VfsError::NotFound) => return Err(not_found()),
+        Err(_) => return Err(internal_error()),
+    };
+    if !access.perm.allows(kolimi_vfs::Perm::Write) {
+        return Err(forbidden("write access is required"));
+    }
+    Ok(access.owner_id)
+}
+
 /// `PUT /api/chunks/{hash}` — idempotent chunk upload (also completes
 /// interrupted uploads: already-present chunks return 204).
 pub async fn put_chunk(
@@ -419,20 +452,13 @@ pub async fn put_chunk(
     }
     // A write recipient uploads into the owner's blob namespace; chunks must
     // be readable by the owner after the commit.
-    let mut owner_id = user.user_id;
-    if let Some(path) = query.path.as_deref() {
-        // The file may not exist yet (first upload), so resolve the parent;
-        // this also maps a write share to the owner's tree.
-        let (access, _name) = match state.vfs.resolve_parent_access(user.user_id, path).await {
-            Ok(value) => value,
-            Err(VfsError::NotFound) => return not_found(),
-            Err(_) => return internal_error(),
-        };
-        if !access.perm.allows(kolimi_vfs::Perm::Write) {
-            return forbidden("write access is required");
-        }
-        owner_id = access.owner_id;
-    }
+    let owner_id = match query.path.as_deref() {
+        Some(path) => match chunk_owner(&state, &user, path).await {
+            Ok(owner_id) => owner_id,
+            Err(response) => return response,
+        },
+        None => user.user_id,
+    };
     let existed = state.vfs.read_chunk(owner_id, &hash).await.is_ok();
     match state.vfs.write_chunk(owner_id, &hash, &bytes).await {
         Ok(()) if existed => StatusCode::NO_CONTENT.into_response(),
@@ -468,18 +494,13 @@ pub async fn chunks_exist(
     if request.hashes.len() > MAX_CHUNK_QUERY {
         return bad_request("too many chunk hashes");
     }
-    let mut owner_id = user.user_id;
-    if let Some(path) = request.path.as_deref() {
-        let (access, _name) = match state.vfs.resolve_parent_access(user.user_id, path).await {
-            Ok(value) => value,
-            Err(VfsError::NotFound) => return not_found(),
-            Err(_) => return internal_error(),
-        };
-        if !access.perm.allows(kolimi_vfs::Perm::Write) {
-            return forbidden("write access is required");
-        }
-        owner_id = access.owner_id;
-    }
+    let owner_id = match request.path.as_deref() {
+        Some(path) => match chunk_owner(&state, &user, path).await {
+            Ok(owner_id) => owner_id,
+            Err(response) => return response,
+        },
+        None => user.user_id,
+    };
     let mut missing: Vec<String> = Vec::new();
     for raw in request.hashes {
         // An unparseable hash cannot be present: hand it back so the upload

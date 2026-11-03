@@ -102,13 +102,16 @@ sync client for E2EE content (`kolimi-sync --share … --with bob|--group team`)
 - **Encrypted files** use v1/v2 per-file wrapping when MLS is off: the
   owner wraps the file key for each recipient, and the recipient decrypts
   on the next sync. With MLS enabled, a single file gets its own node
-  group; legacy wraps stay readable. Write shares are folder-only.
+  group; legacy wraps stay readable.
 - **Encrypted folders** use MLS when the client enables it (`--mls`, web
   default on, desktop pair option). The group is node-scoped; adding or
   removing a member advances the epoch and re-encrypts the share keyring.
 - **Write shares** (`--write`, or permission *write* in the share dialog)
-  let a recipient add/edit/delete files inside the folder. Single-file MLS
-  shares are read-only.
+  work for encrypted folders and single files. A folder writer can
+  add/edit/delete children through the web UI, desktop or CLI. A
+  single-file writer can replace the file through the CLI/desktop or a
+  WebDAV `PUT`, but cannot delete the share root; the web UI currently
+  downloads single-file shares without an inline editor.
 - `--unshare` / **Revoke** removes the ACL, drops the recipient's leaves
   for MLS, and rotates the keyring. Removing a **group** member deletes
   their v1 wrapped keys and revokes group-share access, but MLS membership
@@ -301,18 +304,20 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   Without MLS, the owner wraps the file key for each recipient.
   Recipients pull a decrypted copy under `Shared with me/`. `--group team`
   wraps for every group member. With `--mls`, the file gets its own node
-  group (read-only).
+  group; add `--write` to let the recipient replace it.
 
 - **Encrypted folders (MLS):**
 
   ```sh
   kolimi-sync ... --mls --share Private/Team --with bob
   kolimi-sync ... --mls --write --share Private/Team --with bob
+  kolimi-sync ... --mls --write --share Private/doc.txt --with bob
   ```
 
   The owner creates a node-scoped MLS group and an epoch-bound keyring.
   Bob joins from the Welcome on his next sync. `--write` allows edits;
-  without it the share is read-only. Single-file MLS shares are read-only.
+  without it the share is read-only. Write shares work for folders and
+  single files (the file is replaced in place).
 
   The web UI enables MLS for encrypted folder shares by default (set
   `localStorage["kolimi-mls"]="0"` to disable). The desktop pair needs
@@ -340,6 +345,22 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   The web UI has a **Devices** panel for the same flow. `--e2ee-forget-device`
   removes local key material; the device must be enrolled again.
 
+- **Lost or corrupt MLS state:** delete only the sealed MLS state and let
+  the next sync create a new MLS device:
+
+  ```sh
+  kolimi-sync ... --mls-reset
+  kolimi-sync ... --mls --e2ee-root Private   # publishes a new key package
+  ```
+
+  The first sync after a reset may report that a share has no Welcome for
+  the new device. On an existing member, re-share each affected encrypted
+  folder (`--mls --share … --with <user>`) so the new device is added at a
+  new epoch and receives the rotated keyring. The old device leaf remains
+  until it is removed/re-shared; a removed member keeps any plaintext or
+  keys already downloaded. In the browser, clearing the site's IndexedDB
+  has the same effect — re-add the browser from another member.
+
 ### Limitations
 
 - **MLS is not externally audited.** See
@@ -348,12 +369,17 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
 - A removed member keeps plaintext and file keys already downloaded. The
   epoch rotation protects new keyrings/files, not the past.
 - Losing the sealed device state (or deleting browser IndexedDB) loses the
-  device's group membership. A remaining member must re-add it.
-- Concurrent committers can fork a group; the current design assumes one
-  active committer per membership change. Treat a detected fork as an
-  incident and re-create/re-share the group.
-- There is no automatic janitor pruning for consumed/expired key packages
-  and old MLS messages yet.
+  device's group membership. `--mls-reset` clears the local state; a
+  remaining member must re-add the new device.
+- Concurrent commits are serialized by the server: the second commit at
+  the same parent epoch gets `409`. A client that already advanced its
+  local state before that rejection must reset and be re-added; same-epoch
+  fork detection beyond the epoch number is still open.
+- Unused MLS key packages expire after 30 days; the janitor removes
+  consumed/expired rows after a further seven-day grace period. MLS
+  protocol messages are retained indefinitely because the server cannot
+  prove every member has replayed them; message pruning needs per-member
+  epoch tracking.
 
 ## Recovery secrets
 

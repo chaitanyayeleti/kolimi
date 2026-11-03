@@ -4,6 +4,29 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Concurrent MLS commits**: message appends now run in a `BEGIN IMMEDIATE`
+  transaction and a commit advances the epoch with a compare-and-swap. Two
+  commits at the same parent epoch can no longer both land; the loser gets
+  `409` instead of forking the group.
+- **Single-file write shares**: `PUT /api/files` (manifest commits), chunk
+  upload/existence and file-key writes now address a single-file mount root
+  correctly, and sync treats a writable single-file mount as a file rather
+  than an empty folder. A recipient can replace the shared file; the owner
+  sees the edit.
+- **MLS state recovery**: `kolimi-sync --mls-reset` deletes only the sealed
+  MLS state (not the E2EE keyring or sync state) so a corrupt/lost device
+  can re-publish a key package and be re-added. The key-package pool now
+  counts only the current device, so an old device's full pool no longer
+  prevents the new device from publishing.
+
+### Changed
+- **MLS janitor**: unused key packages expire after 30 days; the janitor
+  prunes consumed/expired rows after a further seven days. Protocol
+  messages remain until per-member epoch tracking exists.
+
 ## [0.3.0] - 2026-10-24
 
 ### Added

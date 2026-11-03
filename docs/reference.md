@@ -110,12 +110,16 @@ Sharing / MLS:
 | `--write` | Create a write share (implies `--mls`) |
 | `--update-permission` | Change an existing share to `--write`/read |
 | `--mls-migrate` | Promote existing encrypted folder shares to MLS |
+| `--mls-reset` | Delete this device's sealed MLS state (recovery) |
 | `--mls-status PATH` | Print epoch and members for a path |
 
 Notes:
 
-- A write share is supported for encrypted folders. Single-file MLS shares
-  are read-only.
+- A write share is supported for encrypted folders and single files. A
+  folder writer can add/edit/delete children; a single-file writer can
+  replace the file through the CLI/desktop or WebDAV `PUT` but cannot
+  delete the share root. The web UI downloads single-file shares; it has
+  no inline editor for them.
 - The recipient must have unlocked once (web, desktop or CLI) so a key
   package is published; otherwise the share fails with a clear error.
 - For legacy v1/v2 per-file shares, `--share` wraps the file key for the

@@ -24,6 +24,8 @@ use kolimi_vfs::{Perm, VfsError};
 const MAX_KEY_PACKAGE: usize = 64 * 1024;
 const MAX_MESSAGE: usize = 256 * 1024;
 const MAX_KEYRING: usize = 1024 * 1024;
+/// Unused key packages expire so abandoned devices cannot accumulate.
+const MLS_KEY_PACKAGE_TTL_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Deserialize)]
 pub struct PathQuery {
@@ -105,9 +107,12 @@ pub async fn put_key_package(
     if payload.is_empty() || payload.len() > MAX_KEY_PACKAGE {
         return api::bad_request("key package size");
     }
+    let expires_at = req
+        .expires_at
+        .or_else(|| Some(kolimi_db::now_millis() + MLS_KEY_PACKAGE_TTL_MILLIS));
     match state
         .db
-        .set_mls_key_package(user.user_id, req.device_id.trim(), &payload, req.expires_at)
+        .set_mls_key_package(user.user_id, req.device_id.trim(), &payload, expires_at)
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),

@@ -122,6 +122,12 @@ struct Cli {
     #[arg(long)]
     mls_migrate: bool,
 
+    /// Delete this device's sealed MLS state (recovery after corruption or
+    /// state loss). A later sync publishes a new key package; an existing
+    /// member must re-share each folder to add the new device.
+    #[arg(long = "mls-reset")]
+    mls_reset: bool,
+
     /// Print the MLS epoch and members for a path.
     #[arg(long = "mls-status", value_name = "PATH")]
     mls_status: Option<String>,
@@ -220,6 +226,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             println!("this device had no local key material");
         }
+        return Ok(());
+    }
+
+    if cli.mls_reset {
+        let removed = kolimi_sync::mls_store::MlsStore::new(&config.local_dir).reset()?;
+        if removed {
+            println!("removed this device's sealed MLS state");
+        } else {
+            println!("this device had no sealed MLS state");
+        }
+        println!(
+            "Run a sync to publish a new MLS key package, then have an existing member re-share each encrypted folder to add this device."
+        );
         return Ok(());
     }
 

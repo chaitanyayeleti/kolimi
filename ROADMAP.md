@@ -25,7 +25,7 @@ backlog and the honest list of limitations. Shipped history lives in
 | CalDAV / CardDAV | Discovery, collections, multiget, filters, `sync-collection` |
 | Delta sync | `kolimi-sync` CLI, desktop app, FFI core; chunk-level deltas, conflicts, shared mounts |
 | E2EE v1/v2 | Per-file keys, encrypted names, sharing, device enrollment, browser/sync/desktop clients |
-| MLS group E2EE | Node-scoped groups, membership add/remove, epoch keyring, write shares, key-package pool, web/desktop/CLI |
+| MLS group E2EE | Node-scoped groups, membership add/remove, epoch keyring, folder + single-file write shares, serialized commits, key-package pool, web/desktop/CLI |
 | Auth | Passwords, passkeys, passwordless accounts, TOTP, sessions, CSRF, lockout, rate limiting |
 | Operations | Backup/verify, hash-chained audit log, Prometheus metrics, OTel traces, quotas, janitor |
 | Packaging | Release tarballs (gnu/musl/aarch64), `.deb`, multi-arch GHCR, Helm, AUR, AppImage, desktop `.deb` |
@@ -45,15 +45,16 @@ entries. Do not describe MLS as audited before this completes.
 
 ### 2. MLS operational hardening
 
-- **State-loss recovery** beyond “re-add a new device”: document and test
-  a recovery flow for a lost IndexedDB/`.kolimi` state, with clear limits.
-- **Janitor** for consumed/expired key packages and old MLS messages.
+- **State-loss recovery UX**: `--mls-reset` clears corrupt/lost device
+  state and the docs describe re-adding; a guided flow and automatic
+  re-join are still missing.
+- **Janitor**: consumed/expired key packages are pruned after seven days;
+  old MLS messages are retained until per-member epoch tracking exists.
 - **Browser E2E** for web rename, delete, revoke and the migration UI
-  (read/write/reload is covered today).
-- **Single-file write shares**: MLS single-file shares are read-only;
-  decide whether to support writers or document the limit permanently.
-- **Concurrent committers**: two clients committing at the same epoch can
-  fork a group. Add detection/repair or serialize commits server-side.
+  (read/write/reload is covered today; no committed browser suite).
+- **Concurrent committers**: commits are serialized server-side and the
+  loser gets `409`; client-side same-epoch fork detection and automatic
+  recovery remain.
 - **Deployment validation**: upgrade from 0.2.x to 0.3.0 with real data,
   restore drill in CI, and a post-upgrade `verify` run.
 
@@ -63,6 +64,10 @@ entries. Do not describe MLS as audited before this completes.
   and [docs/plans/clients.md](docs/plans/clients.md). The FFI core exists;
   background scheduling and the Compose/SwiftUI shells remain.
 - Desktop Windows/macOS packaging, signing and platform secret-store glue.
+- **Browser passkey-PRF key wrap** (issue #16): the CLI already uses the OS
+  keystore with a `0600` fallback; the web client still keeps enrollment
+  and unlocked state only for the tab session. Needs a WebAuthn PRF
+  ceremony, a browser E2E test and review.
 - Per-device app passwords for WebDAV/CalDAV clients (today a device uses
   the account password or a passkey session).
 

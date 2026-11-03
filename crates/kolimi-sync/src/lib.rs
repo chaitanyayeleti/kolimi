@@ -950,7 +950,6 @@ pub async fn share_path_with_permission(
             path: info_path,
         });
     }
-    let is_dir = info["kind"].as_str() == Some("dir");
     // Older sync-created folders carry no server-side encrypted flag; the
     // pair's configured encrypted roots are the fallback (same rule pull
     // uses for a mixed account).
@@ -965,9 +964,9 @@ pub async fn share_path_with_permission(
                 "write shares require MLS; enable it first (E2eeOptions::mls)".to_string(),
             ));
         }
-        if !is_dir || !encrypted {
+        if !encrypted {
             return Err(SyncError::E2ee(
-                "write shares are supported for encrypted folders only".to_string(),
+                "write shares are supported for encrypted content only".to_string(),
             ));
         }
     }
@@ -2303,6 +2302,8 @@ struct SharedName {
     permission: String,
     /// Whether the mount is an encrypted folder.
     encrypted: bool,
+    /// `"file"` or `"dir"` (single-file shares have no child name key).
+    kind: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -2355,25 +2356,35 @@ async fn load_shared_names(http: &Http, e2ee: Option<&E2ee>) -> Result<Vec<Share
             key,
             permission: mount["permission"].as_str().unwrap_or("read").to_string(),
             encrypted: mount["encrypted"].as_bool().unwrap_or(false),
+            kind: mount["kind"].as_str().unwrap_or("dir").to_string(),
         });
     }
     Ok(names)
 }
 
-/// A received folder this account may write to through MLS.
+/// A received file or folder this account may write to through MLS.
 struct SharedWriteMount {
     /// Local relative prefix (`Shared with me/<name>`).
     local_prefix: String,
     /// Stored server mount (`/Shared with me/<stored name>`).
     server_prefix: String,
-    /// Name key for the mount's children.
-    key: kolimi_crypto::NameKey,
+    /// Name key for a folder's children; `None` for a single-file share.
+    key: Option<kolimi_crypto::NameKey>,
 }
 
 impl SharedWriteMount {
     /// Encodes a local path inside the mount and returns the server path plus
-    /// the parent directories that must exist first.
+    /// the parent directories that must exist first. A single-file mount has
+    /// no children: the mount path *is* the file.
     fn encode(&self, rel_inside: &str) -> Result<(String, Vec<String>), SyncError> {
+        let Some(key) = self.key.clone() else {
+            if rel_inside.is_empty() {
+                return Ok((self.server_prefix.clone(), Vec::new()));
+            }
+            return Err(SyncError::Protocol(
+                "a single-file share cannot contain children".to_string(),
+            ));
+        };
         let segments: Vec<&str> = rel_inside
             .split('/')
             .filter(|part| !part.is_empty())
@@ -2381,7 +2392,7 @@ impl SharedWriteMount {
         if segments.is_empty() {
             return Err(SyncError::Protocol("empty shared path".to_string()));
         }
-        let mut key = self.key.clone();
+        let mut key = key;
         let mut stored = self.server_prefix.clone();
         let mut parents = Vec::new();
         for (index, segment) in segments.iter().enumerate() {
@@ -2408,11 +2419,15 @@ fn shared_write_mounts(shares: &[SharedName], root: &str) -> Vec<SharedWriteMoun
         .filter_map(|share| {
             let decoded = format!("/{}/{}", SHARED_MOUNT, share.name);
             let local_prefix = relative_to_root(&decoded, root)?;
-            let key = share.key.clone()?;
+            // A file mount has no name key; a folder mount must have one to
+            // encode child names.
+            if share.kind != "file" && share.key.is_none() {
+                return None;
+            }
             Some(SharedWriteMount {
                 local_prefix,
                 server_prefix: share.prefix.clone(),
-                key,
+                key: share.key.clone(),
             })
         })
         .collect()
@@ -2423,6 +2438,10 @@ fn shared_mount_for<'a>(
     rel: &str,
 ) -> Option<(&'a SharedWriteMount, String)> {
     mounts.iter().find_map(|mount| {
+        if mount.key.is_none() {
+            // Single-file share: the mount root itself is the writable file.
+            return (rel == mount.local_prefix).then(|| (mount, String::new()));
+        }
         let rest = rel.strip_prefix(&mount.local_prefix)?;
         let rest = rest.strip_prefix('/')?;
         (!rest.is_empty()).then(|| (mount, rest.to_string()))
@@ -3074,6 +3093,9 @@ async fn push(
         let dir = config.local_dir.join(&mount.local_prefix);
         if dir.is_dir() {
             collect_files(&config.local_dir, &dir, &mut locals, state)?;
+        } else if dir.is_file() && mount.key.is_none() {
+            // A writable single-file share: include the mount itself.
+            locals.push(mount.local_prefix.clone());
         }
     }
     locals.sort();
@@ -3371,6 +3393,10 @@ async fn push(
     for (rel, was_shared) in deleted {
         let target = if was_shared {
             match shared_mount_for(&shared_writes, &rel) {
+                // Recipients cannot delete a share's mount root; for a
+                // single-file share the root *is* the file, so leave it to
+                // the next pull to restore the local copy.
+                Some((mount, _)) if mount.key.is_none() => continue,
                 Some((mount, inside)) => mount.encode(&inside)?.0,
                 None => continue,
             }

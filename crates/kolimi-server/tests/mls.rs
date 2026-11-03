@@ -327,6 +327,10 @@ async fn group_state_acl_epochs_and_share_keyring() {
         packages["packages"][0]["payload"],
         STANDARD.encode(b"key-package")
     );
+    assert!(
+        packages["packages"][0]["expires_at"].as_i64().is_some(),
+        "an unexpired package gets the default TTL"
+    );
     let (status, _) = send(
         &app,
         "GET",
