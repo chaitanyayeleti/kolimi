@@ -86,3 +86,8 @@ not reintroduce known stale claims. Run it before sending a docs change.
 for rename, delete, share/revoke, MLS migration and reset. It runs in the
 `browser (Playwright)` CI job; build the UI and server binaries first when
 running it locally.
+
+CI is path-filtered: documentation-only changes run just this check, while
+code changes run the Rust suite plus the relevant browser, UI, desktop,
+packaging, perf, litmus or fuzz jobs. Use a manual `workflow_dispatch` when
+you need every expensive gate on an otherwise narrow change.
