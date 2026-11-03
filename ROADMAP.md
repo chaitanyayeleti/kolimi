@@ -1,6 +1,6 @@
 # Kolimi Roadmap
 
-Current release: **0.3.1** (2026-11-03). This file is the forward-looking
+Current release: **0.3.1** (2026-11-04). This file is the forward-looking
 backlog and the honest list of limitations. Shipped history lives in
 [CHANGELOG.md](CHANGELOG.md); design details live in [docs/rfc/](docs/rfc/).
 

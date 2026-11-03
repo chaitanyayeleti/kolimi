@@ -4,7 +4,7 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
-## [0.3.1] - 2026-11-03
+## [0.3.1] - 2026-11-04
 
 ### Fixed
 - **Concurrent MLS commits**: message appends now run in a `BEGIN IMMEDIATE`

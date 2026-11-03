@@ -4,7 +4,7 @@ Design specs live here. An RFC explains the problem, protocol, data model
 and non-goals; implementation status is tracked separately so a design can
 be accepted before every client supports it.
 
-Last full verification: **0.3.1** (2026-11-03).
+Last full verification: **0.3.1** (2026-11-04).
 
 | RFC | Design | Implementation (0.3.1) | Notes |
 | --- | --- | --- | --- |
