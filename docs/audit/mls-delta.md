@@ -1,6 +1,6 @@
 # MLS (RFC 9420) audit delta — package
 
-Status: prepared for review (0.3.0) · Applies to: `crates/kolimi-mls`, `/api/mls`,
+Status: prepared for review (0.3.1) · Applies to: `crates/kolimi-mls`, `/api/mls`,
 sync/desktop client wiring and the web client. **External review has not
 been performed.**
 
@@ -40,9 +40,21 @@ Nothing here is a substitute for the review itself.
 - Epochs are monotonic. A commit advances exactly one epoch; proposals,
   welcomes and application messages use the current epoch. Older or future
   epochs are rejected.
+- Message appends run in a `BEGIN IMMEDIATE` transaction and a commit
+  advances the epoch with `UPDATE … WHERE epoch = <parent>`. Two commits at
+  the same parent epoch are serialized: exactly one wins and the other gets
+  a `409`, so the server never accepts a second epoch-N+1 transcript.
 - The share keyring is one ciphertext per `(node, epoch)` and is accepted
   only with `if_epoch == group.epoch`, so a concurrent writer loses
   instead of overwriting newer keys.
+- Unused key packages get a 30-day expiry; the janitor deletes
+  consumed/expired rows after a further seven-day grace period.
+- Clients report the last processed epoch per device
+  (`mls_member_epochs`). The janitor prunes protocol messages and keyrings
+  older than seven days and below the minimum fresh report; reports older
+  than 30 days are ignored so an abandoned device cannot block pruning.
+  A device offline longer than 30 days must rejoin rather than replay all
+  history.
 - Message and keyring sizes are capped (256 KiB / 1 MiB); key packages
   64 KiB.
 
@@ -60,8 +72,10 @@ Nothing here is a substitute for the review itself.
 - The device state carries the MLS signer and openmls key-value storage
   (group secrets). It is sealed with the UMK before persistence:
   `.kolimi/mls-state.bin` is 0600 and atomically replaced on desktop/sync;
-  the web client stores a sealed blob in `localStorage` under an
+  the web client stores a sealed blob in IndexedDB under an
   account-fingerprint slot. Wrong-key and tamper are rejected.
+  `kolimi-sync --mls-reset` deletes only the sealed MLS state; the next
+  sync creates a new device and the recipient must be re-added.
 - Keyring updates use `if_epoch`; a losing writer refetches and retries.
 - A write recipient's chunks and manifests are stored in the owner's blob
   namespace; the ACL is still enforced by the VFS before every write.
@@ -79,23 +93,28 @@ Nothing here is a substitute for the review itself.
   atomic rename), wrong-key and tamper rejection.
 - `crates/kolimi-server/tests/mls_sync.rs`: sync owner share → recipient
   Welcome join → keyring read; write recipient creates/edits/deletes files
-  that the owner decrypts; legacy v1 share migration.
+  that the owner decrypts; single-file write share round-trip; legacy v1
+  share migration; loss/reset → fresh key package → re-share recovery.
 - `crates/kolimi-server/tests/mls.rs`: owner-only init, read-vs-write
   ACLs, epoch rules, keyring conflict, key packages, non-member denial.
-- Browser E2E (Chromium, two authenticated contexts): web owner creates an
-  encrypted folder and MLS group, a web recipient downloads/decrypts the
-  file through the keyring, uploads a file into the write share, and the
-  owner downloads/decrypts the recipient's file.
+- `crates/kolimi-db/src/mls.rs`: a concurrent-commit test proves exactly
+  one of two same-epoch commits wins; epoch-report tests cover safe message
+  pruning; a key-package purge test covers the janitor.
+- `browser-e2e/` (Playwright, Chromium): a real server with two users
+  exercises web rename, delete, share, revoke, legacy-share migration to
+  MLS, and the browser MLS reset flow.
 - `crates/kolimi-ui` compiles to wasm32 and passes clippy; `cargo test
   --workspace`, clippy, fmt, vet, audit/deny exceptions and smoke remain
   green.
 
 ## Open review questions
 
-1. Key-package lifetime/rotation and whether expired packages should be
-   hidden from the list.
-2. Message retention/pruning and a per-group message cap; currently the
-   server keeps every message.
+1. Key-package lifetime/rotation: unused packages expire after 30 days and
+   expired/consumed ones are hidden. Confirm the TTL and pool size are
+   appropriate for offline devices.
+2. Message retention/pruning now uses per-device epoch reports; review the
+   seven-day grace, the 30-day report freshness cutoff, and whether the
+   minimum-report rule is safe for all client rollback cases.
 3. Any authenticated user can list another user's **public** key packages;
    confirm this matches the add-member threat model.
 4. Device credential binding: a key package is currently bound to a
@@ -105,8 +124,10 @@ Nothing here is a substitute for the review itself.
    the web client uses UMK-sealed IndexedDB. Both still need a rollback /
    device-cloning story (a stale state file is detected only by the epoch
    check, not by a monotonic counter).
-6. Concurrent commits: server orders by sequence, but clients must
-   resolve forks; the current design assumes one committer per epoch.
+6. Concurrent commits: the server now rejects the second same-parent
+   commit. A client that advanced its local state before the rejection
+   still needs reset/re-add; whether the epoch CAS is sufficient fork
+   prevention for all client flows should be reviewed.
 7. WebCrypto/provider differences and the wasm `getrandom` shim.
 8. DoS: message/keyring upload rate limits and key-package spam.
 
@@ -115,26 +136,31 @@ Nothing here is a substitute for the review itself.
 - [ ] cargo-vet exemptions/audits for the openmls tree
 - [ ] Fuzz MLS message parsing and client state transitions
 - [ ] Rate-limit `/api/mls/*` and cap per-group messages
-- [ ] Janitor pruning for expired key packages and old messages
+- [x] Janitor pruning for consumed/expired key packages
 - [x] Desktop/sync group-state wiring + tests
 - [x] Web group-state wiring + tests (IndexedDB, locked state, reload persistence)
 - [x] Write-share enablement behind a feature flag, with a migration path
-- [x] Browser E2E: owner share → recipient read → recipient write → owner read
+- [x] Browser E2E suite: web rename, delete, revoke and migration
 - [x] Membership add/remove, keyring rotation, permission updates
 - [x] Consumable key-package pool and same-epoch keyring revisions
-- [x] Single-file MLS shares, keyring path updates, web conflict guards
+- [x] Single-file MLS shares, single-file write shares, keyring path updates, web conflict guards
+- [x] Server-side serialization of same-epoch commits
 - [ ] External review signed off; only then treat MLS as audited
-- [ ] State-loss recovery UX beyond re-adding a new device
-- [ ] Janitor pruning for consumed/expired key packages and stale messages
+- [x] Guided state-loss recovery (`--mls-reset` and the web reset button)
+- [x] Message pruning with per-device epoch reports
 
 ## Known limitations
 
-- `mls_key_packages` is unique per `(user, device_id)`; a device publishes
-  one package at a time. Reuse across multiple groups is not modeled.
+- Key packages are a consumable pool per `(user, device_id)`; clients
+  publish several and consume the ids actually used in a commit.
 - Adding a recipient uses every package currently published; a device that
   never syncs/unlocks cannot be added.
-- Removing a member and re-encrypting the keyring for the new epoch is
-  implemented at the format level but has no UI/CLI workflow yet.
+- Removing a member and re-encrypting the keyring is implemented in the
+  CLI, desktop and web flows; a removed device keeps old keys/plaintext.
 - Losing the sealed device state (cleared browser storage, deleted
-  `.kolimi`) means losing that device's MLS membership; a remaining member
-  must re-add it with a fresh package.
+  `.kolimi`) means losing that device's MLS membership. `--mls-reset` or
+  the web reset button clears the state; a remaining member must re-add the
+  new package.
+- A device that does not report an epoch for 30 days is ignored when
+  calculating the pruning floor. It may then be too far behind to replay
+  history and must be re-added.

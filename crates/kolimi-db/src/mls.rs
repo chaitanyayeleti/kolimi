@@ -87,6 +87,104 @@ impl Db {
         .await?)
     }
 
+    /// Records the epoch this device has successfully processed.
+    ///
+    /// Reports are monotonic: a stale report cannot lower the recorded epoch.
+    /// A report for an epoch beyond the group's current epoch is rejected.
+    pub async fn report_mls_epoch(
+        &self,
+        node_id: i64,
+        user_id: i64,
+        device_id: &str,
+        epoch: i64,
+    ) -> Result<bool, DbError> {
+        let Some(group) = self.mls_group(node_id).await? else {
+            return Err(DbError::NotFound("mls group".to_string()));
+        };
+        if epoch < 0 || epoch > group.epoch {
+            return Err(DbError::Conflict(format!(
+                "epoch {epoch} is outside the group epoch 0..={}",
+                group.epoch
+            )));
+        }
+        let result = sqlx::query(
+            "INSERT INTO mls_member_epochs (node_id, user_id, device_id, last_epoch, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, user_id, device_id) DO UPDATE SET
+                 last_epoch = MAX(mls_member_epochs.last_epoch, excluded.last_epoch),
+                 updated_at = excluded.updated_at",
+        )
+        .bind(node_id)
+        .bind(user_id)
+        .bind(device_id)
+        .bind(epoch)
+        .bind(now_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Prunes MLS protocol messages and old keyrings.
+    ///
+    /// `message_cutoff` is the age floor (messages newer than this are kept),
+    /// and `report_cutoff` ignores stale device reports so an abandoned
+    /// device cannot block pruning forever. A node is pruned only when at
+    /// least one fresh report exists and every fresh reporter is past the
+    /// deleted epochs.
+    pub async fn prune_mls_messages(
+        &self,
+        message_cutoff: i64,
+        report_cutoff: i64,
+    ) -> Result<(u64, u64), DbError> {
+        let messages = sqlx::query(
+            "DELETE FROM mls_messages
+             WHERE created_at < ?
+               AND epoch < COALESCE((
+                   SELECT MIN(e.last_epoch) FROM mls_member_epochs e
+                   WHERE e.node_id = mls_messages.node_id
+                     AND e.updated_at >= ?
+               ), 0)",
+        )
+        .bind(message_cutoff)
+        .bind(report_cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        let keyrings = sqlx::query(
+            "DELETE FROM mls_share_keyrings
+             WHERE updated_at < ?
+               AND epoch < COALESCE((
+                   SELECT MIN(e.last_epoch) FROM mls_member_epochs e
+                   WHERE e.node_id = mls_share_keyrings.node_id
+                     AND e.updated_at >= ?
+               ), 0)",
+        )
+        .bind(message_cutoff)
+        .bind(report_cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok((messages, keyrings))
+    }
+
+    /// Removes consumed or expired key packages older than `cutoff`.
+    ///
+    /// Consumed packages are never served again; expired ones are already
+    /// filtered from reads. Keeping a short grace period preserves useful
+    /// diagnostics without letting the pool grow forever.
+    pub async fn purge_mls_key_packages(&self, cutoff: i64) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "DELETE FROM mls_key_packages
+             WHERE (consumed_at IS NOT NULL AND consumed_at < ?)
+                OR (expires_at IS NOT NULL AND expires_at < ?)",
+        )
+        .bind(cutoff)
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Marks key packages as used so they are never added to another group.
     pub async fn consume_mls_key_packages(&self, ids: &[i64]) -> Result<u64, DbError> {
         let mut consumed = 0u64;
@@ -163,7 +261,10 @@ impl Db {
         if !matches!(kind, "proposal" | "commit" | "welcome" | "application") {
             return Err(DbError::Conflict("invalid mls message kind".to_string()));
         }
-        let mut tx = self.pool.begin().await?;
+        // Serialize writers before reading the epoch. A deferred transaction
+        // could read epoch N, lose the write race, and then commit against a
+        // snapshot that has already advanced.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current: Option<(i64,)> =
             sqlx::query_as("SELECT epoch FROM mls_node_groups WHERE node_id = ?")
                 .bind(node_id)
@@ -204,14 +305,41 @@ impl Db {
         .bind(sender_id)
         .bind(now_millis())
         .execute(&mut *tx)
-        .await?;
-        if kind == "commit" && epoch > current_epoch {
-            sqlx::query("UPDATE mls_node_groups SET epoch = ?, updated_at = ? WHERE node_id = ?")
-                .bind(epoch)
-                .bind(now_millis())
-                .bind(node_id)
-                .execute(&mut *tx)
-                .await?;
+        .await
+        .map_err(|error| {
+            // `MAX(seq) + 1` is computed inside the write transaction, but a
+            // unique violation can still happen if another writer commits
+            // between the read and the insert. Treat it as an optimistic
+            // conflict so the client retries instead of seeing a 500.
+            if let sqlx::Error::Database(database) = &error
+                && database.is_unique_violation()
+            {
+                return DbError::Conflict(
+                    "another MLS message won the sequence; fetch and retry".to_string(),
+                );
+            }
+            DbError::from(error)
+        })?;
+        if kind == "commit" {
+            // Compare-and-swap: only the commit that advances the epoch we
+            // actually read may win. A second concurrent commit at the same
+            // parent epoch rolls back instead of forking the group.
+            let updated = sqlx::query(
+                "UPDATE mls_node_groups
+                 SET epoch = ?, updated_at = ?
+                 WHERE node_id = ? AND epoch = ?",
+            )
+            .bind(epoch)
+            .bind(now_millis())
+            .bind(node_id)
+            .bind(current_epoch)
+            .execute(&mut *tx)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(DbError::Conflict(
+                    "another commit advanced the MLS epoch; fetch the group and retry".to_string(),
+                ));
+            }
         }
         tx.commit().await?;
         Ok(seq)
@@ -330,5 +458,105 @@ impl Db {
         .bind(node_id)
         .fetch_optional(&self.pool)
         .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    async fn test_db() -> (tempfile::TempDir, Db, i64) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::connect(&dir.path().join("test.db")).await.unwrap();
+        let user = db.create_user("alice", "hash").await.unwrap();
+        (dir, db, user.id)
+    }
+
+    #[tokio::test]
+    async fn purge_removes_only_old_key_packages() {
+        let (_dir, db, user) = test_db().await;
+        db.set_mls_key_package(user, "old", b"old", Some(1_000))
+            .await
+            .unwrap();
+        db.set_mls_key_package(user, "live", b"live", None)
+            .await
+            .unwrap();
+
+        assert_eq!(db.purge_mls_key_packages(2_000).await.unwrap(), 1);
+        let left = db.mls_key_packages(user).await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].device_id, "live");
+    }
+
+    #[tokio::test]
+    async fn epoch_reports_allow_safe_message_pruning() {
+        let (_dir, db, user) = test_db().await;
+        let root = db.root_node(user).await.unwrap();
+        db.init_mls_group(root.id, b"group-id").await.unwrap();
+        for epoch in 1..=4 {
+            db.append_mls_message(root.id, epoch, "commit", b"commit", user)
+                .await
+                .unwrap();
+        }
+
+        // Without reports, nothing is pruned.
+        let now = now_millis();
+        let (messages, _) = db
+            .prune_mls_messages(now + 1_000, now - 1_000)
+            .await
+            .unwrap();
+        assert_eq!(messages, 0);
+        assert_eq!(db.mls_messages(root.id, 0, 10).await.unwrap().len(), 4);
+
+        // A device at epoch 2 protects everything from epoch 2 onward.
+        assert!(
+            db.report_mls_epoch(root.id, user, "device-a", 2)
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            db.report_mls_epoch(root.id, user, "device-a", 5).await,
+            Err(DbError::Conflict(_))
+        ));
+        assert!(matches!(
+            db.report_mls_epoch(root.id, user, "device-a", -1).await,
+            Err(DbError::Conflict(_))
+        ));
+
+        let (messages, keyrings) = db
+            .prune_mls_messages(now + 1_000, now - 1_000)
+            .await
+            .unwrap();
+        assert_eq!(messages, 1, "only the epoch below the minimum report goes");
+        assert_eq!(keyrings, 0);
+        let left = db.mls_messages(root.id, 0, 10).await.unwrap();
+        assert_eq!(left.len(), 3);
+        assert_eq!(left[0].epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_commits_cannot_fork_the_epoch() {
+        let (_dir, db, user) = test_db().await;
+        let root = db.root_node(user).await.unwrap();
+        db.init_mls_group(root.id, b"group-id").await.unwrap();
+
+        let (first, second) = tokio::join!(
+            db.append_mls_message(root.id, 1, "commit", b"first", user),
+            db.append_mls_message(root.id, 1, "commit", b"second", user),
+        );
+        let success = usize::from(first.is_ok()) + usize::from(second.is_ok());
+        assert_eq!(success, 1, "exactly one commit may advance the epoch");
+        assert!(
+            matches!(first, Err(DbError::Conflict(_)))
+                || matches!(second, Err(DbError::Conflict(_)))
+        );
+
+        let group = db.mls_group(root.id).await.unwrap().unwrap();
+        assert_eq!(group.epoch, 1);
+        let messages = db.mls_messages(root.id, 0, 10).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].epoch, 1);
     }
 }

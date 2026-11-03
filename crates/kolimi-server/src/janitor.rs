@@ -26,6 +26,13 @@ pub const SCRUB_BATCH: usize = 200;
 /// Usage counters recomputed from disk per pass (bounded; least-recently
 /// reconciled users first).
 pub const RECONCILE_BATCH: i64 = 50;
+/// Consumed/expired MLS key packages are retained this long for diagnostics.
+pub const MLS_KEY_PACKAGE_RETENTION_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// A device that has not reported its epoch for this long is ignored when
+/// calculating the safe pruning floor.
+pub const MLS_EPOCH_REPORT_FRESH_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Old MLS protocol messages/keyrings are kept at least this long.
+pub const MLS_MESSAGE_RETENTION_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// What one janitor pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +49,12 @@ pub struct Report {
     pub expired_link_sessions: u64,
     /// Expired device enrollments removed.
     pub expired_enrollments: u64,
+    /// Consumed/expired MLS key packages removed.
+    pub pruned_mls_key_packages: u64,
+    /// MLS protocol messages below the safe epoch floor.
+    pub pruned_mls_messages: u64,
+    /// MLS keyrings below the safe epoch floor.
+    pub pruned_mls_keyrings: u64,
     /// Blobs re-verified by the scrubber.
     pub scrubbed: u64,
     /// Blobs found corrupt by the scrubber.
@@ -84,6 +97,17 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
     }
     report.expired_link_sessions = state.db.delete_expired_link_sessions(now).await?;
     report.expired_enrollments = state.db.purge_expired_enrollments().await?;
+    report.pruned_mls_key_packages = state
+        .db
+        .purge_mls_key_packages(now - MLS_KEY_PACKAGE_RETENTION_MILLIS)
+        .await?;
+    (report.pruned_mls_messages, report.pruned_mls_keyrings) = state
+        .db
+        .prune_mls_messages(
+            now - MLS_MESSAGE_RETENTION_MILLIS,
+            now - MLS_EPOCH_REPORT_FRESH_MILLIS,
+        )
+        .await?;
 
     // Recompute a bounded batch of usage counters from *referenced* bytes so
     // the cached numbers cannot drift; the request path never walks the tree.
@@ -147,6 +171,9 @@ pub async fn run(state: AppState) {
                     manifests_deleted = report.manifests_deleted,
                     expired_link_sessions = report.expired_link_sessions,
                     expired_enrollments = report.expired_enrollments,
+                    pruned_mls_key_packages = report.pruned_mls_key_packages,
+                    pruned_mls_messages = report.pruned_mls_messages,
+                    pruned_mls_keyrings = report.pruned_mls_keyrings,
                     scrubbed = report.scrubbed,
                     corrupt = report.corrupt,
                     reconciled = report.reconciled,

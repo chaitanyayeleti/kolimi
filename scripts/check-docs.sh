@@ -69,6 +69,11 @@ stale = {
     "docs/operations.md": [
         "Not implemented: MLS",
         "tray.json",
+        "Single-file MLS shares are read-only",
+        "Write shares are folder-only",
+    ],
+    "docs/reference.md": [
+        "Single-file MLS shares are read-only",
     ],
     "docs/architecture.md": [
         "14 crates",

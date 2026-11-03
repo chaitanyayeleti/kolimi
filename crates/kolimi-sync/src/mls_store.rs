@@ -45,6 +45,24 @@ impl MlsStore {
         Ok(Some((device, groups)))
     }
 
+    /// Deletes the sealed state and any interrupted-write temp file.
+    ///
+    /// The next sync creates a new MLS device and publishes a fresh key
+    /// package. Existing group members must re-add that device (re-share the
+    /// folder) before it can read the share again. Returns `true` when a
+    /// state file existed.
+    pub fn reset(&self) -> Result<bool, SyncError> {
+        let mut removed = false;
+        for path in [&self.path, &self.path.with_extension("bin.tmp")] {
+            match std::fs::remove_file(path) {
+                Ok(()) => removed = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(removed)
+    }
+
     /// Seals and writes the device state (and the group ids it manages).
     pub fn save(
         &self,
@@ -102,5 +120,19 @@ mod tests {
         // A different master key must not decrypt the file.
         let other = MasterKey::generate().unwrap();
         assert!(store.load(&other).is_err());
+    }
+
+    #[test]
+    fn reset_removes_state_and_reports_whether_it_existed() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = MasterKey::generate().unwrap();
+        let device = Device::new(b"alice@laptop").unwrap();
+        let store = MlsStore::new(dir.path());
+        store.save(&master, &device, &[]).unwrap();
+        assert!(store.load(&master).unwrap().is_some());
+
+        assert!(store.reset().unwrap());
+        assert!(store.load(&master).unwrap().is_none());
+        assert!(!store.reset().unwrap());
     }
 }

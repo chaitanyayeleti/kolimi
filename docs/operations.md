@@ -102,13 +102,16 @@ sync client for E2EE content (`kolimi-sync --share … --with bob|--group team`)
 - **Encrypted files** use v1/v2 per-file wrapping when MLS is off: the
   owner wraps the file key for each recipient, and the recipient decrypts
   on the next sync. With MLS enabled, a single file gets its own node
-  group; legacy wraps stay readable. Write shares are folder-only.
+  group; legacy wraps stay readable.
 - **Encrypted folders** use MLS when the client enables it (`--mls`, web
   default on, desktop pair option). The group is node-scoped; adding or
   removing a member advances the epoch and re-encrypts the share keyring.
 - **Write shares** (`--write`, or permission *write* in the share dialog)
-  let a recipient add/edit/delete files inside the folder. Single-file MLS
-  shares are read-only.
+  work for encrypted folders and single files. A folder writer can
+  add/edit/delete children through the web UI, desktop or CLI. A
+  single-file writer can replace the file through the CLI/desktop or a
+  WebDAV `PUT`, but cannot delete the share root; the web UI currently
+  downloads single-file shares without an inline editor.
 - `--unshare` / **Revoke** removes the ACL, drops the recipient's leaves
   for MLS, and rotates the keyring. Removing a **group** member deletes
   their v1 wrapped keys and revokes group-share access, but MLS membership
@@ -301,18 +304,20 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   Without MLS, the owner wraps the file key for each recipient.
   Recipients pull a decrypted copy under `Shared with me/`. `--group team`
   wraps for every group member. With `--mls`, the file gets its own node
-  group (read-only).
+  group; add `--write` to let the recipient replace it.
 
 - **Encrypted folders (MLS):**
 
   ```sh
   kolimi-sync ... --mls --share Private/Team --with bob
   kolimi-sync ... --mls --write --share Private/Team --with bob
+  kolimi-sync ... --mls --write --share Private/doc.txt --with bob
   ```
 
   The owner creates a node-scoped MLS group and an epoch-bound keyring.
   Bob joins from the Welcome on his next sync. `--write` allows edits;
-  without it the share is read-only. Single-file MLS shares are read-only.
+  without it the share is read-only. Write shares work for folders and
+  single files (the file is replaced in place).
 
   The web UI enables MLS for encrypted folder shares by default (set
   `localStorage["kolimi-mls"]="0"` to disable). The desktop pair needs
@@ -340,6 +345,27 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   The web UI has a **Devices** panel for the same flow. `--e2ee-forget-device`
   removes local key material; the device must be enrolled again.
 
+- **Lost or corrupt MLS state:** delete only the sealed MLS state and let
+  the next sync create a new MLS device:
+
+  ```sh
+  kolimi-sync ... --mls-reset            # asks you to type "reset"
+  kolimi-sync ... --mls-reset --yes      # non-interactive
+  kolimi-sync ... --mls --e2ee-root Private   # publishes a new key package
+  ```
+
+  The first sync after a reset may report that a share has no Welcome for
+  the new device. On an existing member, re-share each affected encrypted
+  folder (`--mls --share … --with <user>`) so the new device is added at a
+  new epoch and receives the rotated keyring. The old device leaf remains
+  until it is removed/re-shared; a removed member keeps any plaintext or
+  keys already downloaded.
+
+  In the browser, use **Settings → Encryption → Reset this browser's MLS
+  state** (also confirms first). It deletes only this browser's sealed MLS
+  slot; the E2EE keyring, recovery phrase and files are untouched. Re-add
+  the browser from another member the same way.
+
 ### Limitations
 
 - **MLS is not externally audited.** See
@@ -348,12 +374,21 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
 - A removed member keeps plaintext and file keys already downloaded. The
   epoch rotation protects new keyrings/files, not the past.
 - Losing the sealed device state (or deleting browser IndexedDB) loses the
-  device's group membership. A remaining member must re-add it.
-- Concurrent committers can fork a group; the current design assumes one
-  active committer per membership change. Treat a detected fork as an
-  incident and re-create/re-share the group.
-- There is no automatic janitor pruning for consumed/expired key packages
-  and old MLS messages yet.
+  device's group membership. `--mls-reset` clears the local state; a
+  remaining member must re-add the new device.
+- Concurrent commits are serialized by the server: the second commit at
+  the same parent epoch gets `409`. A client that already advanced its
+  local state before that rejection must reset and be re-added; same-epoch
+  fork detection beyond the epoch number is still open.
+- Unused MLS key packages expire after 30 days; the janitor removes
+  consumed/expired rows after a further seven-day grace period.
+- Clients report the last epoch they processed (`POST /api/mls/epoch`).
+  The janitor removes messages and keyrings below the minimum fresh report
+  after a seven-day grace period. A device that has not reported for 30
+  days is ignored, so an offline device older than that must rejoin rather
+  than replay the whole history.
+- A device that has already lost its local state cannot report; re-add it
+  with the reset flow above.
 
 ## Recovery secrets
 
@@ -383,7 +418,9 @@ member.
   server's `/app/` UI, with a tray and background sync. Sign in to one or
   more accounts and add several synced folders per account from the in-app
   **Accounts & Sync** window (tray → *Accounts & Sync…*). It writes
-  `~/.config/kolimi/desktop.json`:
+  `desktop.json` under the platform config directory:
+  `~/.config/kolimi/` on Linux, `%APPDATA%\kolimi\` on Windows, and
+  `~/Library/Application Support/kolimi/` on macOS.
 
   ```json
   {
@@ -410,7 +447,9 @@ member.
   Each **pair** mirrors one local folder to a remote subfolder (`remote`,
   default the account root `/`). Sync runs at startup, every five minutes,
   and on demand. Closing the window hides it to the tray; *Quit* exits.
-  Autostart launches it hidden (`--hidden`).
+  Autostart launches it hidden (`--hidden`). The autostart checkbox is
+  implemented with XDG autostart on Linux; on Windows/macOS use the OS
+  login-item settings until native integration lands.
 
   The account password and E2EE passphrase are kept in the **system
   keychain** (Secret Service via zbus on Linux; Credential Manager /
@@ -456,7 +495,7 @@ forward-only; back up first and do not downgrade across a migration.
 | Sync reports conflicts | Expected when both sides edited a file: the server version wins and your edit is kept as `name.conflict-<ts>`. |
 | “no MLS key package” / recipient cannot decrypt | The recipient has not unlocked once with MLS enabled. Have them open the web UI or run `kolimi-sync` once, then re-share. |
 | MLS keyring 409 / “stayed busy” | Another device updated the same epoch keyring. Retry; the clients already retry a bounded number of times. If it persists, check for two active committers. |
-| MLS state lost after clearing storage | IndexedDB/`.kolimi` is the device's group state; it cannot be reconstructed. Re-add the device with `--e2ee-enroll` or re-share the folder. |
+| MLS state lost after clearing storage | IndexedDB/`.kolimi` is the device's group state; it cannot be reconstructed. Use **Settings → Encryption → Reset this browser's MLS state** (web) or `--mls-reset --yes`, then have a member re-share the folder. |
 | Server won't start after upgrade | Restore the pre-upgrade backup (migrations are forward-only). |
 | Disk filling on a Docker host | The BuildKit build cache and old images dominate. Inspect with `docker system df -v`; bound with `docker builder prune --keep-storage 6GB` and `docker image prune -a`. App data is the `kolimi-data` volume. |
 

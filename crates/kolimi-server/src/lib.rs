@@ -263,6 +263,7 @@ pub fn build_app(state: AppState) -> Router {
             get(api_mls::get_group).put(api_mls::init_group),
         )
         .route("/api/mls/messages", post(api_mls::post_message))
+        .route("/api/mls/epoch", post(api_mls::post_epoch))
         .route("/api/mls/keyring", put(api_mls::put_keyring))
         .route(
             "/api/e2ee/enrollments",

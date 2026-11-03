@@ -45,12 +45,16 @@ separate workflows but should be tagged together when both changed.
 
 1. Checks the desktop lockfile with
    `cargo metadata --locked --manifest-path apps/kolimi-desktop/Cargo.toml`.
-2. Builds `.deb` and AppImage bundles with Tauri and attaches them to a
-   GitHub release.
+2. Builds one release per platform, serially so the release exists before
+   assets are attached:
+   - Linux (Ubuntu 22.04): `.deb` and AppImage;
+   - Windows (`windows-latest`): `.msi` and NSIS `-setup.exe`;
+   - macOS (`macos-latest`): `.app` and `.dmg`.
 3. Updates the `kolimi-desktop` AUR package when `AUR_SSH_KEY` is present.
 
-The desktop client has its own workspace and lockfile; it is not built by
-the server workspace.
+Windows and macOS bundles are **unsigned** until signing certificates are
+configured; SmartScreen/Gatekeeper warnings are expected. The desktop client
+has its own workspace and lockfile; it is not built by the server workspace.
 
 ## Version bump checklist
 

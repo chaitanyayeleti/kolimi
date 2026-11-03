@@ -426,9 +426,11 @@ async fn writable_file(
         Err(kolimi_vfs::VfsError::NotFound) => return Err(api::not_found()),
         Err(_) => return Err(api::internal_error()),
     };
-    if !access.perm.allows(kolimi_vfs::Perm::Write) || access.is_mount_root {
+    if !access.perm.allows(kolimi_vfs::Perm::Write) {
         return Err(api::forbidden("write access is required"));
     }
+    // A single-file write share is addressed at the mount root; a folder
+    // mount root is not a file and is rejected below.
     if access.node.is_dir() {
         return Err(api::bad_request("not a file"));
     }

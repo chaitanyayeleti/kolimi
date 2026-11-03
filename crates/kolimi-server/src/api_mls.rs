@@ -24,6 +24,8 @@ use kolimi_vfs::{Perm, VfsError};
 const MAX_KEY_PACKAGE: usize = 64 * 1024;
 const MAX_MESSAGE: usize = 256 * 1024;
 const MAX_KEYRING: usize = 1024 * 1024;
+/// Unused key packages expire so abandoned devices cannot accumulate.
+const MLS_KEY_PACKAGE_TTL_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Deserialize)]
 pub struct PathQuery {
@@ -76,6 +78,12 @@ pub struct MessageRequest {
     payload: String,
 }
 
+#[derive(Deserialize)]
+pub struct EpochRequest {
+    device_id: String,
+    epoch: i64,
+}
+
 async fn access(
     state: &AppState,
     user: &CurrentUser,
@@ -105,9 +113,12 @@ pub async fn put_key_package(
     if payload.is_empty() || payload.len() > MAX_KEY_PACKAGE {
         return api::bad_request("key package size");
     }
+    let expires_at = req
+        .expires_at
+        .or_else(|| Some(kolimi_db::now_millis() + MLS_KEY_PACKAGE_TTL_MILLIS));
     match state
         .db
-        .set_mls_key_package(user.user_id, req.device_id.trim(), &payload, req.expires_at)
+        .set_mls_key_package(user.user_id, req.device_id.trim(), &payload, expires_at)
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -318,6 +329,78 @@ pub async fn post_message(
         .await
     {
         Ok(seq) => Json(json!({ "seq": seq })).into_response(),
+        Err(kolimi_db::DbError::Conflict(message)) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
+        }
+        Err(kolimi_db::DbError::NotFound(_)) => api::not_found(),
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// Finds the nearest ancestor (or the node itself) that owns an MLS group.
+///
+/// Reports arrive for a file inside a shared folder as well as for the
+/// share root, so a plain `access.node.id` is not enough.
+async fn group_node(
+    state: &AppState,
+    user: &CurrentUser,
+    path: &str,
+) -> Result<kolimi_vfs::Access, Response> {
+    let mut current = path.trim_end_matches('/').to_string();
+    loop {
+        let access = access(state, user, &current).await?;
+        if state
+            .db
+            .mls_group(access.node.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Ok(access);
+        }
+        let Some((parent, _)) = current.rsplit_once('/') else {
+            return Err(api::not_found());
+        };
+        if parent.is_empty() {
+            return Err(api::not_found());
+        }
+        current = parent.to_string();
+    }
+}
+
+/// `POST /api/mls/epoch?path=` — record this device's last processed epoch.
+///
+/// The janitor uses the minimum fresh report to decide which protocol
+/// messages are still needed; reporting is advisory and never changes the
+/// group state.
+pub async fn post_epoch(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<PathQuery>,
+    Json(req): Json<EpochRequest>,
+) -> Response {
+    let access = match group_node(&state, &user, &query.path).await {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
+    if req.device_id.trim().is_empty() || req.device_id.len() > 64 {
+        return api::bad_request("device_id must be 1–64 bytes");
+    }
+    if req.epoch < 0 {
+        return api::bad_request("epoch must be non-negative");
+    }
+    match state
+        .db
+        .report_mls_epoch(
+            access.node.id,
+            user.user_id,
+            req.device_id.trim(),
+            req.epoch,
+        )
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(kolimi_db::DbError::Conflict(message)) => {
             (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
         }

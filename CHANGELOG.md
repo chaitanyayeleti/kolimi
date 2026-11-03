@@ -4,6 +4,45 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-11-04
+
+### Fixed
+- **Concurrent MLS commits**: message appends now run in a `BEGIN IMMEDIATE`
+  transaction and a commit advances the epoch with a compare-and-swap. Two
+  commits at the same parent epoch can no longer both land; the loser gets
+  `409` instead of forking the group.
+- **Single-file write shares**: `PUT /api/files` (manifest commits), chunk
+  upload/existence and file-key writes now address a single-file mount root
+  correctly, and sync treats a writable single-file mount as a file rather
+  than an empty folder. A recipient can replace the shared file; the owner
+  sees the edit.
+- **MLS state recovery**: `kolimi-sync --mls-reset` deletes only the sealed
+  MLS state (not the E2EE keyring or sync state) so a corrupt/lost device
+  can re-publish a key package and be re-added. The key-package pool now
+  counts only the current device, so an old device's full pool no longer
+  prevents the new device from publishing.
+
+### Added
+- **Guided MLS recovery**: `kolimi-sync --mls-reset` asks for confirmation
+  (`--yes` for automation), and the web UI has **Settings → Encryption →
+  Reset this browser's MLS state**. Both explain the re-add flow.
+- **Browser E2E suite**: Playwright drives a real server through web
+  rename, delete, share, revoke, legacy-share MLS migration and the reset
+  flow.
+- **Windows/macOS desktop bundles**: the desktop release matrix now builds
+  Windows `.msi`/NSIS and macOS `.app`/`.dmg` alongside Linux, with
+  platform-specific config directories and icons.
+
+### Changed
+- **MLS janitor**: unused key packages expire after 30 days; clients report
+  their last processed epoch, and the janitor prunes protocol messages and
+  keyrings below the minimum fresh report (seven-day grace; reports older
+  than 30 days are ignored).
+- **Supply chain**: refreshed `async-executor` (yanked), `zstd`,
+  `zstd-safe` and `zstd-sys` to their fixed releases (RUSTSEC-2026-0391,
+  -0398, -0403, -0410), with temporary `cargo-vet` exemptions noted as
+  non-audits.
+
 ## [0.3.0] - 2026-10-24
 
 ### Added

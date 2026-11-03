@@ -110,12 +110,17 @@ Sharing / MLS:
 | `--write` | Create a write share (implies `--mls`) |
 | `--update-permission` | Change an existing share to `--write`/read |
 | `--mls-migrate` | Promote existing encrypted folder shares to MLS |
+| `--mls-reset` | Delete this device's sealed MLS state (prompts for `reset`) |
+| `--yes` | Skip the `--mls-reset` confirmation |
 | `--mls-status PATH` | Print epoch and members for a path |
 
 Notes:
 
-- A write share is supported for encrypted folders. Single-file MLS shares
-  are read-only.
+- A write share is supported for encrypted folders and single files. A
+  folder writer can add/edit/delete children; a single-file writer can
+  replace the file through the CLI/desktop or WebDAV `PUT` but cannot
+  delete the share root. The web UI downloads single-file shares; it has
+  no inline editor for them.
 - The recipient must have unlocked once (web, desktop or CLI) so a key
   package is published; otherwise the share fails with a clear error.
 - For legacy v1/v2 per-file shares, `--share` wraps the file key for the
@@ -172,12 +177,14 @@ Notes:
 | Shares | `/api/shares`, `/api/shares/received`, `/api/shares/owned`, `/api/shares/{id}`, `/api/shareable`, `/api/groups/{name}/members` |
 | Public links | `GET /public/{token}`, `/unlock`, `/list*`, `/download*` |
 | E2EE v1/v2 | `/api/e2ee/keyring`, `/api/e2ee/identity`, `/api/files/key`, `/api/e2ee/share-key`, `/api/e2ee/share-name`, `/api/e2ee/enrollments*`, `/api/e2ee/devices*` |
-| MLS | `/api/mls/key-packages`, `/api/mls/key-packages/consume`, `/api/mls/key-packages/{username}`, `/api/mls/group`, `/api/mls/messages`, `/api/mls/keyring` |
+| MLS | `/api/mls/key-packages`, `/api/mls/key-packages/consume`, `/api/mls/key-packages/{username}`, `/api/mls/group`, `/api/mls/messages`, `/api/mls/epoch`, `/api/mls/keyring` |
 | Operations | `GET /healthz` (public), `GET /version` (authenticated), `GET /metrics` (admin) |
 
 E2EE and MLS request bodies are opaque ciphertext/protocol payloads to the
 server. The server validates sizes, ownership, ACLs and epoch ordering; it
-does not decrypt them.
+does not decrypt them. `POST /api/mls/epoch?path=` accepts
+`{"device_id","epoch"}` from a member after it processes group state; the
+janitor uses the minimum fresh report to prune old messages and keyrings.
 
 See the [sync protocol](rfc/0002-sync-protocol.md), [E2EE](rfc/0007-e2ee.md)
 and [MLS](rfc/0012-mls-groups.md) specs for wire details.

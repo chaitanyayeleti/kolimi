@@ -122,6 +122,16 @@ struct Cli {
     #[arg(long)]
     mls_migrate: bool,
 
+    /// Delete this device's sealed MLS state (recovery after corruption or
+    /// state loss). A later sync publishes a new key package; an existing
+    /// member must re-share each folder to add the new device.
+    #[arg(long = "mls-reset")]
+    mls_reset: bool,
+
+    /// Skip the interactive confirmation for --mls-reset.
+    #[arg(long)]
+    yes: bool,
+
     /// Print the MLS epoch and members for a path.
     #[arg(long = "mls-status", value_name = "PATH")]
     mls_status: Option<String>,
@@ -220,6 +230,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             println!("this device had no local key material");
         }
+        return Ok(());
+    }
+
+    if cli.mls_reset {
+        if !cli.yes {
+            print!(
+                "This deletes only this device's sealed MLS state (not your E2EE keyring or files).\n\
+                 Encrypted folder shares will stop opening here until another member re-adds this device.\n\
+                 Type \"reset\" to continue: "
+            );
+            std::io::stdout().flush()?;
+            let mut confirmation = String::new();
+            std::io::stdin().read_line(&mut confirmation)?;
+            if confirmation.trim() != "reset" {
+                println!("cancelled");
+                return Ok(());
+            }
+        }
+        let removed = kolimi_sync::mls_store::MlsStore::new(&config.local_dir).reset()?;
+        if removed {
+            println!("removed this device's sealed MLS state");
+        } else {
+            println!("this device had no sealed MLS state");
+        }
+        println!(
+            "Next steps:\n  1. run a sync to publish a new MLS key package\n  2. ask a member of each encrypted folder to re-share it with you\n  3. run sync again to join the new epoch"
+        );
         return Ok(());
     }
 

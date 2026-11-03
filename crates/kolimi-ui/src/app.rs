@@ -3808,6 +3808,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let notice = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let migrating = RwSignal::new(false);
+    let resetting = RwSignal::new(false);
     let enrollments = RwSignal::new(Vec::<Value>::new());
     let devices = RwSignal::new(Vec::<Value>::new());
     let device_name = RwSignal::new(String::new());
@@ -3898,6 +3899,26 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                 Err(e) => error.set(e),
             }
             migrating.set(false);
+        });
+    };
+    let reset_mls = move |_| {
+        if !api::confirm(
+            "Reset this browser's MLS state? Encrypted folder shares will stop opening here until another member re-adds this browser. Your E2EE passphrase, recovery phrase and files are not deleted.",
+        ) {
+            return;
+        }
+        resetting.set(true);
+        let master = master.get_untracked();
+        spawn_local(async move {
+            match crate::mls::reset_state(master.as_ref()).await {
+                Ok(true) => notice.set(
+                    "MLS state cleared. Run a sync or reopen an encrypted share to publish a new key package, then ask an owner to re-share each folder."
+                        .to_string(),
+                ),
+                Ok(false) => notice.set("This browser had no stored MLS state.".to_string()),
+                Err(message) => error.set(message),
+            }
+            resetting.set(false);
         });
     };
     let close = move |_| on_close.run(());
@@ -4308,7 +4329,23 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                         <button disabled=move || migrating.get() on:click=migrate_mls>
                             "Upgrade shares to MLS"
                         </button>
+                        <button
+                            class="danger"
+                            disabled=move || resetting.get()
+                            on:click=reset_mls
+                        >
+                            {move || {
+                                if resetting.get() {
+                                    "Resetting…"
+                                } else {
+                                    "Reset this browser's MLS state"
+                                }
+                            }}
+                        </button>
                     </div>
+                    <p class="muted">
+                        "Use reset if this browser lost or corrupted its MLS state. You will need another member to re-add it before encrypted folder shares open here again."
+                    </p>
 
                     <h3>"Pending enrollments"</h3>
                     <p class="muted">
