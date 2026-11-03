@@ -26,6 +26,10 @@ follow [Semantic Versioning](https://semver.org/).
 - **MLS janitor**: unused key packages expire after 30 days; the janitor
   prunes consumed/expired rows after a further seven days. Protocol
   messages remain until per-member epoch tracking exists.
+- **Supply chain**: refreshed `async-executor` (yanked), `zstd`,
+  `zstd-safe` and `zstd-sys` to their fixed releases (RUSTSEC-2026-0391,
+  -0398, -0403, -0410), with temporary `cargo-vet` exemptions noted as
+  non-audits.
 
 ## [0.3.0] - 2026-10-24
 

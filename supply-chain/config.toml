@@ -121,8 +121,10 @@ version = "0.2.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.async-executor]]
-version = "1.14.0"
+version = "1.14.1"
 criteria = "safe-to-deploy"
+suggest = false
+notes = "Yanked-version replacement for 1.14.0 (zbus/keyring path); no code audit, temporary exemption."
 
 [[exemptions.async-io]]
 version = "2.6.0"
@@ -2869,16 +2871,22 @@ version = "1.0.23"
 criteria = "safe-to-deploy"
 
 [[exemptions.zstd]]
-version = "0.13.3"
+version = "0.13.4"
 criteria = "safe-to-deploy"
+suggest = false
+notes = "RUSTSEC-2026-0391 fix release via tantivy; no code audit, temporary exemption."
 
 [[exemptions.zstd-safe]]
-version = "7.3.0"
+version = "7.4.0"
 criteria = "safe-to-deploy"
+suggest = false
+notes = "RUSTSEC-2026-0398/0403 fix release via tantivy; no code audit, temporary exemption."
 
 [[exemptions.zstd-sys]]
-version = "2.1.1+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 criteria = "safe-to-deploy"
+suggest = false
+notes = "RUSTSEC-2026-0410 fix release via tantivy; no code audit, temporary exemption."
 
 [[exemptions.zune-core]]
 version = "0.5.3"
