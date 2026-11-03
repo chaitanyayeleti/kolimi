@@ -58,6 +58,9 @@ cargo vet --locked
   `cargo test --release -p kolimi-server --test load -- --ignored`.
 - Docs: `scripts/check-docs.sh` checks relative links, the RFC index and
   known stale claims (also a CI job).
+- CI is path-filtered: browser, UI, desktop, packaging, perf, litmus and
+  fuzz jobs may be skipped when their inputs did not change. Run the local
+  command for the area you touched, or use a manual `workflow_dispatch`.
 - Browser: `./scripts/build-ui.sh && cargo build -p kolimi-server -p kolimi-sync`,
   then `npm ci --prefix browser-e2e && npm --prefix browser-e2e test`
   (Playwright Chromium; also a CI job).
