@@ -168,9 +168,9 @@ jobs:
         with:
           workspaces: fuzz
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
+      # The prebuilt cargo-fuzz selects a musl target, which is
+      # incompatible with the ASAN flags; build it from source instead.
+      - run: cargo install cargo-fuzz --locked
       - run: cargo fuzz build
         working-directory: fuzz
       - run: cargo fuzz run chunk_roundtrip -- -max_total_time=30 -max_len=4194304
