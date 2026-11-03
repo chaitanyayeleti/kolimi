@@ -191,13 +191,13 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-latest
-            bundles: deb
+            bundles: deb,appimage
           - name: Windows
             os: windows-latest
-            bundles: nsis
+            bundles: nsis,msi
           - name: macOS
             os: macos-latest
-            bundles: app
+            bundles: app,dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
