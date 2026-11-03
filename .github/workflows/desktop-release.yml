@@ -48,7 +48,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: tauri-cli
-      - run: cargo test --locked --manifest-path apps/kolimi-desktop/Cargo.toml
+      # Tests run in CI for the tagged commit; the release job only packages.
       - name: Build bundles (${{ matrix.bundles }})
         working-directory: apps/kolimi-desktop
         run: cargo tauri build --bundles ${{ matrix.bundles }}
