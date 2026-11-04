@@ -1,9 +1,6 @@
 //! The authenticated application: login, file browser, shares, trash.
 
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use kolimi_crypto::MasterKey;
 use leptos::ev;
 use leptos::prelude::*;
@@ -13,6 +10,7 @@ use serde_json::{Value, json};
 use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::api;
+use crate::components::{ErrorText, Icon, MlsDevicesPanel, Modal, Notice};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -418,79 +416,6 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Inline SVG path data for the icon set.
-fn icon_svg(name: &str) -> String {
-    let body = match name {
-        "folder" => {
-            r#"<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"#
-        }
-        "file" => {
-            r#"<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>"#
-        }
-        "image" => {
-            r#"<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m5 18 4.5-4.5L13 17l3-2.5L21 18"/>"#
-        }
-        "trash" => {
-            r#"<path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M7 7l1 13a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-13"/>"#
-        }
-        "search" => r#"<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>"#,
-        "menu" => r#"<path d="M4 7h16M4 12h16M4 17h16"/>"#,
-        "upload" => r#"<path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 20h16"/>"#,
-        "folder-plus" => {
-            r#"<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6M9 13h6"/>"#
-        }
-        "share" => {
-            r#"<circle cx="6" cy="12" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="18" cy="18" r="2.4"/><path d="m8.2 10.8 7.6-3.6M8.2 13.2l7.6 3.6"/>"#
-        }
-        "edit" => r#"<path d="M4 20h4l10-10-4-4L4 16z"/><path d="m14 6 4 4"/>"#,
-        "download" => r#"<path d="M12 4v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/>"#,
-        "users" => {
-            r#"<circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8"/><path d="M17 20a5.5 5.5 0 0 0-3-4.9"/>"#
-        }
-        "key" => r#"<circle cx="8" cy="15" r="4"/><path d="m11 12 8-8 2 2-2 2 2 2-3 3-2-2-3 3"/>"#,
-        "settings" => {
-            r#"<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>"#
-        }
-        "sun" => {
-            r#"<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>"#
-        }
-        "logout" => {
-            r#"<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="m10 17-5-5 5-5"/><path d="M5 12h12"/>"#
-        }
-        "dots" => {
-            r#"<circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>"#
-        }
-        "grid" => {
-            r#"<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>"#
-        }
-        "list" => {
-            r#"<path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4.5" cy="6" r="1.3"/><circle cx="4.5" cy="12" r="1.3"/><circle cx="4.5" cy="18" r="1.3"/>"#
-        }
-        "x" => r#"<path d="M6 6l12 12M18 6 6 18"/>"#,
-        "cloud" => r#"<path d="M6 18a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.5A3.5 3.5 0 0 1 18 18z"/>"#,
-        "lock" => {
-            r#"<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#
-        }
-        "refresh" => r#"<path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/>"#,
-        "history" => {
-            r#"<path d="M4 5v5h5"/><path d="M4.5 10a8 8 0 1 1-.6 5"/><path d="M12 8v4l3 2"/>"#
-        }
-        "link" => {
-            r#"<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>"#
-        }
-        _ => r#"<circle cx="12" cy="12" r="8"/>"#,
-    };
-    format!(
-        r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{body}</svg>"#
-    )
-}
-
-/// A single inline SVG icon.
-#[component]
-fn Icon(name: &'static str) -> impl IntoView {
-    view! { <span class="icon" inner_html=icon_svg(name)></span> }
-}
-
 /// The Kolimi brand mark: a gradient tile with a cloud. Matches the app/tray
 /// icons (`assets/branding/logo.svg`).
 fn logo_svg() -> String {
@@ -566,7 +491,7 @@ fn mark_session_expired() {
 }
 
 /// Formats a Unix-millisecond timestamp as a short relative time.
-fn relative_time(ms: i64) -> String {
+pub(crate) fn relative_time(ms: i64) -> String {
     if ms <= 0 {
         return String::new();
     }
@@ -3823,6 +3748,7 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let mls_devices = RwSignal::new(Vec::<crate::mls::MlsDevice>::new());
     let mls_warnings = RwSignal::new(Vec::<String>::new());
     let mls_error = RwSignal::new(String::new());
+    let mls_loading = RwSignal::new(true);
     let mls_busy = RwSignal::new(false);
     let device_name = RwSignal::new(String::new());
     let enrolling = RwSignal::new(Option::<(i64, [u8; 32], String)>::None);
@@ -3934,10 +3860,13 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
             resetting.set(false);
         });
     };
-    let close = move |_| on_close.run(());
+    let close = Callback::new(move |_: ()| on_close.run(()));
 
     let load_devices = Callback::new(move |_: ()| {
         spawn_local(async move {
+            mls_loading.set(true);
+            mls_error.set(String::new());
+            mls_warnings.set(Vec::new());
             if let Ok(list) = crate::e2ee::pending_enrollments().await {
                 enrollments.set(list);
             }
@@ -3951,11 +3880,11 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                     Ok(list) => {
                         mls_devices.set(list.devices);
                         mls_warnings.set(list.warnings);
-                        mls_error.set(String::new());
                     }
                     Err(message) => mls_error.set(message),
                 }
             }
+            mls_loading.set(false);
         });
     });
     Effect::new(move |_| {
@@ -4190,452 +4119,372 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     };
 
     view! {
-        <div class="backdrop">
-            <div class="card modal">
-                <div class="modal-head">
-                    <h2>"Settings"</h2>
-                    <button class="icon-btn" aria-label="Close" on:click=close>
-                        <Icon name="x"/>
-                    </button>
-                </div>
-                <h3>"Encryption"</h3>
-                <p class="muted">
-                    "Your passphrase is used locally and is never sent to the server."
+        <Modal title="Settings" on_close=close>
+            <h3>"Encryption"</h3>
+            <p class="muted">
+                "Your passphrase is used locally and is never sent to the server."
+            </p>
+            <Show when=move || recovery.get().is_some()>
+                <p class="notice">
+                    "Write down these 24 words now — they are shown once and are the only other way to unlock."
                 </p>
-                <Show when=move || recovery.get().is_some()>
-                    <p class="notice">
-                        "Write down these 24 words now — they are shown once and are the only other way to unlock."
+                <code class="recovery">{move || recovery.get().unwrap_or_default()}</code>
+                <div class="row-actions">
+                    <button on:click=move |_| {
+                        let code = recovery.get_untracked().unwrap_or_default();
+                        spawn_local(async move { crate::api::copy_to_clipboard(&code).await });
+                    }>"Copy"</button>
+                    <button class="primary" on:click=move |_| recovery.set(None)>"I saved it"</button>
+                </div>
+            </Show>
+            <Show when=move || master.get().is_none() && recovery.get().is_none()>
+                <Show when=move || has_keyring.get().is_none() && !keyring_error.get()>
+                    <p class="muted">"Checking encryption status…"</p>
+                </Show>
+                <Show when=move || keyring_error.get()>
+                    <p class="error">
+                        "Couldn't check the encryption status — the server didn't answer. Check your connection and retry."
                     </p>
-                    <code class="recovery">{move || recovery.get().unwrap_or_default()}</code>
                     <div class="row-actions">
-                        <button on:click=move |_| {
-                            let code = recovery.get_untracked().unwrap_or_default();
-                            spawn_local(async move { crate::api::copy_to_clipboard(&code).await });
-                        }>"Copy"</button>
-                        <button class="primary" on:click=move |_| recovery.set(None)>"I saved it"</button>
+                        <button class="primary" on:click=move |_| check_keyring.run(())>
+                            "Retry"
+                        </button>
                     </div>
                 </Show>
-                <Show when=move || master.get().is_none() && recovery.get().is_none()>
-                    <Show when=move || has_keyring.get().is_none() && !keyring_error.get()>
-                        <p class="muted">"Checking encryption status…"</p>
-                    </Show>
-                    <Show when=move || keyring_error.get()>
-                        <p class="error">
-                            "Couldn't check the encryption status — the server didn't answer. Check your connection and retry."
-                        </p>
-                        <div class="row-actions">
-                            <button class="primary" on:click=move |_| check_keyring.run(())>
-                                "Retry"
-                            </button>
-                        </div>
-                    </Show>
-                    <Show when=move || has_keyring.get() == Some(false)>
-                        <p class="muted">
-                            "Encryption is not set up for this account yet. Choose a passphrase — it never leaves this browser."
-                        </p>
-                        <label>
-                            "New passphrase"
-                            <input
-                                type="password"
-                                autocomplete="new-password"
-                                prop:value=move || setup_pass.get()
-                                on:input=move |ev| setup_pass.set(event_target_value(&ev))
-                            />
-                        </label>
-                        <label>
-                            "Repeat passphrase"
-                            <input
-                                type="password"
-                                autocomplete="new-password"
-                                prop:value=move || setup_confirm.get()
-                                on:input=move |ev| setup_confirm.set(event_target_value(&ev))
-                            />
-                        </label>
-                        <div class="row-actions">
-                            <button class="primary" disabled=move || busy.get() on:click=setup>
-                                <Icon name="lock"/>
-                                {move || {
-                                    if busy.get() { "Setting up…" } else { "Set up encryption" }
-                                }}
-                            </button>
-                        </div>
-                    </Show>
-                    <Show when=move || has_keyring.get() == Some(true)>
-                        <label>
+                <Show when=move || has_keyring.get() == Some(false)>
+                    <p class="muted">
+                        "Encryption is not set up for this account yet. Choose a passphrase — it never leaves this browser."
+                    </p>
+                    <label>
+                        "New passphrase"
+                        <input
+                            type="password"
+                            autocomplete="new-password"
+                            prop:value=move || setup_pass.get()
+                            on:input=move |ev| setup_pass.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <label>
+                        "Repeat passphrase"
+                        <input
+                            type="password"
+                            autocomplete="new-password"
+                            prop:value=move || setup_confirm.get()
+                            on:input=move |ev| setup_confirm.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <div class="row-actions">
+                        <button class="primary" disabled=move || busy.get() on:click=setup>
+                            <Icon name="lock"/>
+                            {move || {
+                                if busy.get() { "Setting up…" } else { "Set up encryption" }
+                            }}
+                        </button>
+                    </div>
+                </Show>
+                <Show when=move || has_keyring.get() == Some(true)>
+                    <label>
+                        {move || {
+                            if use_recovery.get() {
+                                "Recovery phrase (24 words)"
+                            } else {
+                                "Passphrase"
+                            }
+                        }}
+                        <input
+                            type="password"
+                            autocomplete="off"
+                            prop:value=move || passphrase.get()
+                            on:input=move |ev| passphrase.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <div class="row-actions">
+                        <button class="primary" disabled=move || busy.get() on:click=unlock>
+                            <Icon name="lock"/>
+                            {move || if busy.get() { "Unlocking…" } else { "Unlock" }}
+                        </button>
+                        <button
+                            class="ghost"
+                            on:click=move |_| {
+                                use_recovery.set(!use_recovery.get_untracked());
+                                error.set(String::new());
+                            }
+                        >
                             {move || {
                                 if use_recovery.get() {
-                                    "Recovery phrase (24 words)"
+                                    "Use passphrase"
                                 } else {
-                                    "Passphrase"
+                                    "Use recovery phrase"
                                 }
                             }}
-                            <input
-                                type="password"
-                                autocomplete="off"
-                                prop:value=move || passphrase.get()
-                                on:input=move |ev| passphrase.set(event_target_value(&ev))
-                            />
-                        </label>
-                        <div class="row-actions">
-                            <button class="primary" disabled=move || busy.get() on:click=unlock>
-                                <Icon name="lock"/>
-                                {move || if busy.get() { "Unlocking…" } else { "Unlock" }}
-                            </button>
-                            <button
-                                class="ghost"
-                                on:click=move |_| {
-                                    use_recovery.set(!use_recovery.get_untracked());
-                                    error.set(String::new());
-                                }
-                            >
-                                {move || {
-                                    if use_recovery.get() {
-                                        "Use passphrase"
-                                    } else {
-                                        "Use recovery phrase"
-                                    }
-                                }}
-                            </button>
-                        </div>
-                    </Show>
+                        </button>
+                    </div>
                 </Show>
-                <Show when=move || master.get().is_some()>
-                    <p class="notice">"Keyring unlocked for this browser."</p>
+            </Show>
+            <Show when=move || master.get().is_some()>
+                <p class="notice">"Keyring unlocked for this browser."</p>
+                <div class="row-actions">
+                    <button
+                        class="ghost"
+                        on:click=move |_| {
+                            crate::e2ee::forget_master();
+                            master.set(None);
+                            notice.set(String::new());
+                        }
+                    >
+                        "Lock again"
+                    </button>
+                </div>
+
+                <h3>"Passphrase"</h3>
+                <p class="muted">
+                    "Change the passphrase that wraps this account's master key. Nothing is re-uploaded, and your recovery phrase and other devices keep working."
+                </p>
+                <Show when=move || !change_open.get()>
                     <div class="row-actions">
                         <button
                             class="ghost"
                             on:click=move |_| {
-                                crate::e2ee::forget_master();
-                                master.set(None);
-                                notice.set(String::new());
+                                error.set(String::new());
+                                change_open.set(true);
                             }
                         >
-                            "Lock again"
+                            "Change passphrase"
                         </button>
                     </div>
-
-                    <h3>"Passphrase"</h3>
-                    <p class="muted">
-                        "Change the passphrase that wraps this account's master key. Nothing is re-uploaded, and your recovery phrase and other devices keep working."
-                    </p>
-                    <Show when=move || !change_open.get()>
-                        <div class="row-actions">
-                            <button
-                                class="ghost"
-                                on:click=move |_| {
-                                    error.set(String::new());
-                                    change_open.set(true);
-                                }
-                            >
-                                "Change passphrase"
-                            </button>
-                        </div>
-                    </Show>
-                    <Show when=move || change_open.get()>
-                        <label>
-                            "New passphrase"
-                            <input
-                                type="password"
-                                autocomplete="new-password"
-                                prop:value=move || new_pass.get()
-                                on:input=move |ev| new_pass.set(event_target_value(&ev))
-                            />
-                        </label>
-                        <label>
-                            "Repeat new passphrase"
-                            <input
-                                type="password"
-                                autocomplete="new-password"
-                                prop:value=move || new_confirm.get()
-                                on:input=move |ev| new_confirm.set(event_target_value(&ev))
-                            />
-                        </label>
-                        <div class="row-actions">
-                            <button class="primary" disabled=move || busy.get() on:click=change_pass>
-                                {move || if busy.get() { "Saving…" } else { "Save new passphrase" }}
-                            </button>
-                            <button
-                                class="ghost"
-                                on:click=move |_| {
-                                    change_open.set(false);
-                                    new_pass.set(String::new());
-                                    new_confirm.set(String::new());
-                                    error.set(String::new());
-                                }
-                            >
-                                "Cancel"
-                            </button>
-                        </div>
-                    </Show>
-
-                    <h3>"Existing names"</h3>
-                    <p class="muted">
-                        "Items created before names were encrypted may still have readable names. Rename them in place; contents are not re-uploaded. Plaintext files are skipped."
-                    </p>
+                </Show>
+                <Show when=move || change_open.get()>
+                    <label>
+                        "New passphrase"
+                        <input
+                            type="password"
+                            autocomplete="new-password"
+                            prop:value=move || new_pass.get()
+                            on:input=move |ev| new_pass.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <label>
+                        "Repeat new passphrase"
+                        <input
+                            type="password"
+                            autocomplete="new-password"
+                            prop:value=move || new_confirm.get()
+                            on:input=move |ev| new_confirm.set(event_target_value(&ev))
+                        />
+                    </label>
                     <div class="row-actions">
-                        <button disabled=move || busy.get() on:click=migrate_names>
-                            "Encrypt existing names"
-                        </button>
-                    </div>
-
-                    <h3>"MLS shares"</h3>
-                    <p class="muted">
-                        "Upgrade existing encrypted folder shares to MLS groups and epoch keyrings. Recipients must have unlocked the web app once so they have a key package."
-                    </p>
-                    <div class="row-actions">
-                        <button disabled=move || migrating.get() on:click=migrate_mls>
-                            "Upgrade shares to MLS"
+                        <button class="primary" disabled=move || busy.get() on:click=change_pass>
+                            {move || if busy.get() { "Saving…" } else { "Save new passphrase" }}
                         </button>
                         <button
-                            class="danger"
-                            disabled=move || resetting.get()
-                            on:click=reset_mls
+                            class="ghost"
+                            on:click=move |_| {
+                                change_open.set(false);
+                                new_pass.set(String::new());
+                                new_confirm.set(String::new());
+                                error.set(String::new());
+                            }
                         >
-                            {move || {
-                                if resetting.get() {
-                                    "Resetting…"
-                                } else {
-                                    "Reset this browser's MLS state"
-                                }
-                            }}
+                            "Cancel"
                         </button>
                     </div>
-                    <p class="muted">
-                        "Use reset if this browser lost or corrupted its MLS state. You will need another member to re-add it before encrypted folder shares open here again."
-                    </p>
-
-                    <h3>"Pending enrollments"</h3>
-                    <p class="muted">
-                        "One click approves a new device. If you don't fully trust this server, verify the code first."
-                    </p>
-                    <ul class="shares">
-                        <For
-                            each=move || enrollments.get()
-                            key=|e| e["id"].as_i64().unwrap_or(0)
-                            children=move |entry| {
-                                let id = entry["id"].as_i64().unwrap_or(0);
-                                let name = entry["device_name"]
-                                    .as_str()
-                                    .unwrap_or_default()
-                                    .to_string();
-                                let key = entry["device_public_key"]
-                                    .as_str()
-                                    .unwrap_or_default()
-                                    .to_string();
-                                let code = crate::e2ee::device_code(&key, id);
-                                let fingerprint = crate::e2ee::key_fingerprint(&key);
-                                let entered = RwSignal::new(String::new());
-                                let verify = RwSignal::new(false);
-                                let k = key.clone();
-                                view! {
-                                    <li class="file">
-                                        <span class="file-body">
-                                            <span class="file-name">{name}</span>
-                                            <Show when=move || verify.get()>
-                                                <span class="file-meta">
-                                                    <span class="muted">"code " {code.clone()}</span>
-                                                    <span class="muted">"key " {fingerprint.clone()}</span>
-                                                </span>
-                                                <input
-                                                    type="text"
-                                                    autocomplete="off"
-                                                    placeholder="Type the code shown on the new device"
-                                                    prop:value=move || entered.get()
-                                                    on:input=move |ev| entered.set(event_target_value(&ev))
-                                                />
-                                            </Show>
-                                        </span>
-                                        <span class="file-actions">
-                                            <button
-                                                class="ghost"
-                                                title="Compare the code shown on the new device first"
-                                                on:click=move |_| verify.set(!verify.get_untracked())
-                                            >
-                                                "Verify code"
-                                            </button>
-                                            <button
-                                                class="primary"
-                                                on:click=move |_| {
-                                                    let typed = entered.get_untracked();
-                                                    let check = if verify.get_untracked() && !typed.trim().is_empty() {
-                                                        Some(typed)
-                                                    } else {
-                                                        None
-                                                    };
-                                                    approve(id, k.clone(), check)
-                                                }
-                                            >
-                                                "Approve"
-                                            </button>
-                                        </span>
-                                    </li>
-                                }
-                            }
-                        />
-                    </ul>
-
-                    <h3>"Devices"</h3>
-                    <ul class="shares">
-                        <For
-                            each=move || devices.get()
-                            key=|d| d["id"].as_i64().unwrap_or(0)
-                            children=move |device| {
-                                let id = device["id"].as_i64().unwrap_or(0);
-                                let name =
-                                    device["name"].as_str().unwrap_or_default().to_string();
-                                view! {
-                                    <li class="file">
-                                        <span class="file-body">
-                                            <span class="file-name">{name}</span>
-                                        </span>
-                                        <span class="file-actions">
-                                            <button
-                                                class="icon-btn"
-                                                title="Revoke device"
-                                                on:click=move |_| revoke(id)
-                                            >
-                                                <Icon name="trash"/>
-                                            </button>
-                                        </span>
-                                    </li>
-                                }
-                            }
-                        />
-                    </ul>
-
-                    <h3>"MLS devices"</h3>
-                    <p class="muted">
-                        "Devices enrolled for encrypted group shares. Revoking removes the device's MLS leaf from every share this browser can open and rotates those keyrings. Files and keys it already downloaded stay readable to it; only future epochs are protected."
-                    </p>
-                    <Show when=move || !mls_error.get().is_empty()>
-                        <p class="error">{move || mls_error.get()}</p>
-                    </Show>
-                    <Show when=move || !mls_warnings.get().is_empty()>
-                        <p class="muted">
-                            "Some groups cannot be inspected from this browser: "
-                            {move || mls_warnings.get().join("; ")}
-                        </p>
-                    </Show>
-                    <ul class="shares">
-                        <For
-                            each=move || mls_devices.get()
-                            key=|device| device.device_id.clone()
-                            children=move |device| {
-                                let id = device.device_id.clone();
-                                let click_id = id.clone();
-                                let name = if device.device_name.is_empty() {
-                                    "Unnamed MLS device".to_string()
-                                } else {
-                                    device.device_name.clone()
-                                };
-                                let current = device.current;
-                                let last_seen = relative_time(device.last_seen_at);
-                                let signature = device
-                                    .signature_key
-                                    .as_deref()
-                                    .map(|key| STANDARD.encode(key))
-                                    .unwrap_or_else(|| "not reported yet".to_string());
-                                let groups = if device.groups.is_empty() {
-                                    "none visible".to_string()
-                                } else {
-                                    device.groups.join(", ")
-                                };
-                                view! {
-                                    <li class="file">
-                                        <span class="file-body">
-                                            <span class="file-name">
-                                                {name}
-                                                {current
-                                                    .then(|| view! { <span class="badge">"this device"</span> })}
-                                            </span>
-                                            <span class="file-meta">
-                                                <span class="muted">"id " {id.clone()}</span>
-                                                <span class="muted">"last seen " {last_seen}</span>
-                                            </span>
-                                            <span class="file-meta">
-                                                <span class="muted">"signature key " {signature}</span>
-                                            </span>
-                                            <span class="file-meta">
-                                                <span class="muted">"groups " {groups}</span>
-                                            </span>
-                                        </span>
-                                        <span class="file-actions">
-                                            <Show when=move || !current>
-                                                {
-                                                    let button_id = click_id.clone();
-                                                    view! {
-                                                        <button
-                                                            class="icon-btn"
-                                                            title="Revoke MLS device"
-                                                            disabled=move || mls_busy.get()
-                                                            on:click=move |_| {
-                                                                revoke_mls.run(button_id.clone())
-                                                            }
-                                                        >
-                                                            <Icon name="trash"/>
-                                                        </button>
-                                                    }
-                                                }
-                                            </Show>
-                                        </span>
-                                    </li>
-                                }
-                            }
-                        />
-                    </ul>
                 </Show>
 
-                <h3>"Add this browser as a device"</h3>
+                <h3>"Existing names"</h3>
                 <p class="muted">
-                    "Name this browser, start the enrollment, then approve it on another unlocked device — "
-                    "no passphrase retyping needed."
+                    "Items created before names were encrypted may still have readable names. Rename them in place; contents are not re-uploaded. Plaintext files are skipped."
                 </p>
-                <label>
-                    "Device name"
-                    <input
-                        type="text"
-                        autocomplete="off"
-                        prop:value=move || device_name.get()
-                        on:input=move |ev| device_name.set(event_target_value(&ev))
-                    />
-                </label>
                 <div class="row-actions">
-                    <button on:click=start_enroll>"Start enrollment"</button>
-                    <Show when=move || enrolling.get().is_some()>
-                        <button class="primary" on:click=finish_enroll>"Unlock now"</button>
-                    </Show>
+                    <button disabled=move || busy.get() on:click=migrate_names>
+                        "Encrypt existing names"
+                    </button>
                 </div>
-                <Show when=move || enrolling.get().is_some()>
-                    {move || {
-                        enrolling
-                            .get()
-                            .map(|(id, _, code)| {
-                                view! {
-                                    <div class="enroll-qr">
-                                        <p class="muted">
-                                            "Waiting for approval on another device — then press “Unlock now”."
-                                        </p>
-                                        <details>
-                                            <summary class="muted">"Approval code (advanced)"</summary>
-                                            <div
-                                                class="qr"
-                                                inner_html=crate::e2ee::qr_svg(
-                                                    &format!("kolimi-enroll:{id}:{code}"),
-                                                )
-                                            ></div>
-                                            <p class="muted">"Enrollment " {id}</p>
-                                            <p class="muted">"Code " {code}</p>
-                                        </details>
-                                    </div>
-                                }
-                            })
-                    }}
-                </Show>
 
-                <p class="notice">{move || notice.get()}</p>
-                <p class="error">{move || error.get()}</p>
+                <h3>"MLS shares"</h3>
+                <p class="muted">
+                    "Upgrade existing encrypted folder shares to MLS groups and epoch keyrings. Recipients must have unlocked the web app once so they have a key package."
+                </p>
+                <div class="row-actions">
+                    <button disabled=move || migrating.get() on:click=migrate_mls>
+                        "Upgrade shares to MLS"
+                    </button>
+                    <button
+                        class="danger"
+                        disabled=move || resetting.get()
+                        on:click=reset_mls
+                    >
+                        {move || {
+                            if resetting.get() {
+                                "Resetting…"
+                            } else {
+                                "Reset this browser's MLS state"
+                            }
+                        }}
+                    </button>
+                </div>
+                <p class="muted">
+                    "Use reset if this browser lost or corrupted its MLS state. You will need another member to re-add it before encrypted folder shares open here again."
+                </p>
+
+                <h3>"Pending enrollments"</h3>
+                <p class="muted">
+                    "One click approves a new device. If you don't fully trust this server, verify the code first."
+                </p>
+                <ul class="shares">
+                    <For
+                        each=move || enrollments.get()
+                        key=|e| e["id"].as_i64().unwrap_or(0)
+                        children=move |entry| {
+                            let id = entry["id"].as_i64().unwrap_or(0);
+                            let name = entry["device_name"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string();
+                            let key = entry["device_public_key"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string();
+                            let code = crate::e2ee::device_code(&key, id);
+                            let fingerprint = crate::e2ee::key_fingerprint(&key);
+                            let entered = RwSignal::new(String::new());
+                            let verify = RwSignal::new(false);
+                            let k = key.clone();
+                            view! {
+                                <li class="file">
+                                    <span class="file-body">
+                                        <span class="file-name">{name}</span>
+                                        <Show when=move || verify.get()>
+                                            <span class="file-meta">
+                                                <span class="muted">"code " {code.clone()}</span>
+                                                <span class="muted">"key " {fingerprint.clone()}</span>
+                                            </span>
+                                            <input
+                                                type="text"
+                                                autocomplete="off"
+                                                placeholder="Type the code shown on the new device"
+                                                prop:value=move || entered.get()
+                                                on:input=move |ev| entered.set(event_target_value(&ev))
+                                            />
+                                        </Show>
+                                    </span>
+                                    <span class="file-actions">
+                                        <button
+                                            class="ghost"
+                                            title="Compare the code shown on the new device first"
+                                            on:click=move |_| verify.set(!verify.get_untracked())
+                                        >
+                                            "Verify code"
+                                        </button>
+                                        <button
+                                            class="primary"
+                                            on:click=move |_| {
+                                                let typed = entered.get_untracked();
+                                                let check = if verify.get_untracked() && !typed.trim().is_empty() {
+                                                    Some(typed)
+                                                } else {
+                                                    None
+                                                };
+                                                approve(id, k.clone(), check)
+                                            }
+                                        >
+                                            "Approve"
+                                        </button>
+                                    </span>
+                                </li>
+                            }
+                        }
+                    />
+                </ul>
+
+                <h3>"Devices"</h3>
+                <ul class="shares">
+                    <For
+                        each=move || devices.get()
+                        key=|d| d["id"].as_i64().unwrap_or(0)
+                        children=move |device| {
+                            let id = device["id"].as_i64().unwrap_or(0);
+                            let name =
+                                device["name"].as_str().unwrap_or_default().to_string();
+                            view! {
+                                <li class="file">
+                                    <span class="file-body">
+                                        <span class="file-name">{name}</span>
+                                    </span>
+                                    <span class="file-actions">
+                                        <button
+                                            class="icon-btn"
+                                            title="Revoke device"
+                                            on:click=move |_| revoke(id)
+                                        >
+                                            <Icon name="trash"/>
+                                        </button>
+                                    </span>
+                                </li>
+                            }
+                        }
+                    />
+                </ul>
+
+                <MlsDevicesPanel
+                    devices=mls_devices
+                    warnings=mls_warnings
+                    error=mls_error
+                    loading=mls_loading
+                    busy=mls_busy
+                    on_revoke=revoke_mls
+                />
+            </Show>
+
+            <h3>"Add this browser as a device"</h3>
+            <p class="muted">
+                "Name this browser, start the enrollment, then approve it on another unlocked device — "
+                "no passphrase retyping needed."
+            </p>
+            <label>
+                "Device name"
+                <input
+                    type="text"
+                    autocomplete="off"
+                    prop:value=move || device_name.get()
+                    on:input=move |ev| device_name.set(event_target_value(&ev))
+                />
+            </label>
+            <div class="row-actions">
+                <button on:click=start_enroll>"Start enrollment"</button>
+                <Show when=move || enrolling.get().is_some()>
+                    <button class="primary" on:click=finish_enroll>"Unlock now"</button>
+                </Show>
             </div>
-        </div>
+            <Show when=move || enrolling.get().is_some()>
+                {move || {
+                    enrolling
+                        .get()
+                        .map(|(id, _, code)| {
+                            view! {
+                                <div class="enroll-qr">
+                                    <p class="muted">
+                                        "Waiting for approval on another device — then press “Unlock now”."
+                                    </p>
+                                    <details>
+                                        <summary class="muted">"Approval code (advanced)"</summary>
+                                        <div
+                                            class="qr"
+                                            inner_html=crate::e2ee::qr_svg(
+                                                &format!("kolimi-enroll:{id}:{code}"),
+                                            )
+                                        ></div>
+                                        <p class="muted">"Enrollment " {id}</p>
+                                        <p class="muted">"Code " {code}</p>
+                                    </details>
+                                </div>
+                            }
+                        })
+                }}
+            </Show>
+
+            <Notice message=notice/>
+            <ErrorText message=error/>
+        </Modal>
     }
 }
 

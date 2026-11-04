@@ -20,6 +20,12 @@
   --ok: #16a34a;
   --ok-soft: #f0fdf4;
   --warn: #d97706;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
   --radius: 12px;
   --radius-sm: 8px;
   --radius-lg: 16px;
@@ -950,9 +956,9 @@ textarea:focus {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
-  padding: 1.5rem;
+  padding: var(--space-5);
   max-width: 44rem;
-  margin: 1rem auto;
+  margin: var(--space-4) auto;
 }
 
 .pad {
@@ -967,7 +973,7 @@ textarea:focus {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 1rem;
+  padding: var(--space-4);
   z-index: 70;
   animation: fade-in 0.15s ease;
 }
@@ -1005,8 +1011,8 @@ textarea:focus {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 1rem;
-  margin-bottom: 0.35rem;
+  gap: var(--space-4);
+  margin-bottom: var(--space-1);
 }
 
 .modal-head h2 {
@@ -1015,8 +1021,16 @@ textarea:focus {
 
 .shares {
   list-style: none;
-  margin: 0.5rem 0;
+  margin: var(--space-2) 0;
   padding: 0;
+}
+
+.mls-device {
+  align-items: flex-start;
+}
+
+.mls-device .file-body {
+  flex: 1;
 }
 
 .share-form {
@@ -1135,12 +1149,12 @@ textarea:focus {
 
 .error {
   color: var(--danger);
-  margin: 0.25rem 0;
+  margin: var(--space-1) 0;
 }
 
 .notice {
   color: var(--ok);
-  margin: 0.25rem 0;
+  margin: var(--space-1) 0;
 }
 
 /* ---- TOTP enrollment ------------------------------------------------- */
@@ -1337,15 +1351,15 @@ textarea:focus {
 }
 
 .modal h3 {
-  margin: 1.4rem 0 0.4rem;
-  padding-top: 1rem;
+  margin: var(--space-5) 0 var(--space-2);
+  padding-top: var(--space-4);
   border-top: 1px solid var(--border);
   font-size: 1rem;
 }
 
 .modal > p.muted {
   font-size: 0.9rem;
-  margin: 0.15rem 0 0.7rem;
+  margin: var(--space-1) 0 var(--space-3);
 }
 
 /* Drag-and-drop upload overlay. */

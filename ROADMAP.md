@@ -35,9 +35,10 @@ ship-blocker for calling group E2EE production-grade.
 
 ## Next milestone: 0.4.5 — UI refinement
 
-Status: **planned; do not start until the owner green-lights it.** Keep
-Leptos and the single-binary/embedded-assets model; this is not a framework
-rewrite.
+Status: **in progress** — the owner green-lit the low-risk component slice;
+no 0.4.5 release tag yet. Keep Leptos and the single-binary/embedded-assets
+model; this is not a framework rewrite. Landed so far: `Modal`, `Notice`,
+`ErrorText`, `MlsDevicesPanel`, spacing tokens and their tests.
 
 - **Reusable components**: extract modal, buttons, notices, empty states,
   share rows and device rows from the large app modules.

@@ -8,6 +8,7 @@
 
 mod api;
 mod app;
+mod components;
 mod e2ee;
 mod mls;
 mod passkey;
