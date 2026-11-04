@@ -12,9 +12,14 @@ follow [Semantic Versioning](https://semver.org/).
   shortcut opens the Passkeys tab. Encryption, MLS shares, the MLS device
   roster and device enrollment keep their existing actions and messages.
 - **UI module split**: the browser MLS client is split into `state`, `types`,
-  `api` and `protocol`, and the admin, share, passkeys, vault, versions and
-  settings dialogs moved out of `app.rs` into `dialogs/`. This is internal
-  only; no API or storage format changed.
+  `api` and `protocol`; the admin, share, passkeys, vault, versions and
+  settings dialogs moved out of `app.rs` into `dialogs/`; and the browser is
+  split into actions, dialogs, overlays, rows, search, sharing, shell, types
+  and uploads. File rows and tiles, empty states, toasts, the upload tray,
+  the context menu, the lightbox, the sidebar and the top bar are now
+  reusable components. Shared spacing and typography tokens cover the modal
+  and Settings surfaces. This is internal only; no API or storage format
+  changed.
 
 ## [0.4.3] - 2026-11-05
 

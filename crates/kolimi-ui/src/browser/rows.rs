@@ -668,3 +668,31 @@ fn file_meta(entry: &Entry) -> String {
         }
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    fn entry(kind: &str, encrypted: bool, size: u64) -> Entry {
+        Entry {
+            name: "item".to_string(),
+            path: "/item".to_string(),
+            kind: kind.to_string(),
+            size,
+            modified_at: 0,
+            shared: false,
+            owner: None,
+            permission: None,
+            encrypted,
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn file_meta_labels_folders_and_encryption() {
+        assert_eq!(file_meta(&entry("dir", false, 0)), "Folder");
+        assert_eq!(file_meta(&entry("dir", true, 0)), "Folder · Encrypted");
+        assert_eq!(file_meta(&entry("file", true, 1024)), "Encrypted");
+        assert_eq!(file_meta(&entry("file", false, 512)), "512 B");
+    }
+}

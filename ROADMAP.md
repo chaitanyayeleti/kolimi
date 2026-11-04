@@ -35,13 +35,16 @@ ship-blocker for calling group E2EE production-grade.
 
 ## Next milestone: 0.4.5 — UI refinement
 
-Status: **in progress** — no 0.4.5 release tag yet. Keep Leptos and the
-single-binary/embedded-assets model; this is not a framework rewrite. Landed
-so far: `Modal`, `Notice`, `ErrorText`, `MlsDevicesPanel`, spacing tokens and
-their tests; `mls` split into `state`, `types`, `api` and `protocol`;
-`app.rs` reduced to the browser plus login and the dialogs moved to
-`dialogs/`; Settings regrouped into Encryption, Sharing, Devices and
-Passkeys tabs.
+Status: **implementation complete; no release tag yet.** Keep Leptos and the
+single-binary/embedded-assets model; this is not a framework rewrite. Landed:
+`Modal`, `Notice`, `ErrorText`, `EmptyState`, `MlsDevicesPanel`, `FileRow`,
+`FileTile`, `TrashRow`, `Sidebar`, `Topbar`, toast/upload/context/lightbox
+overlays and their tests; `mls` split into `state`, `types`, `api` and
+`protocol`; `app.rs` reduced to the root/login surface; the browser split into
+`actions`, `dialogs`, `overlays`, `rows`, `search`, `sharing`, `shell`,
+`types` and `uploads`; Settings regrouped into Encryption, Sharing, Devices
+and Passkeys tabs; spacing and typography tokens applied to the modal and
+Settings surfaces.
 
 - **Reusable components**: extract modal, buttons, notices, empty states,
   share rows and device rows from the large app modules.
