@@ -71,8 +71,12 @@ jobs:
               version="${version#desktop-v}"
               arch="$(uname -m)"
               cp apps/kolimi-desktop/target/release/bundle/dmg/*.dmg dist/
-              tar -C apps/kolimi-desktop/target/release/bundle/macos \
-                -czf "dist/kolimi-desktop_${version}_${arch}.app.tar.gz" *.app
+              # Expand *.app inside the bundle directory; `tar -C` does not
+              # affect shell glob expansion.
+              (
+                cd apps/kolimi-desktop/target/release/bundle/macos
+                tar -czf "$GITHUB_WORKSPACE/dist/kolimi-desktop_${version}_${arch}.app.tar.gz" *.app
+              )
               ;;
           esac
           ls -lh dist
