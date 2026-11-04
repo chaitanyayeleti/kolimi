@@ -4,7 +4,7 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.5] - 2026-11-05
 
 ### Changed
 - **Grouped Settings**: the Settings dialog now has Encryption, Sharing,

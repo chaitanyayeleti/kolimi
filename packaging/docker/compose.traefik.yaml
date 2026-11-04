@@ -42,7 +42,7 @@ services:
 
   kolimi:
     # Prebuilt image from GitHub Container Registry — no local build.
-    image: ${KOLIMI_IMAGE:-ghcr.io/chaitanyayeleti/kolimi:0.4.3}
+    image: ${KOLIMI_IMAGE:-ghcr.io/chaitanyayeleti/kolimi:0.4.5}
     restart: unless-stopped
     environment:
       KOLIMI_ORIGIN: https://${KOLIMI_DOMAIN:?set KOLIMI_DOMAIN in .env}
