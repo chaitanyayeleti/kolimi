@@ -8,6 +8,7 @@
 
 mod api;
 mod app;
+mod browser;
 mod components;
 mod dialogs;
 mod e2ee;
