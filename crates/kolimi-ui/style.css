@@ -26,6 +26,15 @@
   --space-4: 1rem;
   --space-5: 1.5rem;
   --space-6: 2rem;
+  --text-2xs: 0.72rem;
+  --text-xs: 0.8rem;
+  --text-sm: 0.9rem;
+  --text-md: 1rem;
+  --text-lg: 1.15rem;
+  --text-xl: 1.2rem;
+  --weight-medium: 500;
+  --weight-semibold: 550;
+  --weight-bold: 650;
   --radius: 12px;
   --radius-sm: 8px;
   --radius-lg: 16px;
@@ -579,6 +588,10 @@ textarea:focus {
   margin: var(--space-1) 0 var(--space-4);
 }
 
+.settings-tabs button {
+  font-weight: var(--weight-medium);
+}
+
 /* The first heading inside a tab already has the tab strip above it. */
 .settings-section > h3:first-of-type {
   margin-top: 0;
@@ -884,8 +897,8 @@ textarea:focus {
 }
 
 .badge {
-  font-size: 0.72rem;
-  font-weight: 500;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
   color: var(--accent);
   background: var(--accent-soft);
   border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
@@ -1344,7 +1357,8 @@ textarea:focus {
 }
 
 .modal-head h2 {
-  font-size: 1.2rem;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
 }
 
 .lead-icon {
@@ -1367,11 +1381,12 @@ textarea:focus {
   margin: var(--space-5) 0 var(--space-2);
   padding-top: var(--space-4);
   border-top: 1px solid var(--border);
-  font-size: 1rem;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
 }
 
 .modal > p.muted {
-  font-size: 0.9rem;
+  font-size: var(--text-sm);
   margin: var(--space-1) 0 var(--space-3);
 }
 

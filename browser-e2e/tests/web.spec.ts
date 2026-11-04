@@ -57,6 +57,31 @@ async function row(page: Page, name: string) {
   return page.locator("li.file", { hasText: name }).first();
 }
 
+test("web settings tabs and the passkeys shortcut", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const modal = page.locator(".modal");
+
+  await expect(
+    modal.getByRole("tab", { name: "Encryption", exact: true }),
+  ).toBeVisible();
+  await modal.getByRole("tab", { name: "Passkeys", exact: true }).click();
+  await expect(
+    modal.getByRole("heading", { name: "Passkeys", exact: true }),
+  ).toBeVisible();
+  await expect(modal.getByText("Two-factor (TOTP)", { exact: true })).toBeVisible();
+
+  await modal.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Passkeys", exact: true }).click();
+  const shortcut = page.locator(".modal");
+  await expect(
+    shortcut.getByRole("heading", { name: "Passkeys", exact: true }),
+  ).toBeVisible();
+  await expect(
+    shortcut.getByLabel("Passphrase", { exact: true }),
+  ).toHaveCount(0);
+});
+
 test("web rename and delete", async ({ page }) => {
   await login(page);
   const original = `browser-e2e-${Date.now()}.txt`;

@@ -7,26 +7,32 @@ use leptos::task::spawn_local;
 use serde_json::{Value, json};
 use wasm_bindgen::{JsCast, closure::Closure};
 
+use self::actions::FilesContext;
+use self::dialogs::BrowserDialogs;
 use self::overlays::{ContextMenu, Lightbox, Toasts, UploadTray};
 use self::rows::{FileArea, SearchResults, TrashArea};
 use self::search::{encrypted_name_hits, received_mounts};
+use self::sharing::SharingContext;
 use self::shell::{Sidebar, Topbar};
 use self::types::{
-    Entry, SearchHit, Tab, TrashItem, UploadItem, UploadStatus, is_image_name, is_text_name,
-    parent_of, parse_entries, parse_results, parse_trash,
+    Entry, SearchHit, Tab, TrashItem, UploadItem, is_image_name, is_text_name, parent_of,
+    parse_entries, parse_results, parse_trash,
 };
+use self::uploads::UploadContext;
 use crate::api;
 use crate::app::{View as AppView, encode, encode_path, mark_session_expired, toggle_theme};
 use crate::components::Icon;
-use crate::dialogs::{
-    AdminDialog, SettingsDialog, SettingsTab, ShareDialog, VaultSetupDialog, VersionsDialog,
-};
+use crate::dialogs::SettingsTab;
 
+mod actions;
+mod dialogs;
 mod overlays;
 mod rows;
 mod search;
+mod sharing;
 mod shell;
 mod types;
+mod uploads;
 
 #[component]
 pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
@@ -353,271 +359,6 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         }
     };
 
-    // Uploads one file, tracking it in the tray via its own signals.
-    // Encrypted destinations are encrypted client-side first (chunks +
-    // manifest + wrapped key, like the sync client); plaintext uploads
-    // stream the Blob straight from disk with no WASM-side copy.
-    let start_upload = move |file: web_sys::File,
-                             dir: String,
-                             progress: RwSignal<u8>,
-                             status: RwSignal<UploadStatus>| {
-        let plain_name = file.name();
-        let tray = uploads;
-        spawn_local(async move {
-            // Shared helper: mark this row done/failed and refresh when the
-            // tray has no in-flight uploads left.
-            let finish = move |ok: bool, warning: Option<u8>| {
-                if let Some(percent) = warning {
-                    quota_warn.set(Some(percent));
-                }
-                status.set(if ok {
-                    UploadStatus::Done
-                } else {
-                    UploadStatus::Failed
-                });
-                if !tray
-                    .get_untracked()
-                    .iter()
-                    .any(|item| item.status.get_untracked() == UploadStatus::Uploading)
-                {
-                    let snapshot = tray.get_untracked();
-                    let done = snapshot
-                        .iter()
-                        .filter(|item| item.status.get_untracked() == UploadStatus::Done)
-                        .count();
-                    let failed = snapshot
-                        .iter()
-                        .filter(|item| item.status.get_untracked() == UploadStatus::Failed)
-                        .count();
-                    if failed == 0 {
-                        notice.set(format!(
-                            "Uploaded {done} file{}",
-                            if done == 1 { "" } else { "s" }
-                        ));
-                    } else {
-                        error.set(format!("Uploaded {done}, {failed} failed"));
-                    }
-                    tray.update(|list| {
-                        list.retain(|item| item.status.get_untracked() != UploadStatus::Done);
-                    });
-                    load(path.get_untracked());
-                    refresh_usage();
-                }
-            };
-            let encrypted = crate::e2ee::file_info(&dir)
-                .await
-                .map(|info| info["encrypted"].as_bool().unwrap_or(false))
-                .unwrap_or(false);
-            // A writable received share is encrypted with the owner's name
-            // key and MLS keyring, not this account's Vault keys.
-            if crate::mls::is_writable_shared(&dir).await {
-                let Some(master) = e2ee_master.get_untracked() else {
-                    finish(false, None);
-                    error.set("Unlock encryption to write to this shared folder.".to_string());
-                    open_settings.run(SettingsTab::Encryption);
-                    return;
-                };
-                let bytes = match api::read_file(&file).await {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        finish(false, None);
-                        error.set(e);
-                        return;
-                    }
-                };
-                progress.set(50);
-                match crate::mls::upload_shared(&master, &dir, &plain_name, &bytes).await {
-                    Ok(()) => {
-                        progress.set(100);
-                        finish(true, None);
-                    }
-                    Err(e) => {
-                        finish(false, None);
-                        error.set(e);
-                    }
-                }
-                return;
-            }
-            if encrypted {
-                let Some(master) = e2ee_master.get_untracked() else {
-                    finish(false, None);
-                    // First use of an encrypted folder: create the Vault
-                    // passphrase if none exists, otherwise unlock it.
-                    if crate::e2ee::keyring_exists().await == Ok(false) {
-                        vault_setup.set(true);
-                    } else {
-                        error.set(
-                            "This folder is encrypted — unlock it to upload (Encryption in the sidebar)."
-                                .to_string(),
-                        );
-                        open_settings.run(SettingsTab::Encryption);
-                    }
-                    return;
-                };
-                let bytes = match api::read_file(&file).await {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        finish(false, None);
-                        error.set(e);
-                        return;
-                    }
-                };
-                // The server must not learn the name: encode it as one
-                // opaque path segment inside the encrypted folder.
-                let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &dir);
-                let target =
-                    match crate::e2ee::encode_component(&master, &parent_plaintext, &plain_name) {
-                        Ok(encoded) => format!("{}/{}", dir.trim_end_matches('/'), encoded),
-                        Err(e) => {
-                            finish(false, None);
-                            error.set(e);
-                            return;
-                        }
-                    };
-                progress.set(50);
-                match crate::e2ee::upload_encrypted(&master, &target, &bytes).await {
-                    Ok(()) => {
-                        progress.set(100);
-                        finish(true, None);
-                    }
-                    Err(e) => {
-                        finish(false, None);
-                        error.set(e);
-                    }
-                }
-                return;
-            }
-            let target = format!("{}/{}", dir.trim_end_matches('/'), plain_name);
-            let url = format!("/dav{}", encode_path(&target));
-            let file_name = plain_name;
-            let blob = web_sys::Blob::from(file);
-            api::upload_blob(
-                &url,
-                &blob,
-                move |pct| progress.set(pct),
-                move |result| {
-                    let (ok, warning) = match result {
-                        Ok((code, warning)) => {
-                            if !matches!(code, 201 | 204) {
-                                error.set(format!(
-                                    "Upload of “{}” failed (HTTP {code}){}.{}",
-                                    file_name,
-                                    if code == 403 {
-                                        " — the session or CSRF token was rejected"
-                                    } else if code == 413 {
-                                        " — file too large"
-                                    } else {
-                                        ""
-                                    },
-                                    if code == 403 {
-                                        " Try signing out and in again."
-                                    } else {
-                                        ""
-                                    },
-                                ));
-                            }
-                            (matches!(code, 201 | 204), warning)
-                        }
-                        Err(e) => {
-                            error.set(format!("Upload of “{}” failed: {e}", file_name));
-                            (false, None)
-                        }
-                    };
-                    finish(ok, warning);
-                },
-            );
-        });
-    };
-
-    let upload_files = move |files: Vec<web_sys::File>| {
-        if files.is_empty() {
-            return;
-        }
-        let dir = path.get_untracked();
-        for file in files {
-            let id = upload_seq.get_untracked() + 1;
-            upload_seq.set(id);
-            let progress = RwSignal::new(0u8);
-            let status = RwSignal::new(UploadStatus::Uploading);
-            uploads.update(|list| {
-                list.push(UploadItem {
-                    id,
-                    name: file.name(),
-                    dir: dir.clone(),
-                    progress,
-                    status,
-                    file: file.clone(),
-                });
-            });
-            start_upload(file, dir.clone(), progress, status);
-        }
-    };
-
-    let collect_files = move |files: web_sys::FileList| {
-        let mut selected = Vec::new();
-        for index in 0..files.length() {
-            if let Some(file) = files.get(index) {
-                selected.push(file);
-            }
-        }
-        selected
-    };
-
-    let retry_upload = Callback::new(
-        move |(file, dir, progress, status): (
-            web_sys::File,
-            String,
-            RwSignal<u8>,
-            RwSignal<UploadStatus>,
-        )| {
-            progress.set(0);
-            status.set(UploadStatus::Uploading);
-            start_upload(file, dir, progress, status);
-        },
-    );
-
-    let upload = move |ev: ev::Event| {
-        let Some(input) = ev
-            .target()
-            .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-        else {
-            return;
-        };
-        let Some(files) = input.files() else {
-            return;
-        };
-        let selected = collect_files(files);
-        // Reset so the same files can be chosen again later.
-        input.set_value("");
-        upload_files(selected);
-    };
-
-    let drop_files = move |ev: ev::DragEvent| {
-        ev.prevent_default();
-        dragging.set(false);
-        let Some(transfer) = ev.data_transfer() else {
-            return;
-        };
-        if let Some(files) = transfer.files() {
-            let selected = collect_files(files);
-            if selected.is_empty() {
-                // A folder (not files) was dropped: browsers only expose
-                // files here, so say so instead of failing silently.
-                let types = transfer.types();
-                if (0..types.length())
-                    .filter_map(|i| types.get(i).as_string())
-                    .any(|kind| kind == "Files")
-                {
-                    error.set(
-                        "That looks like a folder — drag-and-drop takes files only. Create the folder first, then drop the files inside.".to_string(),
-                    );
-                }
-                return;
-            }
-            upload_files(selected);
-        }
-    };
-
     let mkdir = move |_| {
         let Some(name) = api::prompt("New folder name", "") else {
             return;
@@ -680,611 +421,59 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         });
     };
 
-    // Encrypted content must be unlocked before it can be shared, renamed,
-    // moved, or deleted: while locked, Vault is read-only. (The server
-    // cannot verify key possession, so this guard is client-side — but it
-    // stops the accidental "I deleted my Vault while it was locked".)
-    let require_unlock = move |entry: &Entry| -> bool {
-        if !entry.encrypted || e2ee_master.get_untracked().is_some() {
-            return true;
-        }
-        error.set("Vault is locked — unlock encryption first (Settings → Encryption).".to_string());
-        open_settings.run(SettingsTab::Encryption);
-        false
-    };
-
-    let delete_entry = move |entry: Entry| {
-        if !require_unlock(&entry) {
-            return;
-        }
-        if !api::confirm(&format!("Move “{}” to trash?", entry.name)) {
-            return;
-        }
-        let current = path.get_untracked();
-        let entry_path = entry.path.clone();
-        let entry_name = entry.name.clone();
-        spawn_local(async move {
-            let url = format!("/dav{}", encode_path(&entry_path));
-            match api::dav("DELETE", &url, None, &[]).await {
-                Ok(r) if r.status == 204 => {
-                    // Find the trashed node so the move can be undone.
-                    if let Ok(tr) = api::get("/api/trash").await
-                        && tr.status == 200
-                        && let Some(items) = tr.body.as_array()
-                        && let Some(id) = items
-                            .iter()
-                            .find(|item| {
-                                item["original_path"].as_str() == Some(entry_path.as_str())
-                            })
-                            .and_then(|item| item["id"].as_i64())
-                    {
-                        undo.set(Some((entry_name.clone(), id)));
-                    }
-                    if let Some(master) = e2ee_master.get_untracked() {
-                        let _ = crate::mls::remove_path_prefix(&master, &entry_path).await;
-                    }
-                    load(current);
-                    refresh_usage();
-                }
-                Ok(r) => error.set(format!("Delete failed (HTTP {})", r.status)),
-                Err(e) => error.set(e),
-            }
-        });
-    };
-
-    let rename_entry = move |entry: Entry| {
-        if !require_unlock(&entry) {
-            return;
-        }
-        let Some(name) = api::prompt("New name", &entry.name) else {
-            return;
-        };
-        if name.is_empty() || name == entry.name {
-            return;
-        }
-        let current = path.get_untracked();
-        let encrypted = entry.encrypted && !entry.shared;
-        let shared = entry.shared;
-        let source = entry.path.clone();
-        spawn_local(async move {
-            if shared {
-                let Some(master) = e2ee_master.get_untracked() else {
-                    error.set("Unlock encryption first (Settings → Encryption).".to_string());
-                    open_settings.run(SettingsTab::Encryption);
-                    return;
-                };
-                match crate::mls::encode_shared_name(&master, &current, &name).await {
-                    Ok(Some(encoded)) => {
-                        let destination = format!("{}/{}", current.trim_end_matches('/'), encoded);
-                        let url = format!("/dav{}", encode_path(&source));
-                        let dest_dav = format!("/dav{}", encode_path(&destination));
-                        match api::dav("MOVE", &url, None, &[("destination", &dest_dav)]).await {
-                            Ok(r) if matches!(r.status, 201 | 204) => {
-                                let _ =
-                                    crate::mls::rename_path_prefix(&master, &source, &destination)
-                                        .await;
-                                load(current);
-                            }
-                            Ok(r) => error.set(format!("Rename failed (HTTP {})", r.status)),
-                            Err(e) => error.set(e),
-                        }
-                    }
-                    Ok(None) => error.set(
-                        "This shared folder is read-only — ask the owner for write access."
-                            .to_string(),
-                    ),
-                    Err(e) => error.set(e),
-                }
-                return;
-            }
-            if encrypted {
-                let Some(master) = e2ee_master.get_untracked() else {
-                    error.set("Vault is locked — unlock encryption first.".to_string());
-                    open_settings.run(SettingsTab::Encryption);
-                    return;
-                };
-                let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &current);
-                let encoded = match crate::e2ee::encode_component(&master, &parent_plaintext, &name)
-                {
-                    Ok(encoded) => encoded,
-                    Err(e) => {
-                        error.set(e);
-                        return;
-                    }
-                };
-                // Metadata-only server move: works on ciphertext.
-                let destination = format!("{}/{}", current.trim_end_matches('/'), encoded);
-                match crate::e2ee::move_file(&source, &destination).await {
-                    Ok(()) => {
-                        let _ =
-                            crate::mls::rename_path_prefix(&master, &source, &destination).await;
-                        load(current);
-                    }
-                    Err(e) => error.set(e),
-                }
-                return;
-            }
-            let destination = format!(
-                "/dav{}",
-                encode_path(&format!("{}/{}", current.trim_end_matches('/'), name))
-            );
-            let url = format!("/dav{}", encode_path(&source));
-            match api::dav("MOVE", &url, None, &[("destination", &destination)]).await {
-                Ok(r) if matches!(r.status, 201 | 204) => load(current),
-                Ok(r) => error.set(format!("Rename failed (HTTP {})", r.status)),
-                Err(e) => error.set(e),
-            }
-        });
-    };
-
-    // Moves `entry` into `dest_dir` (drag-to-move onto a folder or crumb).
-    // Crossing the encryption boundary is refused: plaintext must never land
-    // in an encrypted tree, and ciphertext must not become unreadable in a
-    // plaintext one.
-    let move_into = move |entry: Entry, dest_dir: String| {
-        if !require_unlock(&entry) {
-            return;
-        }
-        let source = entry.path.clone();
-        let encrypted = entry.encrypted && !entry.shared;
-        let name = entry.name.clone();
-        spawn_local(async move {
-            let dest_encrypted = crate::e2ee::file_info(&dest_dir)
-                .await
-                .map(|info| info["encrypted"].as_bool().unwrap_or(false))
-                .unwrap_or(false);
-            if !encrypted && dest_encrypted {
-                error.set(format!(
-                    "“{name}” is not encrypted — upload it into the Vault so it is encrypted on your device."
-                ));
-                return;
-            }
-            if encrypted && !dest_encrypted {
-                error.set(
-                    "This item is encrypted — it can only move between encrypted folders."
-                        .to_string(),
-                );
-                return;
-            }
-            let destination = if encrypted {
-                let Some(master) = e2ee_master.get_untracked() else {
-                    error.set("Vault is locked — unlock encryption first.".to_string());
-                    open_settings.run(SettingsTab::Encryption);
-                    return;
-                };
-                let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &dest_dir);
-                let encoded = match crate::e2ee::encode_component(&master, &parent_plaintext, &name)
-                {
-                    Ok(encoded) => encoded,
-                    Err(e) => {
-                        error.set(e);
-                        return;
-                    }
-                };
-                format!("{}/{}", dest_dir.trim_end_matches('/'), encoded)
-            } else {
-                format!("{}/{}", dest_dir.trim_end_matches('/'), name)
-            };
-            if destination == source {
-                return;
-            }
-            if encrypted {
-                let Some(master) = e2ee_master.get_untracked() else {
-                    error.set("Vault is locked — unlock encryption first.".to_string());
-                    open_settings.run(SettingsTab::Encryption);
-                    return;
-                };
-                match crate::e2ee::move_file(&source, &destination).await {
-                    Ok(()) => {
-                        let _ =
-                            crate::mls::rename_path_prefix(&master, &source, &destination).await;
-                        notice.set(format!("Moved {name}"));
-                        load(path.get_untracked());
-                    }
-                    Err(e) => error.set(e),
-                }
-                return;
-            }
-            let dav_source = format!("/dav{}", encode_path(&source));
-            let dav_dest = format!("/dav{}", encode_path(&destination));
-            match api::dav("MOVE", &dav_source, None, &[("destination", &dav_dest)]).await {
-                Ok(r) if matches!(r.status, 201 | 204) => {
-                    notice.set(format!("Moved {name}"));
-                    load(path.get_untracked());
-                }
-                Ok(r) => error.set(format!("Move failed (HTTP {})", r.status)),
-                Err(e) => error.set(e),
-            }
-        });
-    };
-
-    // ---- Multi-select + bulk actions ----
-    let toggle_select = move |target: String| {
-        selected.update(|set| {
-            if !set.insert(target.clone()) {
-                set.remove(&target);
-            }
-        });
-    };
-
-    let bulk_trash = move |_| {
-        let paths: Vec<String> = selected.get_untracked().into_iter().collect();
-        // Encrypted selections need an unlock, exactly like single delete.
-        let encrypted_selected = entries
-            .get_untracked()
-            .into_iter()
-            .any(|entry| entry.encrypted && paths.contains(&entry.path));
-        if encrypted_selected && e2ee_master.get_untracked().is_none() {
-            error.set(
-                "Vault is locked — unlock encryption first (Settings → Encryption).".to_string(),
-            );
-            open_settings.run(SettingsTab::Encryption);
-            return;
-        }
-        let current = path.get_untracked();
-        let count = paths.len();
-        spawn_local(async move {
-            let mut failed = 0usize;
-            for target in &paths {
-                let url = format!("/dav{}", encode_path(target));
-                match api::dav("DELETE", &url, None, &[]).await {
-                    Ok(r) if (200..300).contains(&r.status) => {
-                        if let Some(master) = e2ee_master.get_untracked() {
-                            let _ = crate::mls::remove_path_prefix(&master, target).await;
-                        }
-                    }
-                    Ok(r) => {
-                        failed += 1;
-                        error.set(format!("Delete failed (HTTP {})", r.status));
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        error.set(e);
-                    }
-                }
-            }
-            selected.set(std::collections::HashSet::new());
-            if failed == 0 {
-                notice.set(format!("Moved {count} item(s) to trash"));
-            }
-            load(current);
-            refresh_usage();
-        });
-    };
-
-    let bulk_move = move |_| {
-        let Some(dest) = api::prompt("Move selected to (folder path)", "/") else {
-            return;
-        };
-        let paths: Vec<String> = selected.get_untracked().into_iter().collect();
-        // Encrypted entries go through the metadata-only API move; the
-        // rest keep using WebDAV.
-        let encrypted: std::collections::HashSet<String> = entries
-            .get_untracked()
-            .into_iter()
-            .filter(|e| e.encrypted && !e.shared)
-            .map(|e| e.path)
-            .collect();
-        if encrypted.iter().any(|path| paths.contains(path))
-            && e2ee_master.get_untracked().is_none()
-        {
-            error.set(
-                "Vault is locked — unlock encryption first (Settings → Encryption).".to_string(),
-            );
-            open_settings.run(SettingsTab::Encryption);
-            return;
-        }
-        let count = paths.len();
-        spawn_local(async move {
-            let mut failed = 0usize;
-            for target in &paths {
-                let name = target.rsplit('/').next().unwrap_or("file");
-                let destination = format!("{}/{}", dest.trim_end_matches('/'), name);
-                if encrypted.contains(target) {
-                    match crate::e2ee::move_file(target, &destination).await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            failed += 1;
-                            error.set(e);
-                        }
-                    }
-                    continue;
-                }
-                let source = format!("/dav{}", encode_path(target));
-                let dav_dest = format!("/dav{}", encode_path(&destination));
-                match api::dav("MOVE", &source, None, &[("destination", &dav_dest)]).await {
-                    Ok(r) if (200..300).contains(&r.status) => {}
-                    Ok(r) => {
-                        failed += 1;
-                        error.set(format!("Move failed (HTTP {})", r.status));
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        error.set(e);
-                    }
-                }
-            }
-            selected.set(std::collections::HashSet::new());
-            if failed == 0 {
-                notice.set(format!("Moved {count} item(s)"));
-            }
-            load(path.get_untracked());
-        });
-    };
-
-    let decrypt_entry = move |entry: Entry| {
-        let Some(master) = e2ee_master.get_untracked() else {
-            error.set("Unlock encryption first (Settings → Encryption).".to_string());
-            open_settings.run(SettingsTab::Encryption);
-            return;
-        };
-        let path = entry.path.clone();
-        let display_name = entry.name.clone();
-        let shared = entry.shared;
-        spawn_local(async move {
-            let result = if shared {
-                crate::mls::decrypt_shared_or_legacy(&master, &path, &display_name).await
-            } else {
-                crate::e2ee::decrypt_file(&master, &path).await
-            };
-            match result {
-                Ok((name, bytes)) => {
-                    crate::e2ee::save_bytes(&name, &bytes);
-                    notice.set(format!("Decrypted {name}"));
-                }
-                Err(e) => error.set(e),
-            }
-        });
-    };
-
-    let bulk_download = move |_| {
-        let paths: Vec<String> = selected.get_untracked().into_iter().collect();
-        let known: std::collections::HashMap<String, Entry> = entries
-            .get_untracked()
-            .into_iter()
-            .map(|entry| (entry.path.clone(), entry))
-            .collect();
-        for target in paths {
-            // Encrypted files cannot be fetched as-is: decrypt client-side.
-            if let Some(entry) = known.get(&target).filter(|entry| entry.encrypted) {
-                decrypt_entry(entry.clone());
-                continue;
-            }
-            let url = format!("/dav{}", encode_path(&target));
-            if let Some(document) = web_sys::window().and_then(|window| window.document())
-                && let Ok(element) = document.create_element("a")
-                && let Ok(anchor) = element.dyn_into::<web_sys::HtmlAnchorElement>()
-            {
-                anchor.set_href(&url);
-                anchor.set_download("");
-                anchor.click();
-            }
-        }
-        selected.set(std::collections::HashSet::new());
-    };
-
-    let restore = move |item: TrashItem| {
-        spawn_local(async move {
-            match api::send_json(
-                "POST",
-                &format!("/api/trash/{}/restore", item.id),
-                &json!({}),
-            )
-            .await
-            {
-                Ok(r) if r.status == 200 => {
-                    notice.set(format!("Restored {}", item.name));
-                    load_trash();
-                    refresh_usage();
-                }
-                Ok(r) => error.set(r.error().unwrap_or("Restore failed").to_string()),
-                Err(e) => error.set(e),
-            }
-        });
-    };
-
-    let purge = move |item: TrashItem| {
-        if !api::confirm(&format!("Permanently delete “{}”?", item.name)) {
-            return;
-        }
-        spawn_local(async move {
-            match api::delete(&format!("/api/trash/{}", item.id)).await {
-                Ok(r) if r.status == 204 => {
-                    load_trash();
-                    refresh_usage();
-                }
-                Ok(r) => error.set(r.error().unwrap_or("Delete failed").to_string()),
-                Err(e) => error.set(e),
-            }
-        });
-    };
-
-    let share_entry = move |entry: Entry| {
-        if entry.encrypted && e2ee_master.get_untracked().is_none() {
-            error.set(
-                "Vault is locked — unlock encryption before sharing, or the recipient gets no key."
-                    .to_string(),
-            );
-            open_settings.run(SettingsTab::Encryption);
-            return;
-        }
-        share_target.set(Some(entry));
-    };
-
-    // Declares a folder encrypted (or plaintext). The server flag is what
-    // every client reads, so this is the only switch that matters. Making a
-    // non-empty folder encrypted first re-uploads every plaintext file
-    // encrypted, then flips the flag: the server refuses a mixed folder, and
-    // leaving plaintext behind would break the "anything inside is encrypted"
-    // promise. Already-encrypted files are skipped, so an interrupted run can
-    // simply be retried.
-    let encrypting = RwSignal::new(false);
-    let toggle_encryption = move |entry: Entry| {
-        if encrypting.get_untracked() {
-            return;
-        }
-        let path = entry.path.clone();
-        let parent = path
-            .rsplit_once('/')
-            .map(|(dir, _)| {
-                if dir.is_empty() {
-                    "/".to_string()
-                } else {
-                    dir.to_string()
-                }
-            })
-            .unwrap_or_else(|| "/".to_string());
-        if entry.encrypted {
-            spawn_local(async move {
-                match api::send_json(
-                    "POST",
-                    "/api/files/encrypt",
-                    &json!({ "path": path, "encrypted": false }),
-                )
-                .await
-                {
-                    Ok(r) if r.status == 200 => {
-                        notice.set("Folder is now plaintext".to_string());
-                        load(parent);
-                    }
-                    Ok(r) => error.set(
-                        r.error()
-                            .unwrap_or("Could not change encryption")
-                            .to_string(),
-                    ),
-                    Err(e) => error.set(e),
-                }
-            });
-            return;
-        }
-        let Some(master) = e2ee_master.get_untracked() else {
-            error.set("Unlock encryption first (Settings → Encryption).".to_string());
-            open_settings.run(SettingsTab::Encryption);
-            return;
-        };
-        encrypting.set(true);
-        spawn_local(async move {
-            let files = match crate::e2ee::plaintext_files_under(&path).await {
-                Ok(files) => files,
-                Err(e) => {
-                    error.set(e);
-                    encrypting.set(false);
-                    return;
-                }
-            };
-            if !files.is_empty() {
-                let message = format!(
-                    "Encrypt {} existing file{} in this folder now? They will be re-uploaded encrypted — keep this tab open until it finishes.",
-                    files.len(),
-                    if files.len() == 1 { "" } else { "s" }
-                );
-                let confirmed = web_sys::window()
-                    .and_then(|window| window.confirm_with_message(&message).ok())
-                    .unwrap_or(false);
-                if !confirmed {
-                    encrypting.set(false);
-                    return;
-                }
-            }
-            let total = files.len();
-            for (index, file) in files.iter().enumerate() {
-                let name = file.path.rsplit('/').next().unwrap_or(&file.path);
-                notice.set(format!("Encrypting {} of {}: {name}", index + 1, total));
-                let bytes = match api::get_bytes(&format!("/dav{}", encode_path(&file.path))).await
-                {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        error.set(format!("Could not read “{}”: {e}", file.path));
-                        load(parent.clone());
-                        encrypting.set(false);
-                        return;
-                    }
-                };
-                // Also encrypt the name. A legacy plaintext name is first
-                // moved to its encoded form (metadata-only), then the content
-                // is encrypted in place. Names that are already encoded
-                // (an interrupted earlier run) are left alone.
-                let (dir, name) = file
-                    .path
-                    .rsplit_once('/')
-                    .map(|(dir, name)| (dir.to_string(), name.to_string()))
-                    .unwrap_or_else(|| ("/".to_string(), file.path.clone()));
-                let target = if kolimi_crypto::is_encoded_name(&name) {
-                    file.path.clone()
-                } else {
-                    let parent_plaintext = crate::e2ee::decode_display_path(Some(&master), &dir);
-                    let encoded =
-                        match crate::e2ee::encode_component(&master, &parent_plaintext, &name) {
-                            Ok(encoded) => encoded,
-                            Err(e) => {
-                                error.set(e);
-                                encrypting.set(false);
-                                return;
-                            }
-                        };
-                    let target = format!("{dir}/{encoded}");
-                    if let Err(e) = crate::e2ee::move_file(&file.path, &target).await {
-                        error.set(format!("Renaming “{name}” for encryption failed: {e}"));
-                        load(parent.clone());
-                        encrypting.set(false);
-                        return;
-                    }
-                    target
-                };
-                if let Err(e) = crate::e2ee::upload_encrypted_versioned(
-                    &master,
-                    &target,
-                    &bytes,
-                    file.content_id.as_deref(),
-                )
-                .await
-                {
-                    error.set(format!("Encrypting “{}” failed: {e}", file.path));
-                    load(parent.clone());
-                    encrypting.set(false);
-                    return;
-                }
-            }
-            match api::send_json(
-                "POST",
-                "/api/files/encrypt",
-                &json!({ "path": path, "encrypted": true }),
-            )
-            .await
-            {
-                Ok(r) if r.status == 200 => {
-                    notice.set(if total == 0 {
-                        "Folder encrypted — new files are encrypted on your device".to_string()
-                    } else {
-                        format!(
-                            "Folder encrypted — {total} file{} encrypted on your device",
-                            if total == 1 { "" } else { "s" }
-                        )
-                    });
-                    load(parent);
-                }
-                Ok(r) => error.set(
-                    r.error()
-                        .unwrap_or("Could not change encryption")
-                        .to_string(),
-                ),
-                Err(e) => error.set(e),
-            }
-            encrypting.set(false);
-        });
-    };
-
     let ctx_open = Callback::new(move |entry: Entry| open(entry));
-    let ctx_decrypt = Callback::new(move |entry: Entry| decrypt_entry(entry));
-    let ctx_share = Callback::new(move |entry: Entry| share_entry(entry));
-    let ctx_rename = Callback::new(move |entry: Entry| rename_entry(entry));
-    let ctx_delete = Callback::new(move |entry: Entry| delete_entry(entry));
-    let ctx_versions = Callback::new(move |entry: Entry| versions_for.set(Some(entry)));
-    let ctx_toggle_encryption = Callback::new(move |entry: Entry| toggle_encryption(entry));
     let file_load = Callback::new(move |next: String| load(next));
-    let file_toggle_select = Callback::new(move |target: String| toggle_select(target));
-    let file_move_into =
-        Callback::new(move |(entry, dest): (Entry, String)| move_into(entry, dest));
+    let load_trash_cb = Callback::new(move |_: ()| load_trash());
+    let files_ctx = FilesContext {
+        path,
+        entries,
+        selected,
+        master: e2ee_master,
+        error,
+        notice,
+        undo,
+        load: file_load,
+        load_trash: load_trash_cb,
+        refresh_usage: Callback::new(move |_: ()| refresh_usage()),
+        open_encryption,
+    };
+    let file_actions = actions::actions(files_ctx);
+    let ctx_decrypt = file_actions.decrypt;
+    let ctx_rename = file_actions.rename;
+    let ctx_delete = file_actions.delete;
+    let ctx_versions = Callback::new(move |entry: Entry| versions_for.set(Some(entry)));
+    let file_toggle_select = file_actions.toggle_select;
+    let file_move_into = file_actions.move_into;
+    let sharing_ctx = SharingContext {
+        master: e2ee_master,
+        error,
+        notice,
+        share_target,
+        encrypting: RwSignal::new(false),
+        load: file_load,
+        open_encryption,
+    };
+    let ctx_share = Callback::new(move |entry: Entry| sharing::share_entry(sharing_ctx, entry));
+    let ctx_toggle_encryption =
+        Callback::new(move |entry: Entry| sharing::toggle_encryption(sharing_ctx, entry));
+    let upload_ctx = UploadContext {
+        uploads,
+        upload_seq,
+        path,
+        master: e2ee_master,
+        quota_warn,
+        notice,
+        error,
+        vault_setup,
+        dragging,
+        load: file_load,
+        refresh_usage: Callback::new(move |_: ()| refresh_usage()),
+        open_encryption,
+    };
+    let upload = move |ev: ev::Event| uploads::upload_event(upload_ctx, ev);
+    let drop_files = move |ev: ev::DragEvent| uploads::drop_files(upload_ctx, ev);
+    let retry_upload = Callback::new(move |args| uploads::retry_upload(upload_ctx, args));
+
     let search_open = Callback::new(move |hit: SearchHit| {
         search_active.set(false);
         if hit.is_dir {
@@ -1293,8 +482,11 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
             load(parent_of(&hit.path));
         }
     });
-    let trash_restore = Callback::new(move |item: TrashItem| restore(item));
-    let trash_purge = Callback::new(move |item: TrashItem| purge(item));
+    let trash_restore = file_actions.restore;
+    let trash_purge = file_actions.purge;
+    let bulk_download = move |_| file_actions.bulk_download.run(());
+    let bulk_move = move |_| file_actions.bulk_move.run(());
+    let bulk_trash = move |_| file_actions.bulk_trash.run(());
 
     let search_submit = move |ev: ev::SubmitEvent| {
         ev.prevent_default();
@@ -1515,86 +707,18 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
             />
 
 
-            {move || {
-                vault_setup
-                .get()
-                .then(|| {
-                    view! {
-                        <VaultSetupDialog
-                            on_close=Callback::new(move |_| {
-                                if let Some(storage) = web_sys::window()
-                                    .and_then(|window| window.local_storage().ok().flatten())
-                                {
-                                    let _ = storage.set_item("kolimi.vault.dismissed", "1");
-                                }
-                                vault_setup.set(false);
-                            })
-                            on_done=Callback::new(move |master| {
-                                crate::e2ee::remember_master(&master);
-                                e2ee_master.set(Some(master));
-                                vault_setup.set(false);
-                                notice.set("Vault ready — anything you put inside it is encrypted".to_string());
-                                load(path.get_untracked());
-                            })
-                        />
-                    }
-                })
-        }}
-
-            {move || {
-                share_target
-                .get()
-                .map(|entry| {
-                    view! {
-                        <ShareDialog
-                            path=entry.path.clone()
-                            name=entry.name.clone()
-                            encrypted=entry.encrypted
-                            master=e2ee_master.get()
-                            on_close=Callback::new(move |_| share_target.set(None))
-                        />
-                    }
-                })
-        }}
-
-            {move || {
-                versions_for
-                .get()
-                .map(|entry| {
-                    let current = path.get();
-                    view! {
-                        <VersionsDialog
-                            path=entry.path.clone()
-                            name=entry.name.clone()
-                            on_close=Callback::new(move |_| versions_for.set(None))
-                            on_restored=Callback::new(move |_| load(current.clone()))
-                        />
-                    }
-                })
-        }}
-
-        {move || {
-            admin_open
-                .get()
-                .then(|| {
-                    view! {
-                        <AdminDialog on_close=Callback::new(move |_| admin_open.set(false))/>
-                    }
-                })
-        }}
-        {move || {
-            e2ee_open
-                .get()
-                .then(|| {
-                    view! {
-                        <SettingsDialog
-                            master=e2ee_master
-                            tab=settings_tab
-                            on_close=Callback::new(move |_| e2ee_open.set(false))
-                        />
-                    }
-                })
-        }}
+            <BrowserDialogs
+                vault_setup=vault_setup
+                share_target=share_target
+                versions_for=versions_for
+                admin_open=admin_open
+                e2ee_open=e2ee_open
+                master_signal=e2ee_master
+                settings_tab=settings_tab
+                current_path=path
+                notice=notice
+                on_load=file_load
+            />
         </div>
     }
 }
