@@ -4,6 +4,18 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Grouped Settings**: the Settings dialog now has Encryption, Sharing,
+  Devices and Passkeys tabs instead of one long scroll. The Passkeys sidebar
+  shortcut opens the Passkeys tab. Encryption, MLS shares, the MLS device
+  roster and device enrollment keep their existing actions and messages.
+- **UI module split**: the browser MLS client is split into `state`, `types`,
+  `api` and `protocol`, and the admin, share, passkeys, vault, versions and
+  settings dialogs moved out of `app.rs` into `dialogs/`. This is internal
+  only; no API or storage format changed.
+
 ## [0.4.3] - 2026-11-05
 
 ### Fixed

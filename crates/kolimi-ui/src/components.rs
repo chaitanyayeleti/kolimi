@@ -84,7 +84,11 @@ fn icon_svg(name: &str) -> String {
 
 /// A modal card with a title, close button and scrollable body.
 #[component]
-pub fn Modal(title: &'static str, on_close: Callback<()>, children: Children) -> impl IntoView {
+pub fn Modal(
+    #[prop(into)] title: String,
+    on_close: Callback<()>,
+    children: Children,
+) -> impl IntoView {
     view! {
         <div class="backdrop">
             <div class="card modal">
@@ -118,6 +122,15 @@ pub fn ErrorText(#[prop(into)] message: Signal<String>) -> impl IntoView {
             <p class="error">{move || message.get()}</p>
         </Show>
     }
+}
+
+/// Sanitizes SVG content to prevent XSS via `inner_html`.
+pub(crate) fn sanitize_svg(svg: &str) -> String {
+    svg.replace("<script", "<!-script")
+        .replace("</script>", "<-/script>")
+        .replace("onload=", "data-onload=")
+        .replace("onerror=", "data-onerror=")
+        .replace("onclick=", "data-onclick=")
 }
 
 fn device_display_name(device: &MlsDevice) -> String {
@@ -255,6 +268,15 @@ mod wasm_tests {
         assert_eq!(device_display_name(&device), "Unnamed MLS device");
         assert_eq!(device_signature_label(&device), "not reported yet");
         assert_eq!(device_groups_label(&device), "none visible");
+    }
+
+    #[wasm_bindgen_test]
+    fn sanitize_svg_strips_scripts() {
+        let out = sanitize_svg("<svg><script>alert(1)</script><rect onload='x'/></svg>");
+        assert!(!out.contains("<script"));
+        assert!(!out.contains("</script>"));
+        // onload= is rewritten to data-onload= so it is inert.
+        assert!(out.contains("data-onload="));
     }
 
     #[wasm_bindgen_test]

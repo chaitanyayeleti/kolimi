@@ -168,12 +168,14 @@ test("web migration upgrades a legacy folder share and reset clears state", asyn
     modal.getByText("Keyring unlocked for this browser."),
   ).toBeVisible();
 
-  // The extracted MLS devices panel renders the current device badge.
+  // The Devices tab hosts the extracted MLS device roster.
+  await modal.getByRole("tab", { name: "Devices", exact: true }).click();
   await expect(
     modal.getByRole("heading", { name: "MLS devices", exact: true }),
   ).toBeVisible();
   await expect(modal.getByText("this device", { exact: true })).toBeVisible();
 
+  await modal.getByRole("tab", { name: "Sharing", exact: true }).click();
   await modal
     .getByRole("button", { name: "Upgrade shares to MLS", exact: true })
     .click();

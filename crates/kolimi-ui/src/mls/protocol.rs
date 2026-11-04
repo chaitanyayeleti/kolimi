@@ -1,8 +1,4 @@
-//! Browser MLS state for group E2EE (RFC 9420).
-//!
-//! MLS device/group secrets are sealed with the unlocked master key and
-//! stored in `localStorage`; the server only ever sees opaque key packages,
-//! commits/Welcomes and the epoch-bound share keyring.
+//! MLS group membership, keyrings and the browser-facing operations.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use kolimi_crypto::MasterKey;
@@ -13,368 +9,22 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 
+use super::api::{
+    clear_revocation, fetch_group, group_roots, mounts, post_commit, record_revocation,
+};
+use super::state::{enabled, load_or_create, load_or_create_as, save_state};
+use super::types::{
+    MlsDevice, MlsDeviceList, MlsRevokeReport, RemoteGroup, State, mount_for, parse_device_roster,
+    share_key_for,
+};
 use crate::api;
 use crate::app::encode;
-
-const STATE_KEY: &str = "kolimi-mls-state-v1";
-const STATE_AAD: &[u8] = b"kolimi-mls-web-state-v1";
-
-#[derive(Debug, Clone, Deserialize)]
-struct Mount {
-    mount: String,
-    permission: String,
-    encrypted: bool,
-    #[serde(default)]
-    wrapped_name: Option<String>,
-}
-
-struct State {
-    device: Device,
-    groups: Vec<Vec<u8>>,
-    pending_commits: BTreeMap<Vec<u8>, Vec<u8>>,
-}
-
-/// One MLS device in this account's server roster.
-#[derive(Debug, Clone)]
-pub struct MlsDevice {
-    pub device_id: String,
-    pub device_name: String,
-    pub signature_key: Option<Vec<u8>>,
-    pub last_seen_at: i64,
-    /// Share roots where this browser can currently see the device's leaf.
-    pub groups: Vec<String>,
-    pub current: bool,
-}
-
-/// Roster listing plus groups this browser could not inspect.
-#[derive(Debug, Clone, Default)]
-pub struct MlsDeviceList {
-    pub devices: Vec<MlsDevice>,
-    pub warnings: Vec<String>,
-}
-
-/// Result of revoking one MLS device from the browser.
-#[derive(Debug, Clone, Default)]
-pub struct MlsRevokeReport {
-    pub groups: Vec<String>,
-    pub leaves: usize,
-}
-
-fn parse_device_roster(body: &serde_json::Value) -> Vec<MlsDevice> {
-    body["devices"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|device| MlsDevice {
-            device_id: device["device_id"].as_str().unwrap_or_default().to_string(),
-            device_name: device["device_name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            signature_key: device["signature_key"]
-                .as_str()
-                .and_then(|encoded| STANDARD.decode(encoded).ok()),
-            last_seen_at: device["last_seen_at"].as_i64().unwrap_or(0),
-            groups: Vec::new(),
-            current: false,
-        })
-        .collect()
-}
-
-fn storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok().flatten()
-}
-
-/// MLS is on by default in the web client. Set `kolimi-mls` to `"0"` in
-/// localStorage to disable group shares (legacy read-only wraps remain).
-pub fn enabled() -> bool {
-    storage()
-        .and_then(|storage| storage.get_item("kolimi-mls").ok().flatten())
-        .is_none_or(|value| value != "0")
-}
-
-const DB_NAME: &str = "kolimi-mls";
-const STORE: &str = "state";
-
-fn request_promise(request: &web_sys::IdbRequest) -> js_sys::Promise {
-    js_sys::Promise::new(&mut |resolve, reject| {
-        let success_request = request.clone();
-        let success = Closure::once_into_js(move || {
-            let _ = resolve.call1(
-                &JsValue::NULL,
-                &success_request.result().unwrap_or(JsValue::UNDEFINED),
-            );
-        });
-        let failure = Closure::once_into_js(move || {
-            let _ = reject.call1(
-                &JsValue::NULL,
-                &JsValue::from_str("IndexedDB request failed"),
-            );
-        });
-        request.set_onsuccess(Some(success.unchecked_ref()));
-        request.set_onerror(Some(failure.unchecked_ref()));
-    })
-}
-
-async fn open_db() -> Result<web_sys::IdbDatabase, String> {
-    let window = web_sys::window().ok_or_else(|| "no browser window".to_string())?;
-    let factory = window
-        .indexed_db()
-        .map_err(|_| "IndexedDB is unavailable".to_string())?
-        .ok_or_else(|| "IndexedDB is unavailable".to_string())?;
-    let request = factory
-        .open_with_f64(DB_NAME, 1.0)
-        .map_err(|_| "could not open IndexedDB".to_string())?;
-    let upgrade_request = request.clone();
-    let upgrade = Closure::once_into_js(move || {
-        if let Ok(db) = upgrade_request
-            .result()
-            .and_then(|value| value.dyn_into::<web_sys::IdbDatabase>())
-        {
-            let _ = db.create_object_store(STORE);
-        }
-    });
-    request.set_onupgradeneeded(Some(upgrade.unchecked_ref()));
-    let value = JsFuture::from(request_promise(&request))
-        .await
-        .map_err(|_| "could not open IndexedDB".to_string())?;
-    value
-        .dyn_into::<web_sys::IdbDatabase>()
-        .map_err(|_| "IndexedDB returned an invalid database".to_string())
-}
-
-async fn idb_get(key: &str) -> Result<Option<String>, String> {
-    let db = open_db().await?;
-    let transaction = db
-        .transaction_with_str_and_mode(STORE, web_sys::IdbTransactionMode::Readonly)
-        .map_err(|_| "IndexedDB transaction failed".to_string())?;
-    let store = transaction
-        .object_store(STORE)
-        .map_err(|_| "IndexedDB store failed".to_string())?;
-    let request = store
-        .get(&JsValue::from_str(key))
-        .map_err(|_| "IndexedDB get failed".to_string())?;
-    let value = JsFuture::from(request_promise(&request))
-        .await
-        .map_err(|_| "IndexedDB get failed".to_string())?;
-    if value.is_undefined() || value.is_null() {
-        Ok(None)
-    } else {
-        value
-            .as_string()
-            .map(Some)
-            .ok_or_else(|| "bad MLS state".to_string())
-    }
-}
-
-async fn idb_set(key: &str, value: &str) -> Result<(), String> {
-    let db = open_db().await?;
-    let transaction = db
-        .transaction_with_str_and_mode(STORE, web_sys::IdbTransactionMode::Readwrite)
-        .map_err(|_| "IndexedDB transaction failed".to_string())?;
-    let store = transaction
-        .object_store(STORE)
-        .map_err(|_| "IndexedDB store failed".to_string())?;
-    let request = store
-        .put_with_key(&JsValue::from_str(value), &JsValue::from_str(key))
-        .map_err(|_| "IndexedDB put failed".to_string())?;
-    JsFuture::from(request_promise(&request))
-        .await
-        .map_err(|_| "IndexedDB put failed".to_string())?;
-    Ok(())
-}
-
-async fn idb_delete(key: &str) -> Result<(), String> {
-    let db = open_db().await?;
-    let transaction = db
-        .transaction_with_str_and_mode(STORE, web_sys::IdbTransactionMode::Readwrite)
-        .map_err(|_| "IndexedDB transaction failed".to_string())?;
-    let store = transaction
-        .object_store(STORE)
-        .map_err(|_| "IndexedDB store failed".to_string())?;
-    let request = store
-        .delete(&JsValue::from_str(key))
-        .map_err(|_| "IndexedDB delete failed".to_string())?;
-    JsFuture::from(request_promise(&request))
-        .await
-        .map_err(|_| "IndexedDB delete failed".to_string())?;
-    Ok(())
-}
-
-async fn delete_db() -> Result<(), String> {
-    let window = web_sys::window().ok_or_else(|| "no browser window".to_string())?;
-    let factory = window
-        .indexed_db()
-        .map_err(|_| "IndexedDB is unavailable".to_string())?
-        .ok_or_else(|| "IndexedDB is unavailable".to_string())?;
-    let request = factory
-        .delete_database(DB_NAME)
-        .map_err(|_| "could not open IndexedDB".to_string())?;
-    JsFuture::from(request_promise(&request))
-        .await
-        .map_err(|_| "could not delete IndexedDB".to_string())?;
-    Ok(())
-}
-
-fn slot(master: &MasterKey) -> String {
-    // A short, non-secret account fingerprint so several accounts in one
-    // browser don't overwrite each other's state.
-    let digest = blake3::hash(&master.as_bytes()[..8]);
-    format!("{STATE_KEY}:{}", &digest.to_hex()[..16])
-}
-
-async fn load_state(master: &MasterKey) -> Result<Option<State>, String> {
-    let key = slot(master);
-    let raw = match idb_get(&key).await? {
-        Some(raw) => Some(raw),
-        None => {
-            // Migrate the pre-IndexedDB sealed state once.
-            let legacy = storage().and_then(|storage| storage.get_item(&key).ok().flatten());
-            if let Some(raw) = &legacy {
-                idb_set(&key, raw).await?;
-                if let Some(storage) = storage() {
-                    let _ = storage.remove_item(&key);
-                }
-            }
-            legacy
-        }
-    };
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let blob = STANDARD
-        .decode(raw)
-        .map_err(|_| "malformed MLS state".to_string())?;
-    let plain = master
-        .open_local(&blob, STATE_AAD)
-        .map_err(|_| "could not decrypt MLS state".to_string())?;
-    let (device, groups, pending_commits) =
-        Device::import_state(&plain).map_err(|error| format!("MLS state: {error}"))?;
-    Ok(Some(State {
-        device,
-        groups,
-        pending_commits,
-    }))
-}
-
-async fn save_state(master: &MasterKey, state: &State) -> Result<(), String> {
-    let plain = state
-        .device
-        .export_state(&state.groups, &state.pending_commits)
-        .map_err(|error| format!("MLS state: {error}"))?;
-    let blob = master
-        .seal_local(&plain, STATE_AAD)
-        .map_err(|_| "could not seal MLS state".to_string())?;
-    idb_set(&slot(master), &STANDARD.encode(blob)).await
-}
-
-/// Deletes this browser's sealed MLS state.
-///
-/// With an unlocked master key, only this account's slot is removed. When
-/// the key is unavailable (the usual state-loss case), the whole browser
-/// MLS database is cleared. The caller must warn the user and explain the
-/// re-add flow; the E2EE keyring and sync state are untouched.
-pub async fn reset_state(master: Option<&MasterKey>) -> Result<bool, String> {
-    if let Some(master) = master {
-        let key = slot(master);
-        let existed = idb_get(&key).await?.is_some();
-        idb_delete(&key).await?;
-        if let Some(storage) = storage() {
-            let _ = storage.remove_item(&key);
-        }
-        Ok(existed)
-    } else {
-        delete_db().await?;
-        if let Some(storage) = storage() {
-            let mut keys = Vec::new();
-            for index in 0..storage.length().unwrap_or(0) {
-                if let Ok(Some(key)) = storage.key(index)
-                    && key.starts_with(STATE_KEY)
-                {
-                    keys.push(key);
-                }
-            }
-            for key in keys {
-                let _ = storage.remove_item(&key);
-            }
-        }
-        Ok(true)
-    }
-}
-
-async fn load_or_create(master: &MasterKey) -> Result<State, String> {
-    if let Some(state) = load_state(master).await? {
-        return Ok(state);
-    }
-    create_state(master, b"kolimi-web").await
-}
-
-static CREATING_STATE: AtomicBool = AtomicBool::new(false);
-
-struct CreationGuard;
-impl Drop for CreationGuard {
-    fn drop(&mut self) {
-        CREATING_STATE.store(false, Ordering::SeqCst);
-    }
-}
-
-async fn load_or_create_as(master: &MasterKey, identity: &[u8]) -> Result<State, String> {
-    if let Some(state) = load_state(master).await? {
-        return Ok(state);
-    }
-    create_state(master, identity).await
-}
-
-/// Yields a full event-loop turn, not just a microtask.
-///
-/// A resolved promise only drains the microtask queue; the winning creator
-/// is usually waiting on an IndexedDB request, which is a macrotask. Spinning
-/// on microtasks would starve it and leave the UI stuck on "Unlocking…".
-async fn yield_to_event_loop() {
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let callback = Closure::once_into_js(move || {
-            let _ = resolve.call0(&JsValue::NULL);
-        });
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                callback.unchecked_ref::<js_sys::Function>(),
-                0,
-            );
-        }
-    });
-    let _ = JsFuture::from(promise).await;
-}
-
-/// Creates the initial device state exactly once, even if two UI effects
-/// race on first unlock.
-async fn create_state(master: &MasterKey, identity: &[u8]) -> Result<State, String> {
-    while CREATING_STATE
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        yield_to_event_loop().await;
-    }
-    let _guard = CreationGuard;
-    if let Some(state) = load_state(master).await? {
-        return Ok(state);
-    }
-    let device = Device::new(identity).map_err(|error| format!("MLS device: {error}"))?;
-    let state = State {
-        device,
-        groups: Vec::new(),
-        pending_commits: BTreeMap::new(),
-    };
-    save_state(master, &state).await?;
-    Ok(state)
-}
 
 static PUBLISHING: AtomicBool = AtomicBool::new(false);
 
 struct PublishGuard;
+
 impl Drop for PublishGuard {
     fn drop(&mut self) {
         PUBLISHING.store(false, Ordering::SeqCst);
@@ -473,6 +123,7 @@ pub async fn publish_key_package(master: &MasterKey) -> Result<(), String> {
 static REFRESHING: AtomicBool = AtomicBool::new(false);
 
 struct RefreshGuard;
+
 impl Drop for RefreshGuard {
     fn drop(&mut self) {
         REFRESHING.store(false, Ordering::SeqCst);
@@ -556,56 +207,6 @@ pub async fn refresh_owned_groups(master: &MasterKey) -> Result<(), String> {
         .await;
     }
     Ok(())
-}
-
-async fn mounts() -> Result<Vec<Mount>, String> {
-    let response = api::get("/api/shares/received").await?;
-    if response.status != 200 {
-        return Ok(Vec::new());
-    }
-    Ok(response.body["mounts"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| serde_json::from_value(item.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default())
-}
-
-fn mount_for<'a>(mounts: &'a [Mount], path: &str) -> Option<&'a Mount> {
-    mounts
-        .iter()
-        .filter(|mount| {
-            path == mount.mount
-                || path
-                    .strip_prefix(&mount.mount)
-                    .is_some_and(|rest| rest.starts_with('/'))
-        })
-        .max_by_key(|mount| mount.mount.len())
-}
-
-/// Every root that may carry an MLS group: owned shares and received mounts.
-async fn group_roots() -> Result<Vec<String>, String> {
-    let mut roots = BTreeSet::new();
-    let response = api::get("/api/shares/owned").await?;
-    if response.status != 200 {
-        return Err("could not list owned shares".to_string());
-    }
-    for share in response.body["shares"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-    {
-        if let Some(path) = share["path"].as_str().filter(|path| !path.is_empty()) {
-            roots.insert(path.trim_end_matches('/').to_string());
-        }
-    }
-    for mount in mounts().await? {
-        roots.insert(mount.mount.trim_end_matches('/').to_string());
-    }
-    Ok(roots.into_iter().collect())
 }
 
 /// Maps MLS signature keys to the share roots where this browser can see
@@ -841,115 +442,6 @@ pub async fn revoke_device(master: &MasterKey, device_id: &str) -> Result<MlsRev
     Ok(report)
 }
 
-#[derive(Debug, Clone)]
-struct GroupMessage {
-    seq: i64,
-    epoch: u64,
-    kind: String,
-    payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct KeyringBlob {
-    epoch: u64,
-    payload: Vec<u8>,
-    revision: i64,
-}
-
-#[derive(Debug, Clone)]
-struct RemoteGroup {
-    group_id: Vec<u8>,
-    epoch: u64,
-    messages: Vec<GroupMessage>,
-    keyring: Option<KeyringBlob>,
-    /// Client-asserted revoked signatures; automatic re-add skips these.
-    revocations: Vec<Vec<u8>>,
-}
-
-async fn fetch_group(path: &str) -> Result<Option<RemoteGroup>, String> {
-    let mut after = 0i64;
-    let mut messages = Vec::new();
-    let mut group_id: Option<Vec<u8>> = None;
-    let mut epoch;
-    let mut keyring = None;
-    let mut revocations = Vec::new();
-    loop {
-        let response = api::get(&format!(
-            "/api/mls/group?path={}&after={after}&limit=1000",
-            encode(path)
-        ))
-        .await?;
-        if response.status == 404 {
-            return Ok(None);
-        }
-        if response.status != 200 {
-            return Err(response
-                .error()
-                .unwrap_or("could not load the MLS group")
-                .to_string());
-        }
-        if group_id.is_none() {
-            group_id = Some(
-                STANDARD
-                    .decode(response.body["group_id"].as_str().unwrap_or_default())
-                    .map_err(|_| "malformed MLS group id".to_string())?,
-            );
-        }
-        epoch = response.body["epoch"].as_u64().unwrap_or(0);
-        if keyring.is_none() {
-            keyring = response.body["keyring"].as_object().and_then(|keyring| {
-                Some(KeyringBlob {
-                    epoch: keyring["epoch"].as_u64()?,
-                    payload: STANDARD.decode(keyring["payload"].as_str()?).ok()?,
-                    revision: keyring["revision"].as_i64().unwrap_or(0),
-                })
-            });
-        }
-        if revocations.is_empty() {
-            revocations = response.body["revocations"]
-                .as_array()
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| STANDARD.decode(item["signature_key"].as_str()?).ok())
-                        .collect()
-                })
-                .unwrap_or_default();
-        }
-        let page = response.body["messages"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let mut advanced = false;
-        for message in page {
-            let seq = message["seq"].as_i64().unwrap_or(0);
-            if seq > after {
-                after = seq;
-                advanced = true;
-            }
-            messages.push(GroupMessage {
-                seq,
-                epoch: message["epoch"].as_u64().unwrap_or(0),
-                kind: message["kind"].as_str().unwrap_or_default().to_string(),
-                payload: STANDARD
-                    .decode(message["payload"].as_str().unwrap_or_default())
-                    .unwrap_or_default(),
-            });
-        }
-        if !advanced || after == 0 {
-            break;
-        }
-    }
-    messages.sort_by_key(|message| message.seq);
-    Ok(Some(RemoteGroup {
-        group_id: group_id.ok_or_else(|| "MLS group id missing".to_string())?,
-        epoch,
-        messages,
-        keyring,
-        revocations,
-    }))
-}
-
 async fn join_or_load(
     state: &mut State,
     master: &MasterKey,
@@ -1092,7 +584,7 @@ fn open_keyring(
 }
 
 /// Decrypts a shared file through its MLS keyring (if the share uses one).
-pub async fn decrypt_shared_file(
+async fn decrypt_shared_file(
     master: &MasterKey,
     server_path: &str,
     display_name: &str,
@@ -1326,7 +818,7 @@ pub async fn rename_path_prefix(
     Ok(())
 }
 
-/// Fetches one owned file's raw key/// Fetches one owned file's raw key (used when building a share keyring).
+/// Fetches one owned file's raw key (used when building a share keyring).
 async fn owned_wrapped_file_key(
     master: &MasterKey,
     path: &str,
@@ -1372,108 +864,6 @@ fn group_id_random() -> Result<Vec<u8>, String> {
     let mut id = [0u8; 32];
     getrandom::getrandom(&mut id).map_err(|error| error.to_string())?;
     Ok(id.to_vec())
-}
-
-async fn record_revocation(path: &str, signature: &[u8]) -> Result<(), String> {
-    let response = api::send_json(
-        "POST",
-        &format!("/api/mls/revocations?path={}", encode(path)),
-        &json!({ "signature_key": STANDARD.encode(signature) }),
-    )
-    .await?;
-    if response.status != 204 && response.status != 404 {
-        return Err(response
-            .error()
-            .unwrap_or("could not record the MLS revocation")
-            .to_string());
-    }
-    Ok(())
-}
-
-async fn clear_revocation(path: &str, signature: &[u8]) -> Result<(), String> {
-    let encoded = STANDARD.encode(signature);
-    let response = api::delete(&format!(
-        "/api/mls/revocations?path={}&signature_key={}",
-        encode(path),
-        encode(&encoded)
-    ))
-    .await?;
-    if response.status != 204 && response.status != 404 {
-        return Err(response
-            .error()
-            .unwrap_or("could not clear the MLS revocation")
-            .to_string());
-    }
-    Ok(())
-}
-
-async fn post_commit(
-    path: &str,
-    epoch: u64,
-    commit: &[u8],
-    welcome: Option<&[u8]>,
-) -> Result<(), (u16, String)> {
-    let mut body = json!({
-        "epoch": epoch,
-        "commit": STANDARD.encode(commit),
-    });
-    if let Some(welcome) = welcome {
-        body["welcome"] = json!(STANDARD.encode(welcome));
-    }
-    let response = api::send_json(
-        "POST",
-        &format!("/api/mls/commit?path={}", encode(path)),
-        &body,
-    )
-    .await
-    .map_err(|error| (0, error))?;
-    if response.status == 404 {
-        // Older servers only have the separate message endpoint.
-        send_message(path, epoch, "commit", commit).await?;
-        if let Some(welcome) = welcome {
-            send_message(path, epoch, "welcome", welcome).await?;
-        }
-        return Ok(());
-    }
-    if response.status != 200 {
-        return Err((
-            response.status,
-            response
-                .error()
-                .unwrap_or("could not publish the MLS commit")
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-async fn send_message(
-    path: &str,
-    epoch: u64,
-    kind: &str,
-    payload: &[u8],
-) -> Result<(), (u16, String)> {
-    let response = api::send_json(
-        "POST",
-        &format!("/api/mls/messages?path={}", encode(path)),
-        &json!({
-            "epoch": epoch,
-            "kind": kind,
-            "payload": STANDARD.encode(payload),
-        }),
-    )
-    .await
-    .map_err(|error| (0, error))?;
-    if response.status != 200 {
-        return Err((
-            response.status,
-            response
-                .error()
-                .unwrap_or("could not publish the MLS message")
-                .to_string(),
-        ));
-    }
-    Ok(())
 }
 
 async fn publish_epoch_keyring(
@@ -1881,10 +1271,6 @@ pub async fn share_folder(
     Ok(())
 }
 
-fn share_key_for<'a>(mounts: &'a [Mount], path: &str) -> Option<&'a Mount> {
-    mount_for(mounts, path).filter(|mount| mount.permission == "write" && mount.encrypted)
-}
-
 /// Encodes a new child name inside a writable received share.
 pub async fn encode_shared_name(
     master: &MasterKey,
@@ -2099,7 +1485,3 @@ pub async fn is_writable_shared(dir: &str) -> bool {
     };
     share_key_for(&mounts, dir).is_some()
 }
-
-/// Keeps the linter honest about the storage type on non-wasm builds.
-#[allow(dead_code)]
-fn _storage_type(_: Option<web_sys::Storage>) {}

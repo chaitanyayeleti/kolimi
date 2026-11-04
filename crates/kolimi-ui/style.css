@@ -573,6 +573,19 @@ textarea:focus {
   border: none;
 }
 
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  margin: var(--space-1) 0 var(--space-4);
+}
+
+/* The first heading inside a tab already has the tab strip above it. */
+.settings-section > h3:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
 .content {
   flex: 1;
   padding: 1rem 1rem 4rem;
