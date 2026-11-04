@@ -1,6 +1,6 @@
 # External crypto audit package
 
-Status: prepared for **0.4.1**. **External review has not been performed.**
+Status: prepared for **0.4.2**. **External review has not been performed.**
 This directory is written so a reviewer can start from one commit and
 reproduce every claim.
 
@@ -110,7 +110,7 @@ vectors and the exact commit hash.
 
 - The crypto surface is small and self-contained; `kolimi-crypto` has no
   I/O beyond `getrandom`, which keeps the review tractable.
-- We can freeze the 0.4.1 surface for the duration of a review and land
+- We can freeze the 0.4.2 surface for the duration of a review and land
   only fixes.
 - The `openmls` tree currently carries **89 temporary `cargo-vet`
   exemptions** (724 total); none are audits. They should be replaced by

@@ -4,9 +4,9 @@ Design specs live here. An RFC explains the problem, protocol, data model
 and non-goals; implementation status is tracked separately so a design can
 be accepted before every client supports it.
 
-Last full verification: **0.4.1** (2026-11-04).
+Last full verification: **0.4.2** (2026-11-04).
 
-| RFC | Design | Implementation (0.4.1) | Notes |
+| RFC | Design | Implementation (0.4.2) | Notes |
 | --- | --- | --- | --- |
 | [0001 — Storage engine](0001-storage-engine.md) | implemented | shipped | FastCDC + BLAKE3 CAS, manifests, GC |
 | [0002 — Sync protocol](0002-sync-protocol.md) | implemented | shipped | Server + `kolimi-sync`/desktop; mobile uses the FFI core |

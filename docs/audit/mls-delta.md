@@ -1,6 +1,6 @@
 # MLS (RFC 9420) audit delta — package
 
-Status: prepared for review (0.4.1) · Applies to: `crates/kolimi-mls`, `/api/mls`,
+Status: prepared for review (0.4.2) · Applies to: `crates/kolimi-mls`, `/api/mls`,
 sync/desktop client wiring and the web client. **External review has not
 been performed.**
 

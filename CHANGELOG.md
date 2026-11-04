@@ -4,6 +4,20 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] - 2026-11-04
+
+### Fixed
+- **Container image startup**: the gnu release binaries are built on Ubuntu
+  24.04 (glibc 2.39), but `v0.4.1` copied them into a Debian 12 distroless
+  image (glibc 2.36). The container exited immediately with
+  `GLIBC_2.38 not found` / weak `GLIBC_2.39`, so Traefik returned 502. The
+  release image now uses `distroless/cc-debian13`, the gnu runners are
+  pinned to Ubuntu 24.04 so `ubuntu-latest` cannot silently raise the glibc
+  floor again, and CI starts the built image and waits for `/healthz` before
+  pushing it. The `v0.4.1` image tag is still broken; use `v0.4.2` or later.
+  The server tarballs, `.deb`, Helm chart and desktop bundles are otherwise
+  unchanged.
+
 ## [0.4.1] - 2026-11-04
 
 ### Fixed

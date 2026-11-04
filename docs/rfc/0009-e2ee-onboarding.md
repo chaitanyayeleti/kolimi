@@ -1,8 +1,8 @@
 # RFC 0009: E2EE onboarding — first-login keyring setup, encrypt by default
 
-Status: partially implemented (0.4.1: web Vault setup and
+Status: partially implemented (0.4.2: web Vault setup and
 encrypt-by-default folder; passkey-PRF browser unlock pending) ·
-Last verified: 0.4.1 · Depends on: RFC 0007 (E2EE), RFC 0008 (device
+Last verified: 0.4.2 · Depends on: RFC 0007 (E2EE), RFC 0008 (device
 enrollment), RFC 0006 (sync client)
 
 > **Implementation note (0.3.0):** web first-login Vault setup and the
