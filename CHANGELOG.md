@@ -4,6 +4,23 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] - 2026-11-05
+
+### Fixed
+- **CSP-safe upload progress and context menu**: the upload progress bar and
+  the file context menu set a whole `style` attribute, which the
+  `style-src 'self'` policy blocks. They now set individual CSS properties
+  (`style:width`, `style:left`, `style:top`) through the CSSOM, so the
+  progress bar renders and the context menu appears at the pointer without
+  adding `'unsafe-inline'`. A browser E2E regression test asserts there are
+  no inline-style CSP violations during an upload and a right-click.
+- **Large uploads through Traefik**: the bundled compose disables Traefik's
+  60-second `readTimeout`; external Traefik deployments should set
+  `entryPoints.websecure.transport.respondingTimeouts.readTimeout: 0`.
+  A large upload on a slow link used to fail with `500` after exactly 60s
+  while Traefik closed the request body. `idleTimeout` still reaps stalled
+  connections.
+
 ## [0.4.2] - 2026-11-04
 
 ### Fixed

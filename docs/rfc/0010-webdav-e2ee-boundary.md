@@ -1,7 +1,7 @@
 # RFC 0010: WebDAV / E2EE boundary — a plaintext-only DAV surface
 
-Status: partially implemented (0.4.2: DAV refuses encrypted nodes;
-marker-based directory boundary deferred) · Last verified: 0.4.2 ·
+Status: partially implemented (0.4.3: DAV refuses encrypted nodes;
+marker-based directory boundary deferred) · Last verified: 0.4.3 ·
 Depends on: RFC 0007 (E2EE), RFC 0001 (storage engine),
 RFC 0003 (sharing and permissions), RFC 0009 (E2EE onboarding)
 
