@@ -4,6 +4,15 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.6] - 2026-11-05
+
+### Changed
+- **Desktop Accounts & Sync redesign** (desktop-only release): the window now
+  has light and dark themes, account cards with clear sync/encryption badges,
+  compact synced-folder rows with an actions menu, collapsible encryption,
+  device and add-folder sections, and a proper add-account form. The Tauri
+  commands and sync behavior are unchanged.
+
 ## [0.4.5] - 2026-11-05
 
 ### Changed
