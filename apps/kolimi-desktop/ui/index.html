@@ -4,544 +4,87 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kolimi — Accounts &amp; Sync</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    background: #10141c; color: #e6e9f0;
-  }
-  main { max-width: 640px; margin: 0 auto; padding: 22px 20px 48px; }
-  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-  h1 { font-size: 18px; margin: 0; }
-  p.lede { color: #9aa4b8; margin: 0 0 18px; }
-  .card { background: #171d27; border: 1px solid #2c3546; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
-  .row { display: flex; align-items: center; gap: 10px; }
-  .spread { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-  .who { font-weight: 700; }
-  .host { color: #9aa4b8; font-size: 13px; }
-  .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; }
-  .badge.on { background: #12351f; color: #59d98a; }
-  .badge.off { background: #3a2416; color: #e0a76b; }
-  label { display: block; font-weight: 600; margin: 10px 0 4px; }
-  input {
-    width: 100%; padding: 9px 11px; border: 1px solid #2c3546; border-radius: 8px;
-    background: #10141c; color: inherit; font: inherit;
-  }
-  input:focus { outline: none; border-color: #5b8def; }
-  button {
-    padding: 8px 13px; border: 0; border-radius: 8px; background: #5b8def; color: #fff;
-    font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
-  }
-  button:hover { background: #4a7be0; }
-  button.ghost { background: transparent; border: 1px solid #2c3546; color: #cbd3e0; }
-  button.ghost:hover { background: #1d2531; }
-  button.danger { background: transparent; border: 1px solid #5a2b2b; color: #ff8a8a; }
-  button.danger:hover { background: #2a1717; }
-  button.link { background: none; border: 0; color: #9aa4b8; text-decoration: underline; padding: 0; }
-  ul.pairs { list-style: none; margin: 12px 0 0; padding: 0; }
-  ul.pairs li {
-    display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    padding: 8px 0; border-top: 1px solid #232b3a;
-  }
-  ul.pairs li.editing { align-items: flex-start; }
-  ul.pairs li.editing .field { flex: 1; min-width: 0; }
-  ul.pairs li.editing label { margin: 0 0 4px; }
-  ul.pairs li.editing label + input { margin-bottom: 10px; }
-  ul.pairs li > .row { flex: none; align-items: flex-start; }
-  .path { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
-  .remote { color: #9aa4b8; }
-  .empty { color: #9aa4b8; font-style: italic; }
-  details.e2ee { margin-top: 14px; padding-top: 12px; border-top: 1px solid #232b3a; }
-  details.e2ee > summary { display: flex; align-items: center; gap: 8px; }
-  #msg { min-height: 20px; margin-top: 14px; white-space: pre-wrap; }
-  #msg.err { color: #ff8a8a; }
-  #msg.ok { color: #59d98a; }
-  .muted { color: #9aa4b8; font-size: 13px; }
-  details summary { cursor: pointer; font-weight: 600; }
-  .hidden { display: none; }
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<main>
-  <header>
-    <h1>Accounts &amp; Sync</h1>
-    <button class="ghost" id="sync-now">Sync now</button>
-  </header>
-  <p class="lede">Sign in to servers and choose which local folders stay in sync.</p>
-
-  <div id="accounts"></div>
-
-  <div class="card">
-    <details id="add-account">
-      <summary>Add account</summary>
-      <label>Server URL<input id="new-server" placeholder="https://cloud.example.com"></label>
-      <label>Username<input id="new-username" autocomplete="username"></label>
-      <label>Password<input id="new-password" type="password" autocomplete="current-password"></label>
-      <div class="row" style="margin-top:12px">
-        <button id="signin">Sign in</button>
-      </div>
-    </details>
-  </div>
-
-  <div class="card">
-    <div class="spread">
-      <span>Start Kolimi on login</span>
-      <input type="checkbox" id="autostart" style="width:auto">
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">K</span>
+      <span class="brand-text">
+        <strong>Kolimi</strong>
+        <span>Accounts &amp; Sync</span>
+      </span>
     </div>
-    <p class="muted" style="margin:8px 0 0">Keeps a local folder synced in the background.</p>
-  </div>
+    <div class="topbar-actions">
+      <button class="icon-btn" id="theme" type="button" aria-label="Toggle theme" title="Toggle theme">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
+      </button>
+      <button class="btn primary" id="sync-now" type="button">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/></svg>
+        <span>Sync now</span>
+      </button>
+    </div>
+  </header>
 
-  <p id="msg"></p>
-</main>
+  <main class="page">
+    <section class="hero">
+      <div>
+        <h1>Accounts &amp; Sync</h1>
+        <p>Sign in to servers and choose which local folders stay in sync.</p>
+      </div>
+      <span class="pill" id="account-count">0 accounts</span>
+    </section>
 
-<script>
-  const { invoke } = window.__TAURI__.core;
-  const msg = document.getElementById("msg");
-  const accountsEl = document.getElementById("accounts");
+    <div id="accounts" class="stack"></div>
 
-  function setMsg(text, kind) {
-    msg.textContent = text || "";
-    msg.className = kind || "";
-  }
+    <section class="card add-account-card">
+      <details id="add-account">
+        <summary class="add-summary">
+          <span class="summary-mark" aria-hidden="true">+</span>
+          <span class="summary-text">
+            <strong>Add account</strong>
+            <small>Connect another Kolimi server</small>
+          </span>
+        </summary>
+        <form id="signin-form" class="form-grid" autocomplete="on">
+          <label class="field span-2">
+            <span>Server URL</span>
+            <input id="new-server" placeholder="https://cloud.example.com" autocomplete="url" required>
+          </label>
+          <label class="field">
+            <span>Username</span>
+            <input id="new-username" autocomplete="username" required>
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="new-password" type="password" autocomplete="current-password" required>
+          </label>
+          <div class="form-actions span-2">
+            <button class="btn primary" type="submit">Sign in</button>
+          </div>
+        </form>
+      </details>
+    </section>
 
-  function el(tag, props, ...children) {
-    const node = document.createElement(tag);
-    for (const [k, v] of Object.entries(props || {})) {
-      if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-      else if (k === "class") node.className = v;
-      else node.setAttribute(k, v);
-    }
-    for (const c of children) node.append(c);
-    return node;
-  }
+    <section class="card settings-card">
+      <div class="setting-row">
+        <div class="setting-copy">
+          <strong>Start Kolimi on login</strong>
+          <small>Keeps your folders synced in the background.</small>
+        </div>
+        <label class="switch" aria-label="Start Kolimi on login">
+          <input type="checkbox" id="autostart">
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+      </div>
+    </section>
 
-  async function refresh() {
-    const settings = await invoke("get_settings");
-    document.getElementById("autostart").checked = settings.autostart;
-    // E2EE status per account: none / locked / unlocked / signed_out.
-    const statuses = await Promise.all(settings.accounts.map(async (account) => {
-      if (!account.signed_in) return "signed_out";
-      try {
-        return await invoke("e2ee_status", { server: account.server, username: account.username });
-      } catch (e) {
-        return "unknown";
-      }
-    }));
-    const cards = settings.accounts.map((account, i) => renderAccount(account, statuses[i]));
-    if (!cards.length) {
-      cards.push(el("div", { class: "card empty" }, "No accounts yet. Add one below."));
-    }
-    accountsEl.replaceChildren(...cards);
-  }
+    <footer class="page-foot">Keys stay on this device. The server never receives your passphrase.</footer>
+  </main>
+</div>
 
-  function renderPair(account, pair) {
-    const li = el("li", {});
-
-    const display = () => {
-      li.classList.remove("editing");
-      const roots = pair.encrypted_roots || [];
-      const children = [
-        el("span", { class: "path" },
-          pair.local_dir, " ", el("span", { class: "remote" }, "→ " + pair.remote))
-      ];
-      if (roots.length) {
-        children.push(el("div", { class: "muted" }, "encrypted: " + roots.join(", ")));
-      }
-      children.push(
-        el("div", { class: "row" },
-          el("button", { class: "ghost", onclick: edit }, "Edit"),
-          el("button", { class: "ghost", onclick: async () => {
-            const path = prompt("Relative path to share (e.g. Private/Team)");
-            if (!path) return;
-            const target = prompt("Recipient username, or group:<name>");
-            if (!target) return;
-            const write = confirm("Allow the recipient to write (MLS write share)?");
-            const group = target.startsWith("group:");
-            try {
-              const wrapped = await invoke("share_mls", {
-                server: account.server, username: account.username, dir: pair.local_dir,
-                path, kind: group ? "group" : "user",
-                recipient: group ? target.slice(6) : target, write
-              });
-              setMsg("Shared " + path + " (" + wrapped + " legacy wraps)", "ok");
-              refresh();
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "Share"),
-          el("button", { class: "ghost", onclick: async () => {
-            const path = prompt("Relative path to unshare");
-            if (!path) return;
-            const target = prompt("Recipient username, or group:<name>");
-            if (!target) return;
-            const group = target.startsWith("group:");
-            try {
-              await invoke("unshare_mls", {
-                server: account.server, username: account.username, dir: pair.local_dir,
-                path, kind: group ? "group" : "user",
-                recipient: group ? target.slice(6) : target
-              });
-              setMsg("Revoked " + path + " for " + target, "ok");
-              refresh();
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "Unshare"),
-          el("button", { class: "ghost", onclick: async () => {
-            const path = prompt("Relative path to inspect");
-            if (!path) return;
-            try {
-              const status = await invoke("mls_status", {
-                server: account.server, username: account.username, dir: pair.local_dir, path
-              });
-              setMsg(status ? "MLS epoch " + status.epoch + ": " + status.members.join(", ") : "No MLS group", "ok");
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "MLS status"),
-          el("button", { class: "ghost", onclick: async () => {
-            try {
-              const paths = await invoke("migrate_mls", {
-                server: account.server, username: account.username, dir: pair.local_dir
-              });
-              setMsg(paths.length ? "Migrated " + paths.length + " share(s) to MLS" : "Nothing to migrate", "ok");
-              refresh();
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "Migrate MLS"),
-          el("button", { class: "danger", onclick: async () => {
-            try {
-              await invoke("remove_pair", { server: account.server, username: account.username, dir: pair.local_dir });
-              setMsg("Removed " + pair.local_dir, "ok");
-              refresh();
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "Remove")
-        )
-      );
-      li.replaceChildren(...children);
-    };
-
-    const edit = () => {
-      li.classList.add("editing");
-      const dirInput = el("input", { value: pair.local_dir });
-      const remoteInput = el("input", { value: pair.remote });
-      const rootsInput = el("input", { value: (pair.encrypted_roots || []).join(", "), placeholder: "e.g. Private, Photos (blank = no encryption)" });
-      li.replaceChildren(
-        el("div", { class: "field" },
-          el("label", {}, "Local folder"), dirInput,
-          el("label", {}, "Remote folder"), remoteInput,
-          el("label", {}, "Encrypted folders (relative, comma-separated)"), rootsInput),
-        el("div", { class: "row" },
-          el("button", { onclick: async () => {
-            try {
-              await invoke("update_pair", {
-                server: account.server, username: account.username,
-                dir: pair.local_dir, newDir: dirInput.value, remote: remoteInput.value || "/",
-                encryptedRoots: rootsInput.value.split(",").map(s => s.trim()).filter(Boolean)
-              });
-              setMsg("Updated " + dirInput.value, "ok");
-              refresh();
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "Save"),
-          el("button", { class: "ghost", onclick: display }, "Cancel")
-        )
-      );
-    };
-
-    display();
-    return li;
-  }
-
-  function renderAccount(account, status) {
-    const card = el("div", { class: "card" });
-
-    card.append(
-      el("div", { class: "spread" },
-        el("div", {},
-          el("div", { class: "who" }, account.username),
-          el("div", { class: "host" }, account.server)
-        ),
-        el("span", { class: "badge " + (account.signed_in ? "on" : "off") },
-          account.signed_in ? "signed in" : "signed out")
-      )
-    );
-
-    if (!account.signed_in) {
-      const pw = el("input", { type: "password", placeholder: "Password", autocomplete: "current-password" });
-      card.append(
-        el("div", { class: "row", style: "margin-top:10px" },
-          pw,
-          el("button", { onclick: async () => {
-            try {
-              await invoke("sign_in", { server: account.server, username: account.username, password: pw.value });
-              setMsg("Signed in to " + account.username, "ok");
-              refresh();
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "Sign in")
-        )
-      );
-    }
-
-    const pairs = el("ul", { class: "pairs" });
-    if (!account.pairs.length) {
-      pairs.append(el("li", {}, el("span", { class: "empty" }, "No synced directories")));
-    }
-    for (const pair of account.pairs) {
-      pairs.append(renderPair(account, pair));
-    }
-    card.append(pairs);
-
-    {
-      const label = {
-        none: "not set up",
-        locked: "locked",
-        unlocked: "unlocked",
-        signed_out: "signed out",
-        unknown: "unknown"
-      }[status] || status;
-      const children = [
-        el("summary", {},
-          "End-to-end encryption ",
-          el("span", { class: "badge " + (status === "unlocked" ? "on" : "off") }, label))
-      ];
-
-      if (status === "none") {
-        const setupPass = el("input", { type: "password", placeholder: "New passphrase", autocomplete: "new-password", style: "margin-top:6px" });
-        const setupConfirm = el("input", { type: "password", placeholder: "Repeat passphrase", autocomplete: "new-password", style: "margin-top:6px" });
-        const recoveryOut = el("div", { class: "muted", style: "margin-top:8px" });
-        children.push(
-          el("p", { class: "muted", style: "margin:8px 0" },
-            "Encryption is not set up for this account yet. Choose a passphrase — it never leaves this computer."),
-          el("label", {}, "New passphrase"), setupPass,
-          el("label", {}, "Repeat passphrase"), setupConfirm,
-          el("div", { class: "row", style: "margin-top:8px" },
-            el("button", { class: "primary", onclick: async () => {
-              if (setupPass.value !== setupConfirm.value) { setMsg("Passphrases do not match", "err"); return; }
-              try {
-                const code = await invoke("setup_e2ee", {
-                  server: account.server, username: account.username, passphrase: setupPass.value
-                });
-                // Do not refresh yet: that would wipe the recovery code.
-                // Only refresh once the user acknowledges having saved it.
-                recoveryOut.replaceChildren(
-                  el("div", {}, "Recovery phrase — 24 words, save them now, shown once:"),
-                  el("code", {}, code),
-                  el("div", { class: "row", style: "margin-top:8px" },
-                    el("button", { onclick: async () => {
-                      recoveryOut.replaceChildren();
-                      setMsg("Encryption set up", "ok");
-                      refresh();
-                    } }, "I saved it")));
-                setMsg("Save your recovery phrase (24 words), then click “I saved it”.", "ok");
-              } catch (e) { setMsg(String(e), "err"); }
-            } }, "Set up encryption")),
-          recoveryOut
-        );
-      } else if (status === "locked") {
-        const pass = el("input", { type: "password", placeholder: "Encryption passphrase", autocomplete: "off", style: "margin-top:6px" });
-        children.push(
-          el("p", { class: "muted", style: "margin:8px 0" },
-            "Encryption is locked. Enter your passphrase to sync encrypted folders and to approve new devices."),
-          el("label", {}, "Encryption passphrase"), pass,
-          el("div", { class: "row", style: "margin-top:8px" },
-            el("button", { class: "primary", onclick: async () => {
-              try {
-                await invoke("set_e2ee_passphrase", { server: account.server, username: account.username, passphrase: pass.value });
-                setMsg("Encryption unlocked", "ok");
-                refresh();
-              } catch (e) { setMsg(String(e), "err"); }
-            } }, "Unlock")));
-      } else if (status === "unlocked") {
-        const autoApprove = el("input", { type: "checkbox", style: "width:auto" });
-        autoApprove.checked = account.auto_approve_devices !== false;
-        autoApprove.addEventListener("change", async () => {
-          try {
-            await invoke("set_auto_approve", { server: account.server, username: account.username, enabled: autoApprove.checked });
-            setMsg(autoApprove.checked ? "New devices will be approved automatically" : "New devices need manual approval", "ok");
-          } catch (e) { setMsg(String(e), "err"); }
-        });
-        children.push(
-          el("p", { class: "muted", style: "margin:8px 0" },
-            "Encryption is unlocked — encrypted folders sync, and you can approve new devices."),
-          el("label", { class: "muted" }, autoApprove, " Automatically approve new devices (uncheck if you don't fully trust the server)"),
-          el("div", { class: "row", style: "margin-top:8px" },
-            el("button", { class: "ghost", onclick: async () => {
-              try {
-                await invoke("set_e2ee_passphrase", { server: account.server, username: account.username, passphrase: "" });
-                setMsg("Encryption passphrase forgotten", "ok");
-                refresh();
-              } catch (e) { setMsg(String(e), "err"); }
-            } }, "Forget passphrase")));
-      } else {
-        children.push(
-          el("p", { class: "muted", style: "margin:8px 0" }, "Sign in to manage encryption."));
-      }
-
-      card.append(el("details", { class: "e2ee", style: "margin-top:12px" }, ...children));
-    }
-
-    if (status === "none") {
-      card.append(
-        el("details", { class: "e2ee", style: "margin-top:12px" },
-          el("summary", {}, "Devices & keys"),
-          el("p", { class: "muted", style: "margin:8px 0" },
-            "Set up encryption first (above) — device enrollment transfers your encryption key to another device.")));
-    } else {
-    // Device enrollment (RFC 0008) and pinned recipient keys.
-    const deviceName = el("input", { placeholder: "e.g. this laptop", style: "margin-top:6px" });
-    const enrollOut = el("div", { class: "muted", style: "margin-top:8px" });
-    const pendingList = el("ul", { class: "pairs" });
-    const pinsList = el("ul", { class: "pairs" });
-    const refreshDevices = async () => {
-      try {
-        const list = await invoke("list_enrollments", { server: account.server, username: account.username });
-        if (!list.length) {
-          pendingList.replaceChildren(el("li", {}, el("span", { class: "empty" }, "No pending enrollments")));
-        } else {
-          pendingList.replaceChildren(...list.map((enrollment) => {
-            const codeInput = el("input", { placeholder: "Optional: type the code shown on the new device to verify it", style: "margin-top:6px" });
-            return el("li", {},
-              el("span", { class: "path" },
-                enrollment.name, " ",
-                el("span", { class: "remote" }, "enrollment " + enrollment.id)),
-              codeInput,
-              el("div", { class: "row", style: "margin-top:6px" },
-                el("button", { class: "primary", onclick: async () => {
-                  try {
-                    const name = await invoke("approve_device", {
-                      server: account.server, username: account.username, id: enrollment.id, code: codeInput.value
-                    });
-                    setMsg("Approved " + name + (codeInput.value.trim() ? " (code verified)" : ""), "ok");
-                    refreshDevices();
-                  } catch (e) { setMsg(String(e), "err"); }
-                } }, "Approve")));
-          }));
-        }
-      } catch (e) { /* listing needs a signed-in account */ }
-      try {
-        const pins = await invoke("recipient_fingerprints", { server: account.server, username: account.username });
-        if (!pins.length) {
-          pinsList.replaceChildren(el("li", {}, el("span", { class: "empty" }, "No recipient keys pinned yet")));
-        } else {
-          pinsList.replaceChildren(...pins.map((pin) =>
-            el("li", {}, el("span", { class: "path" }, pin.member, " ",
-              el("span", { class: "remote" }, pin.fingerprint)))));
-        }
-      } catch (e) { /* ignore */ }
-    };
-
-    card.append(
-      el("details", { class: "e2ee", style: "margin-top:12px" },
-        el("summary", {}, "Devices & keys"),
-        el("p", { class: "muted", style: "margin:8px 0" },
-          "Enroll this machine so it can sync encrypted folders without the passphrase, " +
-          "and review the keys pinned for the people you share with."),
-        ...(status === "unlocked"
-          ? []
-          : [el("p", { class: "error" },
-              "Unlock encryption above first — approving a device needs your master key.")]),
-        el("label", {}, "Device name"),
-        deviceName,
-        el("div", { class: "row", style: "margin-top:8px" },
-          el("button", { onclick: async () => {
-            try {
-              const view = await invoke("enroll_device", {
-                server: account.server, username: account.username, name: deviceName.value
-              });
-              enrollOut.textContent = "";
-              enrollOut.append(
-                el("div", {}, "Enrollment " + view.id + " — compare this code on an approving device:"),
-                el("div", { class: "path" }, view.code, " ",
-                  el("span", { class: "remote" }, "key " + view.fingerprint)),
-                el("div", { class: "row", style: "margin-top:6px" },
-                  el("button", { onclick: async () => {
-                    try {
-                      await invoke("finish_enrollment", { server: account.server, username: account.username });
-                      setMsg("This machine is enrolled", "ok");
-                      enrollOut.textContent = "";
-                      refresh();
-                    } catch (e) { setMsg(String(e), "err"); }
-                  } }, "Finish (wait for approval)")));
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "Start enrollment"),
-          el("button", { class: "ghost", onclick: refreshDevices }, "Refresh")),
-        enrollOut,
-        el("div", { class: "muted", style: "margin-top:12px" }, "Pending enrollments"),
-        pendingList,
-        el("div", { class: "muted", style: "margin-top:12px" }, "Pinned recipient keys"),
-        pinsList
-      )
-    );
-    refreshDevices();
-    }
-
-    const dirInput = el("input", { placeholder: "~/Kolimi", style: "margin-top:6px" });
-    const remoteInput = el("input", { placeholder: "/", style: "margin-top:6px" });
-    const rootsInput = el("input", { placeholder: "e.g. Private, Photos (blank = no encryption)", style: "margin-top:6px" });
-    card.append(
-      el("div", { style: "margin-top:12px" },
-        el("label", {}, "Add a local folder to sync"),
-        dirInput,
-        el("label", {}, "Remote folder (optional; default /)"),
-        remoteInput,
-        el("label", {}, "Encrypted folders (relative, comma-separated)"),
-        rootsInput,
-        el("div", { class: "row", style: "margin-top:8px" },
-          el("button", { onclick: async () => {
-            try {
-              await invoke("add_pair", {
-                server: account.server, username: account.username,
-                dir: dirInput.value, remote: remoteInput.value || "/",
-                encryptedRoots: rootsInput.value.split(",").map(s => s.trim()).filter(Boolean)
-              });
-              setMsg("Added " + dirInput.value, "ok");
-              refresh();
-            } catch (e) { setMsg(String(e), "err"); }
-          } }, "Add"),
-          el("button", { class: "ghost", onclick: () => invoke("open_account", { server: account.server }).catch(() => {}) }, "Open in Kolimi")
-        )
-      )
-    );
-
-    card.append(
-      el("div", { class: "row", style: "margin-top:14px" },
-        el("button", { class: "ghost", onclick: async () => {
-          await invoke("sign_out", { server: account.server, username: account.username });
-          setMsg("Signed out of " + account.username, "ok");
-          refresh();
-        } }, "Sign out"),
-        el("button", { class: "danger", onclick: async () => {
-          if (!confirm("Remove " + account.username + " and its synced directories?")) return;
-          try {
-            await invoke("remove_account", { server: account.server, username: account.username });
-            setMsg("Removed " + account.username, "ok");
-            refresh();
-          } catch (e) { setMsg(String(e), "err"); }
-        } }, "Remove account")
-      )
-    );
-
-    return card;
-  }
-
-  document.getElementById("signin").addEventListener("click", async () => {
-    const server = document.getElementById("new-server").value;
-    const username = document.getElementById("new-username").value;
-    const password = document.getElementById("new-password").value;
-    setMsg("Signing in…");
-    try {
-      await invoke("sign_in", { server, username, password });
-      document.getElementById("new-password").value = "";
-      setMsg("Signed in to " + username, "ok");
-      refresh();
-    } catch (e) { setMsg(String(e), "err"); }
-  });
-
-  document.getElementById("autostart").addEventListener("change", async (e) => {
-    try { await invoke("set_autostart_enabled", { enabled: e.target.checked }); }
-    catch (err) { setMsg(String(err), "err"); }
-  });
-
-  document.getElementById("sync-now").addEventListener("click", async () => {
-    await invoke("sync_now");
-    setMsg("Sync started — see the tray for status", "ok");
-  });
-
-  refresh().catch((e) => setMsg(String(e), "err"));
-</script>
+<div id="msg" class="toast" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
 </body>
 </html>

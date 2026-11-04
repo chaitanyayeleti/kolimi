@@ -92,9 +92,10 @@ cargo vet --locked
   It has its own `Cargo.lock`; check it with
   `cargo metadata --locked --manifest-path apps/kolimi-desktop/Cargo.toml`.
   The native window loads the server's `/app/` UI; the bundled `ui/` is the
-  Accounts & Sync window, not the file browser. Windows and macOS bundles are
-  unsigned until signing certificates are configured; the macOS bundle is
-  aarch64-only today.
+  Accounts & Sync window, not the file browser. It is plain HTML/CSS/JS with
+  no Node build step; Tauri embeds it from `frontendDist`. Windows and macOS
+  bundles are unsigned until signing certificates are configured; the macOS
+  bundle is aarch64-only today.
 - Fuzz: nightly, from `fuzz/` (`cd fuzz && cargo fuzz run <target>`). Targets
   are `chunk_roundtrip`, `preview_image`, `e2ee_decrypt` and `mls_keyring`;
   CI only runs the first three, so run `mls_keyring` yourself for keyring work.

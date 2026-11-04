@@ -826,6 +826,7 @@ fn open_settings(app: &AppHandle) {
         WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
             .title("Kolimi — Accounts & Sync")
             .inner_size(680.0, 720.0)
+            .min_inner_size(520.0, 560.0)
             .build()
     {
         eprintln!("kolimi-desktop: failed to open settings window: {error}");
@@ -1764,10 +1765,7 @@ struct MlsStatusView {
     members: Vec<String>,
 }
 
-fn pair_for<'a>(
-    account: &'a Account,
-    dir: &str,
-) -> Result<&'a SyncPair, String> {
+fn pair_for<'a>(account: &'a Account, dir: &str) -> Result<&'a SyncPair, String> {
     account
         .pairs
         .iter()
@@ -1777,6 +1775,7 @@ fn pair_for<'a>(
 
 /// Adds an MLS recipient (folder shares) for one sync pair.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn share_mls(
     app: AppHandle,
     server: String,
@@ -1800,15 +1799,9 @@ async fn share_mls(
     } else {
         kolimi_sync::SharePermission::Read
     };
-    kolimi_sync::share_path_with_permission(
-        &config,
-        &pair.remote,
-        &path,
-        target,
-        permission,
-    )
-    .await
-    .map_err(|error| error.to_string())
+    kolimi_sync::share_path_with_permission(&config, &pair.remote, &path, target, permission)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Revokes an MLS recipient share.
@@ -2153,5 +2146,14 @@ mod tests {
         assert_eq!(normalize_remote(""), "/");
         assert_eq!(normalize_remote("Private/"), "/Private");
         assert_eq!(normalize_remote("/a/b"), "/a/b");
+    }
+
+    #[test]
+    fn desktop_ui_assets_are_linked() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("href=\"style.css\""));
+        assert!(html.contains("src=\"app.js\""));
+        assert!(include_str!("../ui/style.css").contains("--accent"));
+        assert!(include_str!("../ui/app.js").contains("get_settings"));
     }
 }
