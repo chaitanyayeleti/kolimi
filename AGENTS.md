@@ -31,7 +31,9 @@ Postgres, Redis or external services.
   groups, keyrings, epochs, membership or device state. MLS state belongs to
   clients; the server stores opaque key material/protocol messages and
   enforces epoch/order rules. Keep legacy v1 per-file wraps readable; don't
-  describe MLS as audited.
+  describe MLS as audited. The audit package is frozen at the 0.4.3 surface
+  until the review completes — don't routinely bump `docs/audit/` with a
+  release.
 - Production is deployed outside this checkout. Releases are tag-driven in
   GitHub Actions; don't attempt to deploy from here, and never move or
   recreate a published tag.
@@ -55,7 +57,9 @@ cargo vet --locked
   `cargo test -p <crate> <name>`.
 - WASM unit tests: set
   `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner`, then
-  run `cargo test -p kolimi-ui --target wasm32-unknown-unknown`.
+  run `cargo test -p kolimi-ui --target wasm32-unknown-unknown`. CI uses the
+  default Node runner, so keep these tests DOM-free; browser/component
+  assertions belong in Playwright unless a browser runner is configured.
 - CI's `test` job also generates UniFFI bindings from `kolimi-ffi` for
   Kotlin/Swift/Python and runs `scripts/smoke.sh`; `cargo test` alone does
   not cover either.
@@ -97,6 +101,11 @@ cargo vet --locked
 
 ## Web UI
 
+- UI layout: `src/app.rs` is the root/login shell; the authenticated app lives
+  in `src/browser/` (`actions`, `uploads`, `sharing`, `rows`, `shell`,
+  `overlays`, `dialogs`, `search`, `types`); modal dialogs are in
+  `src/dialogs/`; MLS is `src/mls/{state,types,api,protocol}`. Add new code to
+  the matching module instead of growing `app.rs`.
 - `scripts/build-ui.sh` compiles `kolimi-ui` and `kolimi-kdf` to wasm and
   stages assets in `crates/kolimi-server/assets/ui/` (gitignored; only
   `not-built.html` is committed). It installs the exactly-matching
@@ -107,9 +116,11 @@ cargo vet --locked
   recompile (e.g. `touch crates/kolimi-server/src/ui.rs`).
 - `wasm32-unknown-unknown` is required. `.cargo/config.toml` sets getrandom's
   `wasm_js` backend for that target — don't remove it.
-- The CSP forbids inline scripts (`script-src 'self' 'wasm-unsafe-eval'`);
-  keep JavaScript in external files such as `bootstrap.js`, never an inline
-  module (CI checks this).
+- The CSP forbids inline scripts and inline style attributes (`script-src
+  'self' 'wasm-unsafe-eval'`, `style-src 'self'`). Keep JavaScript in external
+  files such as `bootstrap.js`, never an inline module. Set individual style
+  properties through the CSSOM (`style:width`, `style:left`, `style:top`),
+  never `style=...`; CI and the browser suite check both.
 
 ## Server basics
 
@@ -123,7 +134,7 @@ cargo vet --locked
 
 ## Cost / disk
 
-- 739 locked packages, 15 crates and 31 integration test files. Full debug
+- 739 locked packages, 15 crates and 32 integration test files. Full debug
   test/clippy matrices are heavy (multi-GB, historically hundreds of GB with
   full debuginfo/incremental). Batch edits, use `cargo check --tests`, run the
   full matrix once, and clean target dirs after release-verification passes.
