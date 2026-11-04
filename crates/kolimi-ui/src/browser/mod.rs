@@ -10,14 +10,13 @@ use wasm_bindgen::{JsCast, closure::Closure};
 use self::overlays::{ContextMenu, Lightbox, Toasts, UploadTray};
 use self::rows::{FileArea, SearchResults, TrashArea};
 use self::search::{encrypted_name_hits, received_mounts};
+use self::shell::{Sidebar, Topbar};
 use self::types::{
     Entry, SearchHit, Tab, TrashItem, UploadItem, UploadStatus, is_image_name, is_text_name,
     parent_of, parse_entries, parse_results, parse_trash,
 };
 use crate::api;
-use crate::app::{
-    Logo, View as AppView, encode, encode_path, human_size, mark_session_expired, toggle_theme,
-};
+use crate::app::{View as AppView, encode, encode_path, mark_session_expired, toggle_theme};
 use crate::components::Icon;
 use crate::dialogs::{
     AdminDialog, SettingsDialog, SettingsTab, ShareDialog, VaultSetupDialog, VersionsDialog,
@@ -26,6 +25,7 @@ use crate::dialogs::{
 mod overlays;
 mod rows;
 mod search;
+mod shell;
 mod types;
 
 #[component]
@@ -1336,6 +1336,33 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         query.set(String::new());
     });
 
+    let nav_files = Callback::new(move |_: ()| {
+        search_active.set(false);
+        tab.set(Tab::Files);
+        load(path.get_untracked());
+        nav_open.set(false);
+    });
+    let nav_trash = Callback::new(move |_: ()| {
+        search_active.set(false);
+        tab.set(Tab::Trash);
+        load_trash();
+        nav_open.set(false);
+    });
+    let nav_passkeys = Callback::new(move |_: ()| {
+        open_settings.run(SettingsTab::Passkeys);
+    });
+    let nav_settings = Callback::new(move |_: ()| {
+        open_settings.run(SettingsTab::Encryption);
+    });
+    let nav_admin = Callback::new(move |_: ()| admin_open.set(true));
+    let nav_theme = Callback::new(move |_: ()| toggle_theme());
+    let nav_sign_out = Callback::new(move |_: ()| sign_out(()));
+    let top_menu = Callback::new(move |_: ()| nav_open.set(!nav_open.get_untracked()));
+    let top_search = Callback::new(move |ev: ev::SubmitEvent| search_submit(ev));
+    let top_upload = Callback::new(move |ev: ev::Event| upload(ev));
+    let top_mkdir = Callback::new(move |_: ()| mkdir(()));
+    let can_write = Signal::derive(move || can_write_here(&path.get()));
+
     view! {
         <div
             class="shell"
@@ -1354,269 +1381,40 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                     <p>"Drop files to upload"</p>
                 </div>
             </div>
-            <aside class="sidebar">
-                <a class="side-brand" href="/app/">
-                    <Logo/>
-                    "Kolimi"
-                </a>
-                <nav class="nav">
-                    <button
-                        class="nav-item"
-                        class:active=move || tab.get() == Tab::Files && !search_active.get()
-                        on:click=move |_| {
-                            search_active.set(false);
-                            tab.set(Tab::Files);
-                            load(path.get_untracked());
-                            nav_open.set(false);
-                        }
-                    >
-                        <Icon name="folder"/>
-                        "Files"
-                    </button>
-                    <button
-                        class="nav-item"
-                        class:active=move || tab.get() == Tab::Trash
-                        on:click=move |_| {
-                            search_active.set(false);
-                            tab.set(Tab::Trash);
-                            load_trash();
-                            nav_open.set(false);
-                        }
-                    >
-                        <Icon name="trash"/>
-                        "Trash"
-                    </button>
-                    <div class="nav-sep"></div>
-                    <button class="nav-item" on:click=move |_| open_settings.run(SettingsTab::Passkeys)>
-                        <Icon name="key"/>
-                        "Passkeys"
-                    </button>
-                    <button class="nav-item" on:click=move |_| open_settings.run(SettingsTab::Encryption)>
-                        <Icon name="settings"/>
-                        "Settings"
-                    </button>
-                    {move || {
-                        is_admin
-                            .get()
-                            .then(|| {
-                                view! {
-                                    <button
-                                        class="nav-item"
-                                        on:click=move |_| admin_open.set(true)
-                                    >
-                                        <Icon name="users"/>
-                                        "Admin"
-                                    </button>
-                                }
-                            })
-                    }}
-                </nav>
-                <div class="side-foot">
-                    <div class="storage">
-                        {move || {
-                            let data = usage.get();
-                            let used = data["used_bytes"].as_u64().unwrap_or(0);
-                            let quota = data["effective_quota_bytes"].as_u64().unwrap_or(0);
-                            let pct = if quota == 0 {
-                                0.0
-                            } else {
-                                (used as f64 / quota as f64).clamp(0.0, 1.0)
-                            };
-                            let dash = format!("{:.2} {:.2}", pct * 100.0, 100.0 - pct * 100.0);
-                            let label = if quota == 0 {
-                                format!("{} used", human_size(used))
-                            } else {
-                                format!("{} of {}", human_size(used), human_size(quota))
-                            };
-                            view! {
-                                <div class="storage-ring">
-                                    <svg viewBox="0 0 36 36" role="img" aria-label="Storage used">
-                                        <circle class="ring-bg" cx="18" cy="18" r="15.9155"></circle>
-                                        <circle
-                                            class="ring-fg"
-                                            cx="18"
-                                            cy="18"
-                                            r="15.9155"
-                                            stroke-dasharray=dash
-                                        ></circle>
-                                    </svg>
-                                    <div class="storage-info">
-                                        <b>{format!("{:.0}%", pct * 100.0)}</b>
-                                        <small class="muted">{label}</small>
-                                    </div>
-                                </div>
-                            }
-                        }}
-                    </div>
-                    <div class="account">
-                        <span class="avatar">
-                            {move || {
-                                username
-                                    .get()
-                                    .chars()
-                                    .next()
-                                    .map(|c| c.to_uppercase().to_string())
-                                    .unwrap_or_else(|| "?".to_string())
-                            }}
-                        </span>
-                        <div class="who">
-                            <b>
-                                {move || {
-                                    if username.get().is_empty() {
-                                        "Signed in".to_string()
-                                    } else {
-                                        username.get()
-                                    }
-                                }}
-                            </b>
-                            <small>"Account"</small>
-                        </div>
-                    </div>
-                    <button class="nav-item" on:click=move |_| toggle_theme()>
-                        <Icon name="sun"/>
-                        "Theme"
-                    </button>
-                    <button class="nav-item" on:click=sign_out>
-                        <Icon name="logout"/>
-                        "Sign out"
-                    </button>
-                </div>
-            </aside>
+            <Sidebar
+                tab=tab
+                search_active=search_active
+                is_admin=is_admin
+                usage=usage
+                username=username
+                on_files=nav_files
+                on_trash=nav_trash
+                on_passkeys=nav_passkeys
+                on_settings=nav_settings
+                on_admin=nav_admin
+                on_theme=nav_theme
+                on_sign_out=nav_sign_out
+            />
 
             <div class="main">
-                <header class="topbar">
-                    <button
-                        class="icon-btn menu-btn"
-                        aria-label="Menu"
-                        on:click=move |_| nav_open.set(!nav_open.get_untracked())
-                    >
-                        <Icon name="menu"/>
-                    </button>
-                    <div class="crumbs">
-                        {move || {
-                            if search_active.get() {
-                                return vec![
-                                    view! { <span class="crumb current">"Search"</span> }
-                                        .into_any(),
-                                ];
-                            }
-                            if tab.get() == Tab::Trash {
-                                return vec![
-                                    view! { <span class="crumb current">"Trash"</span> }
-                                        .into_any(),
-                                ];
-                            }
-                            let current = path.get();
-                            let segments: Vec<&str> = current
-                                .split('/')
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            let decoded_path = crate::e2ee::decode_display_path_with_shares(
-                                e2ee_master.get_untracked().as_ref(),
-                                &current,
-                                &shared_names.get_untracked(),
-                            );
-                            let labels: Vec<String> = decoded_path
-                                .split('/')
-                                .filter(|s| !s.is_empty())
-                                .map(str::to_string)
-                                .collect();
-
-                            let mut crumbs = vec![
-                                view! {
-                                    <button
-                                        class="crumb"
-                                        on:click=move |_| load("/".to_string())
-                                        on:dragover=move |ev: ev::DragEvent| ev.prevent_default()
-                                        on:drop=move |ev: ev::DragEvent| {
-                                            ev.prevent_default();
-                                            if let Some(src) = move_drag.get_untracked() {
-                                                move_into(src, "/".to_string());
-                                                move_drag.set(None);
-                                            }
-                                        }
-                                    >
-                                        <Icon name="cloud"/>
-                                    </button>
-                                }
-                                    .into_any(),
-                            ];
-                            let mut accumulated = String::new();
-                            for (label_index, segment) in segments.into_iter().enumerate() {
-                                accumulated.push('/');
-                                accumulated.push_str(segment);
-                                let target = accumulated.clone();
-                                let drop_target = accumulated.clone();
-                                let label = labels
-                                    .get(label_index)
-                                    .cloned()
-                                    .unwrap_or_else(|| segment.to_string());
-                                crumbs.push(
-                                    view! {
-                                        <span class="sep">"/"</span>
-                                        <button
-                                            class="crumb"
-                                            on:click=move |_| load(target.clone())
-                                            on:dragover=move |ev: ev::DragEvent| ev.prevent_default()
-                                            on:drop=move |ev: ev::DragEvent| {
-                                                ev.prevent_default();
-                                                if let Some(src) = move_drag.get_untracked() {
-                                                    move_into(src, drop_target.clone());
-                                                    move_drag.set(None);
-                                                }
-                                            }
-                                        >
-                                            {label}
-                                        </button>
-                                    }
-                                        .into_any(),
-                                );
-                            }
-                            crumbs
-                        }}
-                    </div>
-                    <div class="topbar-spacer"></div>
-                    <div class="topbar-actions">
-                        <form class="search" on:submit=search_submit>
-                            <Icon name="search"/>
-                            <input
-                                type="search"
-                                placeholder="Search files…"
-                                prop:value=move || query.get()
-                                on:input=move |ev| query.set(event_target_value(&ev))
-                            />
-                        </form>
-                        <Show when=move || can_write_here(&path.get())>
-                            <label class="button primary" title="Upload files">
-                                <Icon name="upload"/>
-                                <span>{move || upload_label.get()}</span>
-                                <input type="file" class="hidden" multiple on:change=upload/>
-                            </label>
-                            <button on:click=mkdir title="New folder">
-                                <Icon name="folder-plus"/>
-                                <span class="hide-sm">"New folder"</span>
-                            </button>
-                        </Show>
-                        <div class="segmented" role="group" aria-label="View">
-                            <button
-                                class="icon-btn"
-                                class:active=move || !grid.get()
-                                on:click=move |_| grid.set(false)
-                                aria-label="List view"
-                            >
-                                <Icon name="list"/>
-                            </button>
-                            <button
-                                class="icon-btn"
-                                class:active=move || grid.get()
-                                on:click=move |_| grid.set(true)
-                                aria-label="Grid view"
-                            >
-                                <Icon name="grid"/>
-                            </button>
-                        </div>
-                    </div>
-                </header>
+                <Topbar
+                    path=path
+                    tab=tab
+                    search_active=search_active
+                    master=e2ee_master
+                    shared_names=shared_names
+                    query=query
+                    grid=grid
+                    upload_label=upload_label
+                    can_write=can_write
+                    move_drag=move_drag
+                    on_menu=top_menu
+                    on_load=file_load
+                    on_move_into=file_move_into
+                    on_search_submit=top_search
+                    on_upload=top_upload
+                    on_mkdir=top_mkdir
+                />
                 <main class="content">
                     <Show when=move || !selected.get().is_empty()>
                         <div class="bulk-bar">
