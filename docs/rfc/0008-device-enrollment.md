@@ -1,6 +1,6 @@
 # RFC 0008: Multi-device E2EE enrollment
 
-Status: implemented (0.3.1) · Last verified: 0.3.1 · Depends on:
+Status: implemented (0.4.0) · Last verified: 0.4.0 · Depends on:
 RFC 0007 (E2EE), RFC 0006 (sync client)
 
 ## Summary

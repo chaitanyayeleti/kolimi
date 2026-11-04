@@ -4,7 +4,7 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] - 2026-11-04
 
 ### Fixed
 - **MLS fork recovery**: clients stage commits locally and merge only after

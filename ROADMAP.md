@@ -1,6 +1,6 @@
 # Kolimi Roadmap
 
-Current release: **0.3.1** (2026-11-04). This file is the forward-looking
+Current release: **0.4.0** (2026-11-04). This file is the forward-looking
 backlog and the honest list of limitations. Shipped history lives in
 [CHANGELOG.md](CHANGELOG.md); design details live in [docs/rfc/](docs/rfc/).
 
@@ -17,7 +17,7 @@ backlog and the honest list of limitations. Shipped history lives in
 5. **No speculative platform work.** A plugin host or extra backend is
    added only with a concrete use case.
 
-## Current state (0.3.1)
+## Current state (0.4.0)
 
 | Area | Status |
 | --- | --- |
@@ -39,7 +39,7 @@ ship-blocker for calling group E2EE production-grade.
 
 The review package is [`docs/audit/mls-delta.md`](docs/audit/mls-delta.md).
 The 89 openmls `cargo-vet` exemptions (724 total) are temporary and are
-not audits. Freeze the 0.3.1 surface, engage an independent reviewer, land
+not audits. Freeze the 0.4.0 surface, engage an independent reviewer, land
 only fixes during the review, then replace the exemptions with real audit
 entries. Do not describe MLS as audited before this completes.
 
@@ -63,7 +63,7 @@ entries. Do not describe MLS as audited before this completes.
 - **MLS message retention tuning**: per-device epoch reports now drive
   pruning (7-day grace, 30-day report freshness); review the thresholds
   with the external auditor.
-- **Deployment validation**: upgrade from 0.2.x to 0.3.1 with real data,
+- **Deployment validation**: upgrade from 0.3.x to 0.4.0 with real data,
   restore drill in CI, and a post-upgrade `verify` run.
 
 ### 3. Clients

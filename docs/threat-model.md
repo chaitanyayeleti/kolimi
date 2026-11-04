@@ -61,14 +61,14 @@ client ──(TLS, untrusted network)──> kolimi-server
 | A2 DAV object injection | iCalendar parsed + UID rules enforced; vCards structurally validated; raw payloads stored byte-for-byte (no re-serialization); 10 MiB cap; XML parsers size-capped | M4 |
 | A2 DAV namespace shadowing | `principals`/`calendars`/`addressbooks` reserved at the root; principals/homes are owner-only and 404 for everyone else | M4 |
 | A4 third-party app | Authenticated API/DAV only, per-user permission checks | M7 |
-| A5 operator reads content | optional client-side E2EE (v1/v2 per-file keys; MLS groups in 0.3.1, not externally audited); encrypted names supported, but sizes/timestamps/structure remain visible | 0.3.1 |
+| A5 operator reads content | optional client-side E2EE (v1/v2 per-file keys; MLS groups in 0.4.0, not externally audited); encrypted names supported, but sizes/timestamps/structure remain visible | 0.4.0 |
 | Operator tampers with or deletes audit records | BLAKE3 hash-chained append-only audit log; `audit verify` detects edits, deletions, and reordering (`audit_log` rows are only ever inserted) | landed (M6) |
 | A6 MITM | rustls, TLS 1.3 only, HSTS, no mixed content in UI | M1 |
 | A7 memory scraping | `zeroize`/`secrecy` for secrets, no keys in logs; full-disk encryption is the operator's responsibility | M1+ |
 | A8 malicious dependency | `cargo-deny`, `cargo-audit`, `cargo-vet`, minimal dep tree, pinned lockfile in CI | M0 |
 | Secrets in memory / swap | `zeroize` on master/file keys and KEK locals; wrapped keys only on disk; internal review in `docs/crypto-review.md` | landed (M6) |
 | Silent bit-rot or tampering in the blob store | background janitor scrubber re-hashes chunks (BLAKE3) and re-derives manifest ids incrementally; corruption is logged and audited | landed (M2/M6) |
-| A8 build/release tampering | tagged CI builds, signed release artifacts and SBOM, cosign keyless signing | 0.3.1 |
+| A8 build/release tampering | tagged CI builds, signed release artifacts and SBOM, cosign keyless signing | 0.4.0 |
 | Replay/CSRF | CSRF double-submit tokens, SameSite=Strict cookies, no state-changing GETs | M1 |
 | Log leakage | never log content or full URLs with tokens; structured logs with redaction | M1 |
 

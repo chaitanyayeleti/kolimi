@@ -1,7 +1,7 @@
 # RFC 0012: MLS group E2EE (RFC 9420)
 
-Status: implemented (0.3.1); external audit pending · Last verified:
-0.3.1 · Depends on: RFC 0007 (E2EE), RFC 0008 (device enrollment),
+Status: implemented (0.4.0); external audit pending · Last verified:
+0.4.0 · Depends on: RFC 0007 (E2EE), RFC 0008 (device enrollment),
 RFC 0010 (DAV boundary)
 
 > **Client + server hardening (0.3.0):** `crates/kolimi-mls` (openmls 0.9)
