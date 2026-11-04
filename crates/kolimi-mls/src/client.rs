@@ -15,6 +15,9 @@ use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 use crate::CIPHERSUITE;
 
+/// Restored device, group ids and unmerged commits.
+pub type RestoredState = (Device, Vec<Vec<u8>>, BTreeMap<Vec<u8>, Vec<u8>>);
+
 /// A device credential and its local MLS provider.
 pub struct Device {
     identity: Vec<u8>,
@@ -35,6 +38,10 @@ struct PersistedDevice {
     signer: serde_json::Value,
     storage: BTreeMap<String, String>,
     groups: Vec<String>,
+    /// Serialized, unmerged commits keyed by group id. Kept so a client can
+    /// verify a server echo byte-for-byte after a crash or lost response.
+    #[serde(default)]
+    pending_commits: BTreeMap<String, String>,
 }
 
 impl Device {
@@ -72,6 +79,13 @@ impl Device {
         STANDARD.encode(self.device_id)
     }
 
+    /// This device's public MLS signature key (the same key that appears on
+    /// its group leaf). Public material; used to map a roster device to the
+    /// leaves a revoke commit must remove.
+    pub fn signature_key(&self) -> &[u8] {
+        self.credential.signature_key.as_slice()
+    }
+
     /// Reads a serialized key package's leaf signature key. Used to avoid
     /// adding the same device twice to one group.
     pub fn key_package_signature_key(&self, bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -87,7 +101,11 @@ impl Device {
     /// The output contains every MLS secret; callers **must** seal it with
     /// [`kolimi_crypto::MasterKey::seal_local`] (or equivalent) before
     /// persisting it.
-    pub fn export_state(&self, groups: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    pub fn export_state(
+        &self,
+        groups: &[Vec<u8>],
+        pending_commits: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<Vec<u8>, String> {
         let storage = self.provider.storage();
         let values = storage
             .values
@@ -106,12 +124,16 @@ impl Device {
             signer,
             storage,
             groups: groups.iter().map(|group| STANDARD.encode(group)).collect(),
+            pending_commits: pending_commits
+                .iter()
+                .map(|(group, commit)| (STANDARD.encode(group), STANDARD.encode(commit)))
+                .collect(),
         })
         .map_err(|error| format!("mls state encoding: {error}"))
     }
 
     /// Restores a device from [`Self::export_state`].
-    pub fn import_state(bytes: &[u8]) -> Result<(Self, Vec<Vec<u8>>), String> {
+    pub fn import_state(bytes: &[u8]) -> Result<RestoredState, String> {
         let persisted: PersistedDevice =
             serde_json::from_slice(bytes).map_err(|error| format!("mls state decode: {error}"))?;
         if persisted.v != 1 {
@@ -158,6 +180,19 @@ impl Device {
                     .map_err(|_| "bad MLS group id".to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let pending_commits = persisted
+            .pending_commits
+            .into_iter()
+            .map(|(group, commit)| {
+                let group = STANDARD
+                    .decode(group)
+                    .map_err(|_| "bad MLS pending group id".to_string())?;
+                let commit = STANDARD
+                    .decode(commit)
+                    .map_err(|_| "bad MLS pending commit".to_string())?;
+                Ok((group, commit))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
         Ok((
             Self {
                 identity: persisted.identity,
@@ -167,6 +202,7 @@ impl Device {
                 credential,
             },
             groups,
+            pending_commits,
         ))
     }
 
@@ -196,6 +232,18 @@ pub struct MemberInfo {
     pub identity: Vec<u8>,
     /// Public signature key, unique per device within a group.
     pub signature_key: Vec<u8>,
+}
+
+/// A commit staged locally but not merged yet.
+///
+/// Post it to the server first, then call [`Group::merge_pending`] only after
+/// the server accepts it. If another committer wins the epoch, call
+/// [`Group::discard_pending`] and process the winning commit.
+#[derive(Debug, Clone)]
+pub struct PendingCommit {
+    pub commit: Vec<u8>,
+    pub welcome: Option<Vec<u8>>,
+    pub epoch: u64,
 }
 
 /// An in-memory MLS group.
@@ -229,15 +277,13 @@ impl Group {
         Ok(Self { group })
     }
 
-    /// Adds one member from a serialized key package.
-    ///
-    /// Returns `(welcome, commit)`, both serialized. The caller stores the
-    /// commit at the new epoch and the welcome for the new device.
-    pub fn add(
+    /// Adds one member from a serialized key package, leaving the commit
+    /// pending until the caller confirms the server accepted it.
+    pub fn add_pending(
         &mut self,
         device: &Device,
         key_package: &[u8],
-    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+    ) -> Result<PendingCommit, String> {
         let key_package = KeyPackageIn::tls_deserialize_exact(key_package)
             .map_err(|error| format!("mls key package decode: {error:?}"))?
             .validate(device.provider.crypto(), ProtocolVersion::Mls10)
@@ -246,17 +292,63 @@ impl Group {
             .group
             .add_members(&device.provider, &device.signer, &[key_package])
             .map_err(|error| format!("mls add member: {error:?}"))?;
-        self.group
-            .merge_pending_commit(&device.provider)
-            .map_err(|error| format!("mls merge commit: {error:?}"))?;
-        Ok((
-            welcome
-                .to_bytes()
-                .map_err(|error| format!("mls welcome encoding: {error:?}"))?,
-            commit
+        let epoch = self
+            .pending_epoch()
+            .ok_or_else(|| "mls add did not stage a commit".to_string())?;
+        Ok(PendingCommit {
+            commit: commit
                 .to_bytes()
                 .map_err(|error| format!("mls commit encoding: {error:?}"))?,
-        ))
+            welcome: Some(
+                welcome
+                    .to_bytes()
+                    .map_err(|error| format!("mls welcome encoding: {error:?}"))?,
+            ),
+            epoch,
+        })
+    }
+
+    /// Adds one member and immediately merges the commit locally.
+    ///
+    /// Prefer [`Self::add_pending`] when the commit must be accepted by a
+    /// server first; this convenience method is for local callers/tests.
+    pub fn add(
+        &mut self,
+        device: &Device,
+        key_package: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let pending = self.add_pending(device, key_package)?;
+        self.merge_pending(device)?;
+        let welcome = pending
+            .welcome
+            .ok_or_else(|| "mls add did not produce a Welcome".to_string())?;
+        Ok((welcome, pending.commit))
+    }
+
+    /// Merges the locally staged commit after the server accepted it.
+    pub fn merge_pending(&mut self, device: &Device) -> Result<(), String> {
+        self.group
+            .merge_pending_commit(&device.provider)
+            .map_err(|error| format!("mls merge commit: {error:?}"))
+    }
+
+    /// Drops a locally staged commit that the server rejected.
+    pub fn discard_pending(&mut self, device: &Device) -> Result<(), String> {
+        self.group
+            .clear_pending_commit(device.provider.storage())
+            .map_err(|error| format!("mls clear pending commit: {error:?}"))
+    }
+
+    /// The epoch of the staged commit, if one is pending.
+    pub fn pending_epoch(&self) -> Option<u64> {
+        self.group
+            .pending_commit()
+            .map(|commit| commit.epoch().as_u64())
+    }
+
+    /// Whether this group has an unmerged commit.
+    pub fn has_pending_commit(&self) -> bool {
+        self.group.pending_commit().is_some()
     }
 
     /// Joins from a serialized Welcome (ratchet tree is in the extension).
@@ -288,12 +380,13 @@ impl Group {
             .collect()
     }
 
-    /// Removes members by leaf index and returns the serialized commit.
-    ///
-    /// The caller posts the commit at the new epoch and then re-encrypts the
-    /// share keyring for that epoch. The returned commit is already merged
-    /// locally, so the group is at the new epoch when this returns.
-    pub fn remove(&mut self, device: &Device, indices: &[u32]) -> Result<Vec<u8>, String> {
+    /// Removes members by leaf index, leaving the commit pending until the
+    /// caller confirms the server accepted it.
+    pub fn remove_pending(
+        &mut self,
+        device: &Device,
+        indices: &[u32],
+    ) -> Result<PendingCommit, String> {
         let leaves: Vec<LeafNodeIndex> = indices
             .iter()
             .map(|index| LeafNodeIndex::new(*index))
@@ -302,12 +395,26 @@ impl Group {
             .group
             .remove_members(&device.provider, &device.signer, &leaves)
             .map_err(|error| format!("mls remove member: {error:?}"))?;
-        self.group
-            .merge_pending_commit(&device.provider)
-            .map_err(|error| format!("mls merge remove commit: {error:?}"))?;
-        commit
-            .to_bytes()
-            .map_err(|error| format!("mls commit encoding: {error:?}"))
+        let epoch = self
+            .pending_epoch()
+            .ok_or_else(|| "mls remove did not stage a commit".to_string())?;
+        Ok(PendingCommit {
+            commit: commit
+                .to_bytes()
+                .map_err(|error| format!("mls commit encoding: {error:?}"))?,
+            welcome: None,
+            epoch,
+        })
+    }
+
+    /// Removes members and immediately merges the commit locally.
+    ///
+    /// Prefer [`Self::remove_pending`] when the commit must be accepted by a
+    /// server first.
+    pub fn remove(&mut self, device: &Device, indices: &[u32]) -> Result<Vec<u8>, String> {
+        let pending = self.remove_pending(device, indices)?;
+        self.merge_pending(device)?;
+        Ok(pending.commit)
     }
 
     /// Processes a commit/proposal/application message from another member.
@@ -321,11 +428,78 @@ impl Group {
             .group
             .process_message(&device.provider, protocol)
             .map_err(|error| format!("mls process message: {error:?}"))?;
-        // A received commit is staged; merge it so the epoch advances.
-        if let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() {
-            self.group
-                .merge_staged_commit(&device.provider, *staged)
-                .map_err(|error| format!("mls merge staged commit: {error:?}"))?;
+        match processed.into_content() {
+            // A received commit is staged; merge it so the epoch advances.
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                self.group
+                    .merge_staged_commit(&device.provider, *staged)
+                    .map_err(|error| format!("mls merge staged commit: {error:?}"))?;
+            }
+            // The server echoed our own pending commit. Merging it recovers
+            // the case where the commit was accepted but the client crashed
+            // or lost the response before merging locally.
+            ProcessedMessageContent::OwnPendingCommit => {
+                self.group
+                    .merge_pending_commit(&device.provider)
+                    .map_err(|error| format!("mls merge pending commit: {error:?}"))?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Processes a message that the caller knows is a commit.
+    ///
+    /// Unlike [`Self::process`], this handles an own Commit framed as a
+    /// PrivateMessage (openmls returns `OwnPrivateMessage`) by merging the
+    /// locally staged pending commit **only when the received bytes exactly
+    /// match** `expected_pending`. Private-message framing is unauthenticated,
+    /// so the caller must pass the persisted commit it previously posted.
+    /// That is the recovery path after a lost HTTP response or a crash after
+    /// server acceptance.
+    pub fn process_commit(
+        &mut self,
+        device: &Device,
+        message: &[u8],
+        expected_pending: Option<&[u8]>,
+    ) -> Result<(), String> {
+        let parsed = MlsMessageIn::tls_deserialize_exact(message)
+            .map_err(|error| format!("mls message decode: {error:?}"))?;
+        let protocol = parsed
+            .try_into_protocol_message()
+            .map_err(|error| format!("mls protocol message: {error:?}"))?;
+        if protocol.content_type() != ContentType::Commit {
+            return Err("expected an MLS commit".to_string());
+        }
+        let processed = self
+            .group
+            .process_message(&device.provider, protocol)
+            .map_err(|error| format!("mls process message: {error:?}"))?;
+        match processed.into_content() {
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                self.group
+                    .merge_staged_commit(&device.provider, *staged)
+                    .map_err(|error| format!("mls merge staged commit: {error:?}"))?;
+            }
+            ProcessedMessageContent::OwnPendingCommit => {
+                self.group
+                    .merge_pending_commit(&device.provider)
+                    .map_err(|error| format!("mls merge pending commit: {error:?}"))?;
+            }
+            ProcessedMessageContent::OwnPrivateMessage => {
+                // Private-message framing is unauthenticated: openmls says
+                // this is only a sender-data hint and cannot be decrypted or
+                // signature-checked. Merge only when the exact bytes match
+                // the pending commit this client persisted before posting.
+                let matches = expected_pending.is_some_and(|expected| expected == message);
+                if !matches || self.group.pending_commit().is_none() {
+                    return Err("own private commit does not match the staged commit".to_string());
+                }
+                self.group
+                    .merge_pending_commit(&device.provider)
+                    .map_err(|error| format!("mls merge pending commit: {error:?}"))?;
+            }
+            _ => {}
         }
         Ok(())
     }

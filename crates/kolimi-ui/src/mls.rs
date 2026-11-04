@@ -11,7 +11,7 @@ use kolimi_mls::client::{Device, Group};
 use kolimi_mls::keyring::{ShareKeyring, decrypt as decrypt_keyring, encrypt as encrypt_keyring};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -34,6 +34,55 @@ struct Mount {
 struct State {
     device: Device,
     groups: Vec<Vec<u8>>,
+    pending_commits: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+/// One MLS device in this account's server roster.
+#[derive(Debug, Clone)]
+pub struct MlsDevice {
+    pub device_id: String,
+    pub device_name: String,
+    pub signature_key: Option<Vec<u8>>,
+    pub last_seen_at: i64,
+    /// Share roots where this browser can currently see the device's leaf.
+    pub groups: Vec<String>,
+    pub current: bool,
+}
+
+/// Roster listing plus groups this browser could not inspect.
+#[derive(Debug, Clone, Default)]
+pub struct MlsDeviceList {
+    pub devices: Vec<MlsDevice>,
+    pub warnings: Vec<String>,
+}
+
+/// Result of revoking one MLS device from the browser.
+#[derive(Debug, Clone, Default)]
+pub struct MlsRevokeReport {
+    pub groups: Vec<String>,
+    pub leaves: usize,
+}
+
+fn parse_device_roster(body: &serde_json::Value) -> Vec<MlsDevice> {
+    body["devices"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|device| MlsDevice {
+            device_id: device["device_id"].as_str().unwrap_or_default().to_string(),
+            device_name: device["device_name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            signature_key: device["signature_key"]
+                .as_str()
+                .and_then(|encoded| STANDARD.decode(encoded).ok()),
+            last_seen_at: device["last_seen_at"].as_i64().unwrap_or(0),
+            groups: Vec::new(),
+            current: false,
+        })
+        .collect()
 }
 
 fn storage() -> Option<web_sys::Storage> {
@@ -203,15 +252,19 @@ async fn load_state(master: &MasterKey) -> Result<Option<State>, String> {
     let plain = master
         .open_local(&blob, STATE_AAD)
         .map_err(|_| "could not decrypt MLS state".to_string())?;
-    let (device, groups) =
+    let (device, groups, pending_commits) =
         Device::import_state(&plain).map_err(|error| format!("MLS state: {error}"))?;
-    Ok(Some(State { device, groups }))
+    Ok(Some(State {
+        device,
+        groups,
+        pending_commits,
+    }))
 }
 
 async fn save_state(master: &MasterKey, state: &State) -> Result<(), String> {
     let plain = state
         .device
-        .export_state(&state.groups)
+        .export_state(&state.groups, &state.pending_commits)
         .map_err(|error| format!("MLS state: {error}"))?;
     let blob = master
         .seal_local(&plain, STATE_AAD)
@@ -276,6 +329,26 @@ async fn load_or_create_as(master: &MasterKey, identity: &[u8]) -> Result<State,
     create_state(master, identity).await
 }
 
+/// Yields a full event-loop turn, not just a microtask.
+///
+/// A resolved promise only drains the microtask queue; the winning creator
+/// is usually waiting on an IndexedDB request, which is a macrotask. Spinning
+/// on microtasks would starve it and leave the UI stuck on "Unlocking…".
+async fn yield_to_event_loop() {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let callback = Closure::once_into_js(move || {
+            let _ = resolve.call0(&JsValue::NULL);
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.unchecked_ref::<js_sys::Function>(),
+                0,
+            );
+        }
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
 /// Creates the initial device state exactly once, even if two UI effects
 /// race on first unlock.
 async fn create_state(master: &MasterKey, identity: &[u8]) -> Result<State, String> {
@@ -283,7 +356,7 @@ async fn create_state(master: &MasterKey, identity: &[u8]) -> Result<State, Stri
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        let _ = JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL)).await;
+        yield_to_event_loop().await;
     }
     let _guard = CreationGuard;
     if let Some(state) = load_state(master).await? {
@@ -293,6 +366,7 @@ async fn create_state(master: &MasterKey, identity: &[u8]) -> Result<State, Stri
     let state = State {
         device,
         groups: Vec::new(),
+        pending_commits: BTreeMap::new(),
     };
     save_state(master, &state).await?;
     Ok(state)
@@ -324,21 +398,63 @@ pub async fn publish_key_package(master: &MasterKey) -> Result<(), String> {
         .unwrap_or_else(|| "kolimi-web".to_string());
     let state = load_or_create_as(master, username.as_bytes()).await?;
     const POOL: usize = 4;
+    let device_id = state.device.device_id();
     let own = api::get("/api/mls/key-packages").await.ok();
     let have = own
         .filter(|response| response.status == 200)
-        .and_then(|response| response.body["packages"].as_array().map(Vec::len))
+        .and_then(|response| {
+            response.body["packages"].as_array().map(|packages| {
+                packages
+                    .iter()
+                    .filter(|package| package["device_id"].as_str() == Some(&device_id))
+                    .count()
+            })
+        })
         .unwrap_or(0);
-    for _ in have..POOL {
+    let mut target = POOL;
+    if have >= POOL {
+        // Upgraded browsers may already have a full pool without the name or
+        // signature key. One extra package populates the roster.
+        let metadata_missing = match api::get("/api/mls/devices").await {
+            Ok(response) if response.status == 200 => response.body["devices"]
+                .as_array()
+                .and_then(|devices| {
+                    devices
+                        .iter()
+                        .find(|device| device["device_id"].as_str() == Some(&device_id))
+                })
+                .is_none_or(|device| {
+                    device["signature_key"].is_null()
+                        || device["device_name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .is_empty()
+                }),
+            _ => false,
+        };
+        if !metadata_missing {
+            return Ok(());
+        }
+        // Add one metadata-bearing package; the server's per-device cap
+        // remains authoritative if the pool is already at its limit.
+        target = have + 1;
+    }
+    for _ in have..target {
         let package = state
             .device
             .key_package()
+            .map_err(|error| format!("MLS key package: {error}"))?;
+        let signature_key = state
+            .device
+            .key_package_signature_key(&package)
             .map_err(|error| format!("MLS key package: {error}"))?;
         let response = api::send_json(
             "PUT",
             "/api/mls/key-packages",
             &json!({
                 "device_id": state.device.device_id(),
+                "device_name": "Web browser",
+                "signature_key": STANDARD.encode(signature_key),
                 "payload": STANDARD.encode(package),
             }),
         )
@@ -352,6 +468,94 @@ pub async fn publish_key_package(master: &MasterKey) -> Result<(), String> {
     }
     // Persist the private init keys created by the builders.
     save_state(master, &state).await
+}
+
+static REFRESHING: AtomicBool = AtomicBool::new(false);
+
+struct RefreshGuard;
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        REFRESHING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Re-adds devices that published a fresh key package after losing MLS
+/// state. Only groups this browser owns are touched; errors are ignored so
+/// one broken share cannot block unlock.
+pub async fn refresh_owned_groups(master: &MasterKey) -> Result<(), String> {
+    if !enabled() || REFRESHING.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    let _guard = RefreshGuard;
+    let response = api::get("/api/shares/owned").await?;
+    if response.status != 200 {
+        return Ok(());
+    }
+    let mut nodes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for share in response.body["shares"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        let Some(path) = share["path"].as_str().filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        let entry = nodes.entry(path.to_string()).or_default();
+        match share["kind"].as_str() {
+            Some("user") => {
+                if let Some(user) = share["recipient"].as_str() {
+                    entry.insert(user.to_string());
+                }
+            }
+            Some("group") => {
+                if let Some(group) = share["recipient"].as_str() {
+                    for member in crate::e2ee::group_members(group).await.unwrap_or_default() {
+                        entry.insert(member);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (path, recipients) in nodes {
+        if recipients.is_empty() {
+            continue;
+        }
+        let Some(remote) = (match fetch_group(&path).await {
+            Ok(group) => group,
+            Err(_) => continue,
+        }) else {
+            continue;
+        };
+        // `fetch_group` is exact, so this only refreshes the share's own
+        // group, never an ancestor group with wider membership.
+        let mut state = match load_or_create(master).await {
+            Ok(state) => state,
+            Err(_) => continue,
+        };
+        let mut group = match join_or_load(&mut state, master, &path, &remote).await {
+            Ok(group) => group,
+            Err(_) => continue,
+        };
+        let keyring = open_keyring(&group, &state.device, &remote)
+            .ok()
+            .map(|(keyring, _)| keyring);
+        let recipients: Vec<String> = recipients.into_iter().collect();
+        let revoked: BTreeSet<Vec<u8>> = remote.revocations.iter().cloned().collect();
+        let _ = add_recipients_to_group(
+            master,
+            &mut state,
+            &mut group,
+            &path,
+            &remote.group_id,
+            &recipients,
+            keyring.as_ref(),
+            &revoked,
+            true,
+        )
+        .await;
+    }
+    Ok(())
 }
 
 async fn mounts() -> Result<Vec<Mount>, String> {
@@ -382,6 +586,261 @@ fn mount_for<'a>(mounts: &'a [Mount], path: &str) -> Option<&'a Mount> {
         .max_by_key(|mount| mount.mount.len())
 }
 
+/// Every root that may carry an MLS group: owned shares and received mounts.
+async fn group_roots() -> Result<Vec<String>, String> {
+    let mut roots = BTreeSet::new();
+    let response = api::get("/api/shares/owned").await?;
+    if response.status != 200 {
+        return Err("could not list owned shares".to_string());
+    }
+    for share in response.body["shares"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        if let Some(path) = share["path"].as_str().filter(|path| !path.is_empty()) {
+            roots.insert(path.trim_end_matches('/').to_string());
+        }
+    }
+    for mount in mounts().await? {
+        roots.insert(mount.mount.trim_end_matches('/').to_string());
+    }
+    Ok(roots.into_iter().collect())
+}
+
+/// Maps MLS signature keys to the share roots where this browser can see
+/// them. Unreadable groups become warnings instead of failing the listing.
+async fn signature_groups(
+    state: &mut State,
+    master: &MasterKey,
+) -> Result<(BTreeMap<Vec<u8>, Vec<String>>, Vec<String>), String> {
+    let mut groups = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for root in group_roots().await? {
+        let Some(remote) = fetch_group(&root).await? else {
+            continue;
+        };
+        let group = match join_or_load(state, master, &root, &remote).await {
+            Ok(group) => group,
+            Err(error) => {
+                warnings.push(format!("{root}: {error}"));
+                continue;
+            }
+        };
+        for member in group.members() {
+            let paths: &mut Vec<String> = groups.entry(member.signature_key).or_default();
+            if !paths.contains(&root) {
+                paths.push(root.clone());
+            }
+        }
+    }
+    Ok((groups, warnings))
+}
+
+/// Lists the account's MLS roster with the groups this browser can inspect.
+pub async fn devices(master: &MasterKey) -> Result<MlsDeviceList, String> {
+    if !enabled() {
+        return Err("MLS shares are disabled in this browser".to_string());
+    }
+    let mut state = load_or_create(master).await?;
+    let current_id = state.device.device_id();
+    let current_signature = state.device.signature_key().to_vec();
+    let response = api::get("/api/mls/devices").await?;
+    if response.status != 200 {
+        return Err(response
+            .error()
+            .unwrap_or("could not list MLS devices")
+            .to_string());
+    }
+    let mut devices = parse_device_roster(&response.body);
+    let (groups, warnings) = signature_groups(&mut state, master).await?;
+    if !devices.iter().any(|device| device.device_id == current_id) {
+        devices.push(MlsDevice {
+            device_id: current_id.clone(),
+            device_name: "Web browser".to_string(),
+            signature_key: Some(current_signature.clone()),
+            last_seen_at: 0,
+            groups: Vec::new(),
+            current: true,
+        });
+    }
+    for device in &mut devices {
+        device.current = device.device_id == current_id;
+        let signature = device
+            .signature_key
+            .clone()
+            .or_else(|| device.current.then(|| current_signature.clone()));
+        if let Some(signature) = signature {
+            device.groups = groups.get(&signature).cloned().unwrap_or_default();
+        }
+    }
+    Ok(MlsDeviceList { devices, warnings })
+}
+
+/// Removes one device's leaf from the exact group at `path` and rotates the
+/// keyring. Returns the number of leaves removed.
+async fn remove_signature_from_group(
+    state: &mut State,
+    master: &MasterKey,
+    path: &str,
+    signature: &[u8],
+) -> Result<usize, String> {
+    for _ in 0..3 {
+        let Some(remote) = fetch_group(path).await? else {
+            return Ok(0);
+        };
+        let mut group = join_or_load(state, master, path, &remote).await?;
+        if !group
+            .members()
+            .iter()
+            .any(|member| member.signature_key == state.device.signature_key())
+        {
+            return Err(format!(
+                "this browser is no longer a member of {path}; if no member can open the share, recreate it"
+            ));
+        }
+        let indices: Vec<u32> = group
+            .members()
+            .into_iter()
+            .filter(|member| member.signature_key == signature)
+            .map(|member| member.index)
+            .collect();
+        if indices.is_empty() {
+            return Ok(0);
+        }
+        let old_exporter = exporter(&group, &state.device)?;
+        let keyring = match &remote.keyring {
+            Some(blob) if blob.epoch == group.epoch() => Some(
+                decrypt_keyring(
+                    &old_exporter,
+                    &remote.group_id,
+                    group.epoch(),
+                    &blob.payload,
+                )
+                .map_err(|error| format!("share keyring: {error}"))?,
+            ),
+            _ => None,
+        };
+        let pending = group.remove_pending(&state.device, &indices)?;
+        state
+            .pending_commits
+            .insert(remote.group_id.clone(), pending.commit.clone());
+        save_state(master, state).await?;
+        if let Err(error) = record_revocation(path, signature).await {
+            let _ = group.discard_pending(&state.device);
+            state.pending_commits.remove(&remote.group_id);
+            let _ = save_state(master, state).await;
+            return Err(error);
+        }
+        match post_commit(path, pending.epoch, &pending.commit, None).await {
+            Ok(()) => {
+                group
+                    .merge_pending(&state.device)
+                    .map_err(|error| format!("MLS merge commit: {error}"))?;
+                state.pending_commits.remove(&remote.group_id);
+                save_state(master, state).await?;
+                if let Some(keyring) = keyring {
+                    publish_epoch_keyring(state, &group, path, &remote.group_id, &keyring).await?;
+                }
+                return Ok(indices.len());
+            }
+            Err((409, _)) => {
+                group
+                    .discard_pending(&state.device)
+                    .map_err(|error| format!("MLS discard commit: {error}"))?;
+                state.pending_commits.remove(&remote.group_id);
+                save_state(master, state).await?;
+            }
+            Err((_, error)) => return Err(error),
+        }
+    }
+    Err("another member changed the MLS group; retry".to_string())
+}
+
+/// Revokes one MLS device: removes its leaves from every group this browser
+/// can inspect, rotates the keyrings, then clears the server roster row.
+///
+/// Inspection is done before any removal. If a group cannot be opened, the
+/// operation stops so it cannot leave the device in a share while clearing
+/// its roster entry.
+pub async fn revoke_device(master: &MasterKey, device_id: &str) -> Result<MlsRevokeReport, String> {
+    if !enabled() {
+        return Err("MLS shares are disabled in this browser".to_string());
+    }
+    let mut state = load_or_create(master).await?;
+    if device_id == state.device.device_id() {
+        return Err(
+            "refusing to revoke this browser; use “Reset this browser's MLS state” and enroll it again"
+                .to_string(),
+        );
+    }
+    let response = api::get("/api/mls/devices").await?;
+    if response.status != 200 {
+        return Err(response
+            .error()
+            .unwrap_or("could not list MLS devices")
+            .to_string());
+    }
+    let target = parse_device_roster(&response.body)
+        .into_iter()
+        .find(|device| device.device_id == device_id)
+        .ok_or_else(|| "unknown MLS device".to_string())?;
+    let signature = target.signature_key.ok_or_else(|| {
+        format!(
+            "device {device_id} has not reported a signature key; sync it once with this release, then retry"
+        )
+    })?;
+
+    let mut affected = Vec::new();
+    for root in group_roots().await? {
+        let Some(remote) = fetch_group(&root).await? else {
+            continue;
+        };
+        let group = join_or_load(&mut state, master, &root, &remote)
+            .await
+            .map_err(|error| {
+                format!(
+                    "cannot inspect MLS group {root}: {error}; if no remaining member can open it, recreate the share"
+                )
+            })?;
+        if !group
+            .members()
+            .iter()
+            .any(|member| member.signature_key == state.device.signature_key())
+        {
+            return Err(format!(
+                "this browser is no longer a member of {root}; recreate the share instead of revoking from it"
+            ));
+        }
+        if group
+            .members()
+            .iter()
+            .any(|member| member.signature_key == signature)
+        {
+            affected.push(root);
+        }
+    }
+
+    let mut report = MlsRevokeReport::default();
+    for root in affected {
+        let removed = remove_signature_from_group(&mut state, master, &root, &signature).await?;
+        if removed > 0 {
+            report.groups.push(root);
+            report.leaves += removed;
+        }
+    }
+
+    let response =
+        api::delete(&format!("/api/mls/devices?device_id={}", encode(device_id))).await?;
+    if response.status != 204 {
+        return Err(response
+            .error()
+            .unwrap_or("could not remove the MLS roster entry")
+            .to_string());
+    }
+    Ok(report)
+}
+
 #[derive(Debug, Clone)]
 struct GroupMessage {
     seq: i64,
@@ -403,6 +862,8 @@ struct RemoteGroup {
     epoch: u64,
     messages: Vec<GroupMessage>,
     keyring: Option<KeyringBlob>,
+    /// Client-asserted revoked signatures; automatic re-add skips these.
+    revocations: Vec<Vec<u8>>,
 }
 
 async fn fetch_group(path: &str) -> Result<Option<RemoteGroup>, String> {
@@ -411,6 +872,7 @@ async fn fetch_group(path: &str) -> Result<Option<RemoteGroup>, String> {
     let mut group_id: Option<Vec<u8>> = None;
     let mut epoch;
     let mut keyring = None;
+    let mut revocations = Vec::new();
     loop {
         let response = api::get(&format!(
             "/api/mls/group?path={}&after={after}&limit=1000",
@@ -443,6 +905,17 @@ async fn fetch_group(path: &str) -> Result<Option<RemoteGroup>, String> {
                 })
             });
         }
+        if revocations.is_empty() {
+            revocations = response.body["revocations"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| STANDARD.decode(item["signature_key"].as_str()?).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
         let page = response.body["messages"]
             .as_array()
             .cloned()
@@ -473,6 +946,7 @@ async fn fetch_group(path: &str) -> Result<Option<RemoteGroup>, String> {
         epoch,
         messages,
         keyring,
+        revocations,
     }))
 }
 
@@ -509,18 +983,58 @@ async fn join_or_load(
             if !state.groups.contains(&remote.group_id) {
                 state.groups.push(remote.group_id.clone());
             }
+            state.pending_commits.remove(&remote.group_id);
             save_state(master, state).await?;
             group
         }
     };
+    if !group.has_pending_commit() {
+        state.pending_commits.remove(&remote.group_id);
+    }
+    // A response may have been lost after the server accepted our commit.
+    // If the server never advanced, the staged commit never won; drop it.
+    if let Some(pending_epoch) = group.pending_epoch()
+        && remote.epoch < pending_epoch
+    {
+        group.discard_pending(&state.device)?;
+        state.pending_commits.remove(&remote.group_id);
+        save_state(master, state).await?;
+    }
     let mut progressed = true;
     while progressed {
         progressed = false;
         for message in &remote.messages {
-            if message.kind == "commit"
-                && message.epoch == group.epoch() + 1
-                && group.process(&state.device, &message.payload).is_ok()
-            {
+            if message.kind != "commit" || message.epoch != group.epoch() + 1 {
+                continue;
+            }
+            let before = group.epoch();
+            let expected = state.pending_commits.get(&remote.group_id).cloned();
+            let processed =
+                group.process_commit(&state.device, &message.payload, expected.as_deref());
+            if processed.is_err() && group.has_pending_commit() {
+                group
+                    .discard_pending(&state.device)
+                    .map_err(|error| format!("MLS discard commit: {error}"))?;
+                state.pending_commits.remove(&remote.group_id);
+                save_state(master, state).await?;
+                if group
+                    .process_commit(&state.device, &message.payload, None)
+                    .is_ok()
+                    && group.epoch() > before
+                {
+                    progressed = true;
+                    save_state(master, state).await?;
+                }
+                continue;
+            }
+            if processed.is_ok() {
+                if group.epoch() == before {
+                    return Err(format!(
+                        "MLS commit at epoch {} did not advance the local group",
+                        message.epoch
+                    ));
+                }
+                state.pending_commits.remove(&remote.group_id);
                 progressed = true;
                 save_state(master, state).await?;
             }
@@ -528,7 +1042,7 @@ async fn join_or_load(
     }
     if group.epoch() != remote.epoch {
         return Err(format!(
-            "MLS group is at epoch {} locally but {} on the server",
+            "MLS group is at epoch {} locally but {} on the server; reset this device's MLS state and ask a member to re-share",
             group.epoch(),
             remote.epoch
         ));
@@ -860,12 +1374,171 @@ fn group_id_random() -> Result<Vec<u8>, String> {
     Ok(id.to_vec())
 }
 
+async fn record_revocation(path: &str, signature: &[u8]) -> Result<(), String> {
+    let response = api::send_json(
+        "POST",
+        &format!("/api/mls/revocations?path={}", encode(path)),
+        &json!({ "signature_key": STANDARD.encode(signature) }),
+    )
+    .await?;
+    if response.status != 204 && response.status != 404 {
+        return Err(response
+            .error()
+            .unwrap_or("could not record the MLS revocation")
+            .to_string());
+    }
+    Ok(())
+}
+
+async fn clear_revocation(path: &str, signature: &[u8]) -> Result<(), String> {
+    let encoded = STANDARD.encode(signature);
+    let response = api::delete(&format!(
+        "/api/mls/revocations?path={}&signature_key={}",
+        encode(path),
+        encode(&encoded)
+    ))
+    .await?;
+    if response.status != 204 && response.status != 404 {
+        return Err(response
+            .error()
+            .unwrap_or("could not clear the MLS revocation")
+            .to_string());
+    }
+    Ok(())
+}
+
+async fn post_commit(
+    path: &str,
+    epoch: u64,
+    commit: &[u8],
+    welcome: Option<&[u8]>,
+) -> Result<(), (u16, String)> {
+    let mut body = json!({
+        "epoch": epoch,
+        "commit": STANDARD.encode(commit),
+    });
+    if let Some(welcome) = welcome {
+        body["welcome"] = json!(STANDARD.encode(welcome));
+    }
+    let response = api::send_json(
+        "POST",
+        &format!("/api/mls/commit?path={}", encode(path)),
+        &body,
+    )
+    .await
+    .map_err(|error| (0, error))?;
+    if response.status == 404 {
+        // Older servers only have the separate message endpoint.
+        send_message(path, epoch, "commit", commit).await?;
+        if let Some(welcome) = welcome {
+            send_message(path, epoch, "welcome", welcome).await?;
+        }
+        return Ok(());
+    }
+    if response.status != 200 {
+        return Err((
+            response.status,
+            response
+                .error()
+                .unwrap_or("could not publish the MLS commit")
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn send_message(
+    path: &str,
+    epoch: u64,
+    kind: &str,
+    payload: &[u8],
+) -> Result<(), (u16, String)> {
+    let response = api::send_json(
+        "POST",
+        &format!("/api/mls/messages?path={}", encode(path)),
+        &json!({
+            "epoch": epoch,
+            "kind": kind,
+            "payload": STANDARD.encode(payload),
+        }),
+    )
+    .await
+    .map_err(|error| (0, error))?;
+    if response.status != 200 {
+        return Err((
+            response.status,
+            response
+                .error()
+                .unwrap_or("could not publish the MLS message")
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn publish_epoch_keyring(
+    state: &State,
+    group: &Group,
+    path: &str,
+    group_id: &[u8],
+    keyring: &ShareKeyring,
+) -> Result<(), String> {
+    let mut merged = keyring.clone();
+    let mut if_revision = 0;
+    for _ in 0..3 {
+        let key = exporter(group, &state.device)?;
+        let blob = encrypt_keyring(&key, group_id, group.epoch(), &merged)?;
+        let response = api::put_bytes(
+            &format!(
+                "/api/mls/keyring?path={}&if_epoch={}&if_revision={if_revision}",
+                encode(path),
+                group.epoch()
+            ),
+            &blob,
+        )
+        .await?;
+        if response.status == 204 {
+            return Ok(());
+        }
+        if response.status != 409 {
+            return Err(response
+                .error()
+                .unwrap_or("could not rotate the share keyring")
+                .to_string());
+        }
+        let Some(fresh) = fetch_group(path).await? else {
+            return Err("the MLS group disappeared".to_string());
+        };
+        let Some(existing) = fresh
+            .keyring
+            .as_ref()
+            .filter(|blob| blob.epoch == group.epoch())
+        else {
+            return Err("the share keyring changed epoch during rotation".to_string());
+        };
+        let key = exporter(group, &state.device)?;
+        let mut server_keyring = decrypt_keyring(&key, group_id, group.epoch(), &existing.payload)
+            .map_err(|error| format!("share keyring: {error}"))?;
+        server_keyring
+            .entries
+            .extend(merged.entries.iter().map(|(k, v)| (k.clone(), v.clone())));
+        merged = server_keyring;
+        if_revision = existing.revision;
+    }
+    Err("share keyring stayed busy during rotation".to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn add_recipients_to_group(
     master: &MasterKey,
     state: &mut State,
     group: &mut Group,
     path: &str,
+    group_id: &[u8],
     recipients: &[String],
+    keyring: Option<&ShareKeyring>,
+    revoked: &BTreeSet<Vec<u8>>,
+    best_effort: bool,
 ) -> Result<(), String> {
     let members = group.members();
     let mut keys: std::collections::BTreeSet<Vec<u8>> =
@@ -874,9 +1547,14 @@ async fn add_recipients_to_group(
         members.iter().map(|m| m.identity.clone()).collect();
     let mut consumed = Vec::new();
     for recipient in recipients {
-        let packages = api::get(&format!("/api/mls/key-packages/{}", encode(recipient))).await?;
+        let packages = match api::get(&format!("/api/mls/key-packages/{}", encode(recipient))).await
+        {
+            Ok(packages) => packages,
+            Err(_) if best_effort => continue,
+            Err(error) => return Err(error),
+        };
         if packages.status != 200 {
-            if identities.contains(recipient.as_bytes()) {
+            if best_effort || identities.contains(recipient.as_bytes()) {
                 continue;
             }
             return Err(format!("{recipient} has no published MLS key package"));
@@ -892,12 +1570,16 @@ async fn add_recipients_to_group(
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            let payload = STANDARD
-                .decode(package["payload"].as_str().unwrap_or_default())
-                .map_err(|_| "malformed MLS key package".to_string())?;
+            let Ok(payload) = STANDARD.decode(package["payload"].as_str().unwrap_or_default())
+            else {
+                continue;
+            };
             by_device.entry(device).or_insert((id, payload));
         }
-        for (_, (id, package)) in by_device {
+        for (device, (id, package)) in by_device {
+            if device == state.device.device_id() {
+                continue;
+            }
             let signature = state
                 .device
                 .key_package_signature_key(&package)
@@ -905,27 +1587,54 @@ async fn add_recipients_to_group(
             if keys.contains(&signature) {
                 continue;
             }
-            let (welcome, commit) = group
-                .add(&state.device, &package)
+            if best_effort && revoked.contains(&signature) {
+                // An owner-removed leaf must not return from its leftover
+                // package pool during automatic refresh.
+                continue;
+            }
+            let pending = group
+                .add_pending(&state.device, &package)
                 .map_err(|error| format!("MLS add {recipient}: {error}"))?;
-            let epoch = group.epoch();
-            for (kind, payload) in [("commit", commit), ("welcome", welcome)] {
-                let response = api::send_json(
-                    "POST",
-                    &format!("/api/mls/messages?path={}", encode(path)),
-                    &json!({
-                        "epoch": epoch,
-                        "kind": kind,
-                        "payload": STANDARD.encode(payload),
-                    }),
-                )
-                .await?;
-                if response.status != 200 {
-                    return Err(response
-                        .error()
-                        .unwrap_or("could not publish the MLS message")
-                        .to_string());
+            // Persist before posting so a crash after server acceptance can
+            // be reconciled against the exact commit bytes on the next load.
+            state
+                .pending_commits
+                .insert(group_id.to_vec(), pending.commit.clone());
+            save_state(master, state).await?;
+            match post_commit(
+                path,
+                pending.epoch,
+                &pending.commit,
+                pending.welcome.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err((409, _)) => {
+                    group
+                        .discard_pending(&state.device)
+                        .map_err(|error| format!("MLS discard commit: {error}"))?;
+                    state.pending_commits.remove(group_id);
+                    save_state(master, state).await?;
+                    return Err("another member changed the MLS group; retry".to_string());
                 }
+                Err((_, error)) => {
+                    // Keep the pending commit: next load reconciles a lost
+                    // response against the server's message log.
+                    return Err(error);
+                }
+            }
+            group
+                .merge_pending(&state.device)
+                .map_err(|error| format!("MLS merge commit: {error}"))?;
+            state.pending_commits.remove(group_id);
+            save_state(master, state).await?;
+            if let Some(keyring) = keyring {
+                publish_epoch_keyring(state, group, path, group_id, keyring).await?;
+            }
+            if !best_effort {
+                // Explicit re-sharing overrides an earlier revocation.
+                let _ = clear_revocation(path, &signature).await;
             }
             keys.insert(signature);
             consumed.push(id);
@@ -954,75 +1663,78 @@ pub async fn remove_recipients(
     path: &str,
     usernames: &[String],
 ) -> Result<usize, String> {
-    let Some(remote) = fetch_group(path).await? else {
-        return Ok(0);
-    };
     let mut state = load_or_create(master).await?;
-    let mut group = join_or_load(&mut state, master, path, &remote).await?;
-    let indices: Vec<u32> = group
-        .members()
-        .into_iter()
-        .filter(|member| {
-            usernames
-                .iter()
-                .any(|name| member.identity == name.as_bytes())
-        })
-        .map(|member| member.index)
-        .collect();
-    if indices.is_empty() {
-        return Ok(0);
-    }
-    let old_exporter = exporter(&group, &state.device)?;
-    let keyring = match &remote.keyring {
-        Some(blob) if blob.epoch == group.epoch() => Some(
-            decrypt_keyring(
-                &old_exporter,
-                &remote.group_id,
-                group.epoch(),
-                &blob.payload,
-            )
-            .map_err(|error| format!("share keyring: {error}"))?,
-        ),
-        _ => None,
-    };
-    let commit = group.remove(&state.device, &indices)?;
-    let epoch = group.epoch();
-    let response = api::send_json(
-        "POST",
-        &format!("/api/mls/messages?path={}", encode(path)),
-        &json!({
-            "epoch": epoch,
-            "kind": "commit",
-            "payload": STANDARD.encode(commit),
-        }),
-    )
-    .await?;
-    if response.status != 200 {
-        return Err(response
-            .error()
-            .unwrap_or("could not publish the MLS removal commit")
-            .to_string());
-    }
-    if let Some(keyring) = keyring {
-        let key = exporter(&group, &state.device)?;
-        let blob = encrypt_keyring(&key, &remote.group_id, epoch, &keyring)?;
-        let response = api::put_bytes(
-            &format!(
-                "/api/mls/keyring?path={}&if_epoch={epoch}&if_revision=0",
-                encode(path)
+    for _ in 0..3 {
+        let Some(remote) = fetch_group(path).await? else {
+            return Ok(0);
+        };
+        let mut group = join_or_load(&mut state, master, path, &remote).await?;
+        let removals: Vec<(u32, Vec<u8>)> = group
+            .members()
+            .into_iter()
+            .filter(|member| {
+                usernames
+                    .iter()
+                    .any(|name| member.identity == name.as_bytes())
+            })
+            .map(|member| (member.index, member.signature_key))
+            .collect();
+        let indices: Vec<u32> = removals.iter().map(|(index, _)| *index).collect();
+        if indices.is_empty() {
+            return Ok(0);
+        }
+        let old_exporter = exporter(&group, &state.device)?;
+        let keyring = match &remote.keyring {
+            Some(blob) if blob.epoch == group.epoch() => Some(
+                decrypt_keyring(
+                    &old_exporter,
+                    &remote.group_id,
+                    group.epoch(),
+                    &blob.payload,
+                )
+                .map_err(|error| format!("share keyring: {error}"))?,
             ),
-            &blob,
-        )
-        .await?;
-        if response.status != 204 {
-            return Err(response
-                .error()
-                .unwrap_or("could not rotate the share keyring")
-                .to_string());
+            _ => None,
+        };
+        let pending = group.remove_pending(&state.device, &indices)?;
+        state
+            .pending_commits
+            .insert(remote.group_id.clone(), pending.commit.clone());
+        save_state(master, &state).await?;
+        for (_, signature) in &removals {
+            if let Err(error) = record_revocation(path, signature).await {
+                let _ = group.discard_pending(&state.device);
+                state.pending_commits.remove(&remote.group_id);
+                let _ = save_state(master, &state).await;
+                return Err(error);
+            }
+        }
+        match post_commit(path, pending.epoch, &pending.commit, None).await {
+            Ok(()) => {
+                group
+                    .merge_pending(&state.device)
+                    .map_err(|error| format!("MLS merge commit: {error}"))?;
+                state.pending_commits.remove(&remote.group_id);
+                save_state(master, &state).await?;
+                if let Some(keyring) = keyring {
+                    publish_epoch_keyring(&state, &group, path, &remote.group_id, &keyring).await?;
+                }
+                return Ok(indices.len());
+            }
+            Err((409, _)) => {
+                group
+                    .discard_pending(&state.device)
+                    .map_err(|error| format!("MLS discard commit: {error}"))?;
+                state.pending_commits.remove(&remote.group_id);
+                save_state(master, &state).await?;
+            }
+            Err((_, error)) => {
+                // Keep the pending commit for reconciliation on the next load.
+                return Err(error);
+            }
         }
     }
-    save_state(master, &state).await?;
-    Ok(indices.len())
+    Err("another member changed the MLS group; retry".to_string())
 }
 
 /// Creates/returns the MLS group for an owned encrypted folder, adds the
@@ -1071,39 +1783,28 @@ pub async fn share_folder(
             keyring.insert(if rel.is_empty() { "." } else { &rel }, &key);
         }
     }
-    if let Some(mut remote) = remote {
+    if let Some(remote) = remote {
         let mut group = join_or_load(&mut state, master, path, &remote).await?;
-        let old_epoch = group.epoch();
         let old_keyring = open_keyring(&group, &state.device, &remote)
             .ok()
             .map(|(keyring, _)| keyring);
-        add_recipients_to_group(master, &mut state, &mut group, path, recipients).await?;
-        if let Some(old_keyring) = old_keyring
-            && group.epoch() != old_epoch
-        {
-            let key = exporter(&group, &state.device)?;
-            let blob = encrypt_keyring(&key, &remote.group_id, group.epoch(), &old_keyring)?;
-            let response = api::put_bytes(
-                &format!(
-                    "/api/mls/keyring?path={}&if_epoch={}&if_revision=0",
-                    encode(path),
-                    group.epoch()
-                ),
-                &blob,
-            )
-            .await?;
-            if response.status != 204 {
-                return Err(response
-                    .error()
-                    .unwrap_or("could not rotate the share keyring")
-                    .to_string());
-            }
-            let Some(fresh) = fetch_group(path).await? else {
-                return Err("the MLS group disappeared".to_string());
-            };
-            remote = fresh;
-            group = join_or_load(&mut state, master, path, &remote).await?;
-        }
+        let revoked: BTreeSet<Vec<u8>> = remote.revocations.iter().cloned().collect();
+        add_recipients_to_group(
+            master,
+            &mut state,
+            &mut group,
+            path,
+            &remote.group_id,
+            recipients,
+            old_keyring.as_ref(),
+            &revoked,
+            false,
+        )
+        .await?;
+        let Some(remote) = fetch_group(path).await? else {
+            return Err("the MLS group disappeared".to_string());
+        };
+        let group = join_or_load(&mut state, master, path, &remote).await?;
         let mut revision = 0;
         if let Ok((existing, current_revision)) = open_keyring(&group, &state.device, &remote) {
             keyring = existing;
@@ -1158,28 +1859,23 @@ pub async fn share_folder(
     }
     let mut group =
         Group::create(&state.device, &group_id).map_err(|error| format!("MLS create: {error}"))?;
-    add_recipients_to_group(master, &mut state, &mut group, path, recipients).await?;
+    add_recipients_to_group(
+        master,
+        &mut state,
+        &mut group,
+        path,
+        &group_id,
+        recipients,
+        None,
+        &BTreeSet::new(),
+        false,
+    )
+    .await?;
     if !state.groups.contains(&group_id) {
         state.groups.push(group_id.clone());
     }
     save_state(master, &state).await?;
-    let key = exporter(&group, &state.device)?;
-    let blob = encrypt_keyring(&key, &group_id, group.epoch(), &keyring)?;
-    let response = api::put_bytes(
-        &format!(
-            "/api/mls/keyring?path={}&if_epoch={}&if_revision=0",
-            encode(path),
-            group.epoch()
-        ),
-        &blob,
-    )
-    .await?;
-    if response.status != 204 {
-        return Err(response
-            .error()
-            .unwrap_or("could not publish the share keyring")
-            .to_string());
-    }
+    publish_epoch_keyring(&state, &group, path, &group_id, &keyring).await?;
     // Keep the requested permission visible to callers in logs/UI.
     let _ = permission;
     Ok(())

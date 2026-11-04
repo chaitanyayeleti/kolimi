@@ -1,9 +1,11 @@
 # AGENTS.md
 
 Kolimi is a single-binary, Rust-first Nextcloud alternative. One Cargo
-workspace holds the server, domain crates, sync client, FFI and WASM UI;
-`apps/kolimi-desktop` (Tauri) and `fuzz` are separate workspaces with their
-own lockfiles. Rust 2024, MSRV 1.96, stable toolchain (nightly only for fuzz).
+workspace (15 crates) holds the server, domain crates, sync client, FFI and
+WASM UI; `apps/kolimi-desktop` (Tauri) and `fuzz` are separate workspaces
+with their own lockfiles. Rust 2024, MSRV 1.96, stable toolchain (nightly
+only for fuzz). Runtime is one process, SQLite and a data directory — no
+Postgres, Redis or external services.
 
 ## Hard constraints
 
@@ -13,10 +15,10 @@ own lockfiles. Rust 2024, MSRV 1.96, stable toolchain (nightly only for fuzz).
   remove those allows or add unwraps outside tests.
 - Preserve the dependency direction in `docs/architecture.md`: the server is
   the composition root; business logic stays in domain crates. `kolimi-auth`
-  must not depend on `kolimi-db`. The doc's claim that the server does not
-  link `kolimi-crypto` is stale: it is a direct dependency used only for
-  public-key validation in `api_e2ee.rs`; don't move decryption or file-key
-  logic into the server.
+  must not depend on `kolimi-db`. The server links `kolimi-crypto` only to
+  validate public keys in `api_e2ee.rs`; it stores ciphertext and must never
+  receive plaintext file or group keys — don't move decryption or file-key
+  logic into it.
 - All file/share authorization is enforced inside `kolimi-vfs` (its internal
   `authz` module), including WebDAV, the JSON API and public links. Don't add
   route-local permission checks.
@@ -24,12 +26,15 @@ own lockfiles. Rust 2024, MSRV 1.96, stable toolchain (nightly only for fuzz).
   `crates/kolimi-db/migrations/`; add the next `NNNN_*.sql`. They are
   embedded with `sqlx::migrate!`. Tests always start from a fresh DB, so
   upgrade paths are not covered — back up before deploying.
-- MLS (RFC 9420) is **not externally audited**. Read
+- E2EE is alpha; MLS (RFC 9420) is **not externally audited**. Read
   `docs/audit/mls-delta.md` and `docs/rfc/0012-mls-groups.md` before touching
-  groups, keyrings, epochs, membership or device state. Keep legacy v1
-  per-file wraps readable; don't describe MLS as audited.
+  groups, keyrings, epochs, membership or device state. MLS state belongs to
+  clients; the server stores opaque key material/protocol messages and
+  enforces epoch/order rules. Keep legacy v1 per-file wraps readable; don't
+  describe MLS as audited.
 - Production is deployed outside this checkout. Releases are tag-driven in
-  GitHub Actions; don't attempt to deploy from here.
+  GitHub Actions; don't attempt to deploy from here, and never move or
+  recreate a published tag.
 
 ## Verify (CI is the source of truth)
 
@@ -44,11 +49,16 @@ cargo audit
 cargo vet --locked
 ```
 
+- Iterate with `cargo check --tests -p <crate>`; run the full clippy/test
+  matrix once before finishing.
 - Focused test: `cargo test -p kolimi-server --test mls_sync`, or
   `cargo test -p <crate> <name>`.
 - WASM unit tests: set
   `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner`, then
   run `cargo test -p kolimi-ui --target wasm32-unknown-unknown`.
+- CI's `test` job also generates UniFFI bindings from `kolimi-ffi` for
+  Kotlin/Swift/Python and runs `scripts/smoke.sh`; `cargo test` alone does
+  not cover either.
 - `scripts/smoke.sh` builds a debug server, starts it on port 18080 with temp
   data, and exercises real HTTP, cookies, CSRF and WebDAV. Override with
   `SMOKE_PORT`.
@@ -58,15 +68,17 @@ cargo vet --locked
   `cargo test --release -p kolimi-server --test load -- --ignored`.
 - Docs: `scripts/check-docs.sh` checks relative links, the RFC index and
   known stale claims (also a CI job).
-- CI is path-filtered: browser, UI, desktop, packaging, perf, litmus and
-  fuzz jobs may be skipped when their inputs did not change. Run the local
-  command for the area you touched, or use a manual `workflow_dispatch`.
 - Browser: `./scripts/build-ui.sh && cargo build -p kolimi-server -p kolimi-sync`,
   then `npm ci --prefix browser-e2e && npm --prefix browser-e2e test`
-  (Playwright Chromium; also a CI job).
+  (Playwright Chromium; the config starts `scripts/browser-e2e-server.sh`
+  automatically, also a CI job).
+- CI is path-filtered: docs-only changes run only `docs (links)`; code
+  changes run lint/test/supply-chain plus the relevant browser, UI, desktop,
+  packaging, perf, litmus or fuzz jobs. Use a manual `workflow_dispatch` to
+  force every expensive gate.
 - `cargo vet --locked` fails on a new dependency until it has an audit or
-  exemption in `supply-chain/`. There are 724 exemptions, 89 of them the
-  temporary openmls tree — none are audits.
+  exemption in `supply-chain/`. The 724 temporary version exemptions include
+  the openmls tree; none are audits.
 
 ## Separate workspaces
 
@@ -76,7 +88,9 @@ cargo vet --locked
   It has its own `Cargo.lock`; check it with
   `cargo metadata --locked --manifest-path apps/kolimi-desktop/Cargo.toml`.
   The native window loads the server's `/app/` UI; the bundled `ui/` is the
-  Accounts & Sync window, not the file browser.
+  Accounts & Sync window, not the file browser. Windows and macOS bundles are
+  unsigned until signing certificates are configured; the macOS bundle is
+  aarch64-only today.
 - Fuzz: nightly, from `fuzz/` (`cd fuzz && cargo fuzz run <target>`). Targets
   are `chunk_roundtrip`, `preview_image`, `e2ee_decrypt` and `mls_keyring`;
   CI only runs the first three, so run `mls_keyring` yourself for keyring work.
@@ -93,6 +107,9 @@ cargo vet --locked
   recompile (e.g. `touch crates/kolimi-server/src/ui.rs`).
 - `wasm32-unknown-unknown` is required. `.cargo/config.toml` sets getrandom's
   `wasm_js` backend for that target — don't remove it.
+- The CSP forbids inline scripts (`script-src 'self' 'wasm-unsafe-eval'`);
+  keep JavaScript in external files such as `bootstrap.js`, never an inline
+  module (CI checks this).
 
 ## Server basics
 
@@ -106,26 +123,37 @@ cargo vet --locked
 
 ## Cost / disk
 
-- 739 locked packages (several hundred built on Linux), 15 crates and 31
-  integration test files. Full debug test/clippy matrices can push
-  `target/debug` into the hundreds of GB. Batch edits, use
-  `cargo check --tests` while iterating, run the full matrix once, and clean
-  target dirs after release-verification passes.
+- 739 locked packages, 15 crates and 31 integration test files. Full debug
+  test/clippy matrices are heavy (multi-GB, historically hundreds of GB with
+  full debuginfo/incremental). Batch edits, use `cargo check --tests`, run the
+  full matrix once, and clean target dirs after release-verification passes.
+- If `.cargo/config.toml` shows an uncommitted `[profile.dev]` tweak
+  (`line-tables-only`, `incremental = false`), leave it out of commits; it is
+  a local disk-saving change. The committed wasm getrandom rustflags must
+  stay.
 
 ## Docs and release
 
 - Read `docs/README.md`, `docs/architecture.md`, `docs/reference.md`,
-  `docs/rfc/README.md`, `docs/audit/README.md` and
-  `docs/plans/releases.md`.
+  `docs/rfc/README.md`, `docs/audit/README.md` and `docs/plans/releases.md`.
 - `docs/rfc/README.md` is the design/implementation status table; update it
-  when an RFC ships. `scripts/check-docs.sh` guards links and stale claims.
+  when an RFC ships. Keep the `Last verified` dates in `docs/README.md` and
+  the RFC index in sync with a release. `scripts/check-docs.sh` guards links
+  and stale claims.
 - Releases: `vX.Y.Z` triggers the server/CLI/container/Helm/AUR release;
   `desktop-vX.Y.Z` triggers the desktop bundles. Push both tags for a paired
-  release.
-- Before tagging: `main` green, `CHANGELOG.md` entry, version bumped in
-  `[workspace.package]`, every `version =` in `[workspace.dependencies]`
-  (including `crates/kolimi-store`'s `kolimi-chunk`), the desktop manifests
+  release. Server containers are built from the release binaries (no second
+  Rust compile in Docker); desktop platform builds run in parallel and
+  publish once.
+- Before tagging: `main` green (dispatch any expensive gates the path filters
+  skipped), `CHANGELOG.md` entry, version bumped in `[workspace.package]`,
+  every `version =` in `[workspace.dependencies]` (including
+  `crates/kolimi-store`'s `kolimi-chunk`), the desktop manifests
   (`Cargo.toml`, `tauri.conf.json`) and `packaging/`; regenerate the root,
-  desktop and fuzz lockfiles.
-- Accepted RustSec warnings are documented in `docs/known-advisories.md` with
-  revisit conditions; don't add new ignores silently.
+  desktop and fuzz lockfiles. Test backup/restore for any new migration.
+- After tagging, verify both workflows, release assets, GHCR multi-arch
+  images, Helm `appVersion`, AUR checksums, the installer and a desktop
+  launch; the full checklist is in `docs/plans/releases.md`.
+- Accepted RustSec warnings live in `.cargo/audit.toml`, `deny.toml` and
+  `docs/known-advisories.md` with revisit conditions; keep them in sync and
+  don't add new ignores silently.

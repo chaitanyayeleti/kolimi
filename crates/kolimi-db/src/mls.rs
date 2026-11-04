@@ -19,6 +19,17 @@ pub struct MlsKeyPackage {
     pub expires_at: Option<i64>,
 }
 
+/// One MLS device enrolled for an account.
+#[derive(Debug, Clone, FromRow)]
+pub struct MlsDevice {
+    pub user_id: i64,
+    pub device_id: String,
+    pub device_name: String,
+    pub signature_key: Option<Vec<u8>>,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+}
+
 /// The MLS group attached to a node.
 #[derive(Debug, Clone, FromRow)]
 pub struct MlsGroup {
@@ -39,6 +50,16 @@ pub struct MlsMessage {
     pub created_at: i64,
 }
 
+/// One revoked MLS leaf/signature for a group. Client-asserted: it prevents
+/// automatic re-add from leftover key packages, but does not remove a leaf.
+#[derive(Debug, Clone, FromRow)]
+pub struct MlsGroupRevocation {
+    pub signature_key: Vec<u8>,
+    pub device_id: String,
+    pub revoked_at: i64,
+    pub revoked_by: i64,
+}
+
 /// The current encrypted share keyring.
 #[derive(Debug, Clone, FromRow)]
 pub struct MlsKeyring {
@@ -49,15 +70,73 @@ pub struct MlsKeyring {
     pub revision: i64,
 }
 
+fn map_mls_insert(error: sqlx::Error, kind: &str) -> DbError {
+    if let sqlx::Error::Database(database) = &error
+        && database.is_unique_violation()
+    {
+        return DbError::Conflict(format!(
+            "another MLS {kind} won the sequence; fetch and retry"
+        ));
+    }
+    DbError::from(error)
+}
+
 impl Db {
-    /// Publishes (or replaces) one device's key package.
+    /// Publishes a key package after enforcing the per-user device cap and
+    /// the per-device live-package cap.
+    ///
+    /// `max_devices` and `max_packages` are policy limits owned by the
+    /// caller; values `<= 0` disable that limit. The device roster is updated
+    /// in the same transaction as the package insert.
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_mls_key_package(
         &self,
         user_id: i64,
         device_id: &str,
+        device_name: &str,
+        signature_key: Option<&[u8]>,
         payload: &[u8],
         expires_at: Option<i64>,
+        max_devices: i64,
+        max_packages: i64,
     ) -> Result<(), DbError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM mls_devices WHERE user_id = ? AND device_id = ?")
+                .bind(user_id)
+                .bind(device_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if existing.is_none() && max_devices > 0 {
+            let (devices,): (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM mls_devices WHERE user_id = ?")
+                    .bind(user_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if devices >= max_devices {
+                return Err(DbError::Conflict(format!(
+                    "MLS device limit reached ({max_devices}); remove an old device first"
+                )));
+            }
+        }
+        let now = now_millis();
+        if max_packages > 0 {
+            let (live,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM mls_key_packages
+                 WHERE user_id = ? AND device_id = ? AND consumed_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > ?)",
+            )
+            .bind(user_id)
+            .bind(device_id)
+            .bind(now)
+            .fetch_one(&mut *tx)
+            .await?;
+            if live >= max_packages {
+                return Err(DbError::Conflict(format!(
+                    "MLS key-package limit reached for this device ({max_packages})"
+                )));
+            }
+        }
         sqlx::query(
             "INSERT INTO mls_key_packages (user_id, device_id, payload, created_at, expires_at)
              VALUES (?, ?, ?, ?, ?)",
@@ -65,10 +144,31 @@ impl Db {
         .bind(user_id)
         .bind(device_id)
         .bind(payload)
-        .bind(now_millis())
+        .bind(now)
         .bind(expires_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "INSERT INTO mls_devices
+                 (user_id, device_id, device_name, signature_key, created_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, device_id) DO UPDATE SET
+                 device_name = CASE
+                     WHEN excluded.device_name <> '' THEN excluded.device_name
+                     ELSE mls_devices.device_name
+                 END,
+                 signature_key = COALESCE(excluded.signature_key, mls_devices.signature_key),
+                 last_seen_at = excluded.last_seen_at",
+        )
+        .bind(user_id)
+        .bind(device_id)
+        .bind(device_name)
+        .bind(signature_key)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -182,6 +282,117 @@ impl Db {
         .bind(cutoff)
         .execute(&self.pool)
         .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Lists one account's MLS device roster, newest activity first.
+    pub async fn list_mls_devices(&self, user_id: i64) -> Result<Vec<MlsDevice>, DbError> {
+        Ok(sqlx::query_as::<_, MlsDevice>(
+            "SELECT user_id, device_id, device_name, signature_key, created_at, last_seen_at
+             FROM mls_devices WHERE user_id = ? ORDER BY last_seen_at DESC, device_id",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Removes one device from the roster and its package pool.
+    ///
+    /// Clients call this only after removing the device's MLS leaves from
+    /// every group they can reach. Deleting the roster row alone does not
+    /// revoke access, but it frees a cap slot and prevents the abandoned
+    /// device's packages from being added to a future group. Stale epoch
+    /// reports are dropped so they cannot block message pruning.
+    pub async fn delete_mls_device(&self, user_id: i64, device_id: &str) -> Result<bool, DbError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("DELETE FROM mls_key_packages WHERE user_id = ? AND device_id = ?")
+            .bind(user_id)
+            .bind(device_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM mls_member_epochs WHERE user_id = ? AND device_id = ?")
+            .bind(user_id)
+            .bind(device_id)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query("DELETE FROM mls_devices WHERE user_id = ? AND device_id = ?")
+            .bind(user_id)
+            .bind(device_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Records that a group's client removed a device signature.
+    pub async fn revoke_mls_device(
+        &self,
+        node_id: i64,
+        signature_key: &[u8],
+        device_id: &str,
+        revoked_by: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO mls_group_revocations
+                 (node_id, signature_key, device_id, revoked_at, revoked_by)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, signature_key) DO UPDATE SET
+                 device_id = CASE
+                     WHEN excluded.device_id <> '' THEN excluded.device_id
+                     ELSE mls_group_revocations.device_id
+                 END,
+                 revoked_at = excluded.revoked_at,
+                 revoked_by = excluded.revoked_by",
+        )
+        .bind(node_id)
+        .bind(signature_key)
+        .bind(device_id)
+        .bind(now_millis())
+        .bind(revoked_by)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Clears a revocation after an explicit re-share adds the device again.
+    pub async fn clear_mls_device_revocation(
+        &self,
+        node_id: i64,
+        signature_key: &[u8],
+    ) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "DELETE FROM mls_group_revocations WHERE node_id = ? AND signature_key = ?",
+        )
+        .bind(node_id)
+        .bind(signature_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Revoked signatures for a group, used to skip automatic re-add.
+    pub async fn mls_group_revocations(
+        &self,
+        node_id: i64,
+    ) -> Result<Vec<MlsGroupRevocation>, DbError> {
+        Ok(sqlx::query_as::<_, MlsGroupRevocation>(
+            "SELECT signature_key, device_id, revoked_at, revoked_by
+             FROM mls_group_revocations WHERE node_id = ? ORDER BY revoked_at, device_id",
+        )
+        .bind(node_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Removes device-roster entries inactive since `cutoff`.
+    ///
+    /// The roster is retained much longer than key packages so a recipient
+    /// cannot churn new device ids every package-cleanup cycle.
+    pub async fn prune_mls_devices(&self, cutoff: i64) -> Result<u64, DbError> {
+        let result = sqlx::query("DELETE FROM mls_devices WHERE last_seen_at < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected())
     }
 
@@ -345,6 +556,96 @@ impl Db {
         Ok(seq)
     }
 
+    /// Appends a commit and its optional Welcome in one transaction.
+    ///
+    /// A commit and the Welcome it produces must become visible together:
+    /// otherwise a concurrent committer can advance the epoch between the two
+    /// inserts, leaving the newly added device without a usable Welcome.
+    /// Returns `(commit_seq, welcome_seq)`.
+    pub async fn append_mls_commit(
+        &self,
+        node_id: i64,
+        epoch: i64,
+        commit: &[u8],
+        welcome: Option<&[u8]>,
+        sender_id: i64,
+    ) -> Result<(i64, Option<i64>), DbError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current: Option<(i64,)> =
+            sqlx::query_as("SELECT epoch FROM mls_node_groups WHERE node_id = ?")
+                .bind(node_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((current_epoch,)) = current else {
+            return Err(DbError::NotFound("mls group".to_string()));
+        };
+        if epoch != current_epoch + 1 {
+            return Err(DbError::Conflict(
+                "a commit must advance the epoch by exactly one".to_string(),
+            ));
+        }
+        let (commit_seq,): (i64,) =
+            sqlx::query_as("SELECT COALESCE(MAX(seq), 0) + 1 FROM mls_messages WHERE node_id = ?")
+                .bind(node_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        sqlx::query(
+            "INSERT INTO mls_messages (node_id, seq, epoch, kind, payload, sender_id, created_at)
+             VALUES (?, ?, ?, 'commit', ?, ?, ?)",
+        )
+        .bind(node_id)
+        .bind(commit_seq)
+        .bind(epoch)
+        .bind(commit)
+        .bind(sender_id)
+        .bind(now_millis())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| map_mls_insert(error, "commit"))?;
+        let updated = sqlx::query(
+            "UPDATE mls_node_groups
+             SET epoch = ?, updated_at = ?
+             WHERE node_id = ? AND epoch = ?",
+        )
+        .bind(epoch)
+        .bind(now_millis())
+        .bind(node_id)
+        .bind(current_epoch)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(DbError::Conflict(
+                "another commit advanced the MLS epoch; fetch the group and retry".to_string(),
+            ));
+        }
+        let welcome_seq = if let Some(welcome) = welcome {
+            let (welcome_seq,): (i64,) = sqlx::query_as(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM mls_messages WHERE node_id = ?",
+            )
+            .bind(node_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO mls_messages (node_id, seq, epoch, kind, payload, sender_id, created_at)
+                 VALUES (?, ?, ?, 'welcome', ?, ?, ?)",
+            )
+            .bind(node_id)
+            .bind(welcome_seq)
+            .bind(epoch)
+            .bind(welcome)
+            .bind(sender_id)
+            .bind(now_millis())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_mls_insert(error, "welcome"))?;
+            Some(welcome_seq)
+        } else {
+            None
+        };
+        tx.commit().await?;
+        Ok((commit_seq, welcome_seq))
+    }
+
     /// Messages after `after_seq` in order.
     pub async fn mls_messages(
         &self,
@@ -477,10 +778,19 @@ mod tests {
     #[tokio::test]
     async fn purge_removes_only_old_key_packages() {
         let (_dir, db, user) = test_db().await;
-        db.set_mls_key_package(user, "old", b"old", Some(1_000))
-            .await
-            .unwrap();
-        db.set_mls_key_package(user, "live", b"live", None)
+        db.set_mls_key_package(
+            user,
+            "old",
+            "Old laptop",
+            Some(b"old-signature"),
+            b"old",
+            Some(1_000),
+            16,
+            8,
+        )
+        .await
+        .unwrap();
+        db.set_mls_key_package(user, "live", "Live laptop", None, b"live", None, 16, 8)
             .await
             .unwrap();
 
@@ -488,6 +798,107 @@ mod tests {
         let left = db.mls_key_packages(user).await.unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].device_id, "live");
+    }
+
+    #[tokio::test]
+    async fn key_package_device_and_pool_caps_are_enforced() {
+        let (_dir, db, user) = test_db().await;
+        db.set_mls_key_package(user, "device-a", "A", Some(b"sig-a"), b"a1", None, 2, 2)
+            .await
+            .unwrap();
+        db.set_mls_key_package(user, "device-a", "A", Some(b"sig-a"), b"a2", None, 2, 2)
+            .await
+            .unwrap();
+        assert!(matches!(
+            db.set_mls_key_package(user, "device-a", "A", Some(b"sig-a"), b"a3", None, 2, 2)
+                .await,
+            Err(DbError::Conflict(_))
+        ));
+        db.set_mls_key_package(user, "device-b", "B", Some(b"sig-b"), b"b1", None, 2, 2)
+            .await
+            .unwrap();
+        assert!(matches!(
+            db.set_mls_key_package(user, "device-c", "C", Some(b"sig-c"), b"c1", None, 2, 2)
+                .await,
+            Err(DbError::Conflict(_))
+        ));
+
+        // Roster retention eventually frees the slot.
+        let cutoff = now_millis() + 1_000;
+        assert_eq!(db.prune_mls_devices(cutoff).await.unwrap(), 2);
+        db.set_mls_key_package(user, "device-c", "C", Some(b"sig-c"), b"c1", None, 2, 2)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn device_roster_lists_and_deletes_packages() {
+        let (_dir, db, user) = test_db().await;
+        db.set_mls_key_package(
+            user,
+            "device-a",
+            "Laptop",
+            Some(b"sig-a"),
+            b"a1",
+            None,
+            16,
+            8,
+        )
+        .await
+        .unwrap();
+        db.set_mls_key_package(
+            user,
+            "device-b",
+            "Phone",
+            Some(b"sig-b"),
+            b"b1",
+            None,
+            16,
+            8,
+        )
+        .await
+        .unwrap();
+        let devices = db.list_mls_devices(user).await.unwrap();
+        assert_eq!(devices.len(), 2);
+        let laptop = devices
+            .iter()
+            .find(|device| device.device_id == "device-a")
+            .unwrap();
+        assert_eq!(laptop.device_name, "Laptop");
+        assert_eq!(laptop.signature_key.as_deref(), Some(b"sig-a".as_slice()));
+
+        assert!(db.delete_mls_device(user, "device-a").await.unwrap());
+        assert!(!db.delete_mls_device(user, "device-a").await.unwrap());
+        assert_eq!(db.list_mls_devices(user).await.unwrap().len(), 1);
+        let packages = db.mls_key_packages(user).await.unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].device_id, "device-b");
+    }
+
+    #[tokio::test]
+    async fn group_revocations_upsert_and_clear() {
+        let (_dir, db, user) = test_db().await;
+        let node: i64 = sqlx::query_scalar("SELECT id FROM nodes LIMIT 1")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        db.revoke_mls_device(node, b"sig-a", "device-a", user)
+            .await
+            .unwrap();
+        db.revoke_mls_device(node, b"sig-a", "device-a", user)
+            .await
+            .unwrap();
+        let revocations = db.mls_group_revocations(node).await.unwrap();
+        assert_eq!(revocations.len(), 1);
+        assert_eq!(revocations[0].signature_key, b"sig-a");
+        assert_eq!(revocations[0].device_id, "device-a");
+        assert_eq!(
+            db.clear_mls_device_revocation(node, b"sig-a")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(db.mls_group_revocations(node).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -534,6 +945,27 @@ mod tests {
         let left = db.mls_messages(root.id, 0, 10).await.unwrap();
         assert_eq!(left.len(), 3);
         assert_eq!(left[0].epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn commit_and_welcome_are_appended_atomically() {
+        let (_dir, db, user) = test_db().await;
+        let root = db.root_node(user).await.unwrap();
+        db.init_mls_group(root.id, b"group-id").await.unwrap();
+
+        let (commit_seq, welcome_seq) = db
+            .append_mls_commit(root.id, 1, b"commit", Some(b"welcome"), user)
+            .await
+            .unwrap();
+        assert_eq!(commit_seq, 1);
+        assert_eq!(welcome_seq, Some(2));
+        let group = db.mls_group(root.id).await.unwrap().unwrap();
+        assert_eq!(group.epoch, 1);
+        let messages = db.mls_messages(root.id, 0, 10).await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].kind, "commit");
+        assert_eq!(messages[1].kind, "welcome");
+        assert_eq!(messages[1].epoch, 1);
     }
 
     #[tokio::test]

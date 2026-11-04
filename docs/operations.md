@@ -355,16 +355,51 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   ```
 
   The first sync after a reset may report that a share has no Welcome for
-  the new device. On an existing member, re-share each affected encrypted
-  folder (`--mls --share … --with <user>`) so the new device is added at a
-  new epoch and receives the rotated keyring. The old device leaf remains
-  until it is removed/re-shared; a removed member keeps any plaintext or
-  keys already downloaded.
+  the new device. The next sync (or browser unlock) by a working device on
+  the same account notices the fresh key package and re-adds the device
+  automatically at a new epoch, rotating the keyring; the reset device joins
+  on its following sync. A scoped sync only refreshes shares under its root.
+  Re-sharing manually (`--mls --share … --with <user>`) remains the fallback
+  when no working member is online, and if the lost device was the only owner
+  device the share must be recreated. The old device leaf remains until it is
+  removed; a removed member keeps any plaintext or keys already downloaded.
 
   In the browser, use **Settings → Encryption → Reset this browser's MLS
   state** (also confirms first). It deletes only this browser's sealed MLS
-  slot; the E2EE keyring, recovery phrase and files are untouched. Re-add
-  the browser from another member the same way.
+  slot; the E2EE keyring, recovery phrase and files are untouched. The next
+  sync/unlock by a working device on the same account re-adds the browser.
+
+- **Revoking a lost MLS device:** list the account roster, then revoke one
+  device by id:
+
+  ```sh
+  kolimi-sync ... --mls-devices
+  kolimi-sync ... --mls-revoke-device <DEVICE_ID>          # prompts
+  kolimi-sync ... --mls-revoke-device <DEVICE_ID> --yes    # automation
+  ```
+
+  The command removes the device's MLS leaf from every group this client can
+  write, rotates each share keyring, and only then deletes the roster row and
+  unpublished key packages. The web UI has the same roster under
+  **Settings → Encryption → MLS devices** with a revoke action. A removed
+  device keeps any
+  plaintext and file keys it already downloaded; revocation protects future
+  epochs only.
+
+  A device in a **read-only received share** cannot commit its own removal.
+  The share owner must remove it first, or the share must be recreated:
+
+  ```sh
+  # run as the share owner; --with selects the recipient
+  kolimi-sync ... --mls-devices --with bob
+  kolimi-sync ... --mls-revoke-device <BOB_DEVICE_ID> --with bob
+  ```
+
+  The owner's removal records a per-group revocation, so automatic re-add
+  skips that signature even if the device still has key packages. An explicit
+  re-share clears the revocation. The recipient then retries
+  `--mls-revoke-device` to clear their roster entry. If no remaining member
+  can open a group, the command stops and the share must be recreated.
 
 ### Limitations
 
@@ -374,12 +409,21 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
 - A removed member keeps plaintext and file keys already downloaded. The
   epoch rotation protects new keyrings/files, not the past.
 - Losing the sealed device state (or deleting browser IndexedDB) loses the
-  device's group membership. `--mls-reset` clears the local state; a
-  remaining member must re-add the new device.
+  device's group membership. `--mls-reset` clears the local state; the next
+  sync/unlock by a working device on the same account re-adds the fresh
+  device. If no working member is online, or the lost device was the only
+  owner device, the share must be manually recovered or recreated.
 - Concurrent commits are serialized by the server: the second commit at
-  the same parent epoch gets `409`. A client that already advanced its
-  local state before that rejection must reset and be re-added; same-epoch
-  fork detection beyond the epoch number is still open.
+  the same parent epoch gets `409`. Clients stage commits locally and merge
+  only after acceptance; the loser discards its pending state and replays
+  the winning epoch. A commit and its Welcome are appended atomically.
+- An account may have at most 16 active MLS devices in the server roster
+  (180-day inactivity window), and each device may have at most 8 live key
+  packages. Revoke an old device to free a roster slot immediately (see
+  above); otherwise it ages out after 180 days of inactivity.
+- A client older than the revoke release ignores group revocation records
+  and may re-add a revoked device from its leftover key packages. Update
+  every device that auto-refreshes before relying on revoke.
 - Unused MLS key packages expire after 30 days; the janitor removes
   consumed/expired rows after a further seven-day grace period.
 - Clients report the last epoch they processed (`POST /api/mls/epoch`).
@@ -493,9 +537,12 @@ forward-only; back up first and do not downgrade across a migration.
 | Previews fail with 422/415 | Unsupported format, encrypted file (no server-side preview by design), or a kernel without Landlock (the worker still runs under seccomp/rlimits). |
 | “too many failed attempts” | Login lockout (5 failures / 15 min, keyed on account **and** client address) or per-client rate limiting on auth/link/MLS endpoints; wait it out, then check the audit log for `auth.login_failed` reasons. |
 | Sync reports conflicts | Expected when both sides edited a file: the server version wins and your edit is kept as `name.conflict-<ts>`. |
-| “no MLS key package” / recipient cannot decrypt | The recipient has not unlocked once with MLS enabled. Have them open the web UI or run `kolimi-sync` once, then re-share. |
+| “no MLS key package” / recipient cannot decrypt | The recipient has not unlocked once with MLS enabled. Have them open the web UI or run `kolimi-sync` once; the next owner sync/unlock re-adds their device. |
+| “MLS device limit reached” | The account has 16 active MLS devices in the 180-day roster. List them with `--mls-devices` and revoke an old one with `--mls-revoke-device`, or wait for inactivity pruning. |
+| “still a member of read-only share(s)” | The device is in a received share where this client cannot commit. Ask that share's owner to run `--mls-revoke-device <id> --with <you>`, or recreate the share; then retry the self-revoke. |
+| “MLS key-package limit reached” | One device has 8 live packages, usually because a client is retrying or multiple clients share a device id. Wait for expiry/consumption or use the reset flow to create a fresh device. |
 | MLS keyring 409 / “stayed busy” | Another device updated the same epoch keyring. Retry; the clients already retry a bounded number of times. If it persists, check for two active committers. |
-| MLS state lost after clearing storage | IndexedDB/`.kolimi` is the device's group state; it cannot be reconstructed. Use **Settings → Encryption → Reset this browser's MLS state** (web) or `--mls-reset --yes`, then have a member re-share the folder. |
+| MLS state lost after clearing storage | IndexedDB/`.kolimi` is the device's group state; it cannot be reconstructed. Use **Settings → Encryption → Reset this browser's MLS state** (web) or `--mls-reset --yes`, then let a working device sync; if none is online, have a member re-share the folder. |
 | Server won't start after upgrade | Restore the pre-upgrade backup (migrations are forward-only). |
 | Disk filling on a Docker host | The BuildKit build cache and old images dominate. Inspect with `docker system df -v`; bound with `docker builder prune --keep-storage 6GB` and `docker image prune -a`. App data is the `kolimi-data` volume. |
 

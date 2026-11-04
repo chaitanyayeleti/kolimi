@@ -19,7 +19,7 @@ Last full verification: **0.3.1** (2026-11-04).
 | [0009 — E2EE onboarding](0009-e2ee-onboarding.md) | draft | partial | Web Vault + encrypt-by-default landed; passkey-PRF browser unlock pending |
 | [0010 — WebDAV / E2EE boundary](0010-webdav-e2ee-boundary.md) | draft | partial | DAV refuses encrypted nodes; marker-based dir boundary deferred |
 | [0011 — Client unlock](0011-e2ee-client-unlock.md) | implemented | shipped (desktop) | `SyncError::Locked`, tray state, keychain unlock |
-| [0012 — MLS groups](0012-mls-groups.md) | implemented | shipped; **audit pending** | Node-scoped groups, epochs, keyring, write shares |
+| [0012 — MLS groups](0012-mls-groups.md) | implemented | shipped; **audit pending** | Node-scoped groups, epochs, keyring, write shares, device revoke |
 
 ## Status conventions
 

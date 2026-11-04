@@ -26,6 +26,11 @@ const MAX_MESSAGE: usize = 256 * 1024;
 const MAX_KEYRING: usize = 1024 * 1024;
 /// Unused key packages expire so abandoned devices cannot accumulate.
 const MLS_KEY_PACKAGE_TTL_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Distinct MLS devices allowed per account. Generous for desktop/web/CLI
+/// plus replacements, while bounding automated device-id churn.
+const MAX_MLS_DEVICES_PER_USER: i64 = 16;
+/// Client pools are four; leave room for retries before rejecting.
+const MAX_MLS_KEY_PACKAGES_PER_DEVICE: i64 = 8;
 
 #[derive(Deserialize)]
 pub struct PathQuery {
@@ -53,10 +58,36 @@ pub struct KeyringQuery {
 #[derive(Deserialize)]
 pub struct KeyPackageRequest {
     device_id: String,
+    /// Operator-visible label for the device (optional, best effort).
+    #[serde(default)]
+    device_name: String,
+    /// Base64-encoded public MLS signature key from the key package. Used
+    /// only to map a device to its group leaf during revocation.
+    #[serde(default)]
+    signature_key: Option<String>,
     /// Base64-encoded opaque key package.
     payload: String,
     #[serde(default)]
     expires_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct DeviceQuery {
+    device_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct RevocationRequest {
+    /// Base64-encoded public MLS signature key of the removed leaf.
+    signature_key: String,
+    #[serde(default)]
+    device_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct RevocationQuery {
+    path: String,
+    signature_key: String,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +107,16 @@ pub struct MessageRequest {
     kind: String,
     /// Base64-encoded opaque MLS message.
     payload: String,
+}
+
+#[derive(Deserialize)]
+pub struct CommitRequest {
+    epoch: i64,
+    /// Base64-encoded opaque MLS commit.
+    commit: String,
+    /// Base64-encoded Welcome produced by the same commit, if any.
+    #[serde(default)]
+    welcome: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -113,15 +154,43 @@ pub async fn put_key_package(
     if payload.is_empty() || payload.len() > MAX_KEY_PACKAGE {
         return api::bad_request("key package size");
     }
+    let device_name = req.device_name.trim();
+    if device_name.len() > 128 {
+        return api::bad_request("device_name must be at most 128 bytes");
+    }
+    let signature_key = match req.signature_key {
+        Some(encoded) => {
+            let Ok(key) = STANDARD.decode(encoded.as_bytes()) else {
+                return api::bad_request("signature_key must be base64");
+            };
+            if key.is_empty() || key.len() > 256 {
+                return api::bad_request("signature_key size");
+            }
+            Some(key)
+        }
+        None => None,
+    };
     let expires_at = req
         .expires_at
         .or_else(|| Some(kolimi_db::now_millis() + MLS_KEY_PACKAGE_TTL_MILLIS));
     match state
         .db
-        .set_mls_key_package(user.user_id, req.device_id.trim(), &payload, expires_at)
+        .set_mls_key_package(
+            user.user_id,
+            req.device_id.trim(),
+            device_name,
+            signature_key.as_deref(),
+            &payload,
+            expires_at,
+            MAX_MLS_DEVICES_PER_USER,
+            MAX_MLS_KEY_PACKAGES_PER_DEVICE,
+        )
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(kolimi_db::DbError::Conflict(message)) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
+        }
         Err(_) => api::internal_error(),
     }
 }
@@ -176,6 +245,101 @@ pub async fn get_own_key_packages(
                 })
                 .collect();
             Json(json!({ "packages": packages })).into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `GET /api/mls/devices` — this account's MLS device roster.
+///
+/// Signature keys are public material. The roster is bookkeeping for caps
+/// and revocation; it is not proof that a device is still a group member.
+pub async fn get_devices(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    match state.db.list_mls_devices(user.user_id).await {
+        Ok(devices) => {
+            let devices: Vec<_> = devices
+                .into_iter()
+                .map(|device| {
+                    json!({
+                        "device_id": device.device_id,
+                        "device_name": device.device_name,
+                        "signature_key": device
+                            .signature_key
+                            .as_deref()
+                            .map(|key| STANDARD.encode(key)),
+                        "created_at": device.created_at,
+                        "last_seen_at": device.last_seen_at,
+                    })
+                })
+                .collect();
+            Json(json!({ "devices": devices })).into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `GET /api/mls/devices/{username}` — another account's public MLS device
+/// roster (id, name and signature key only), for a share owner who must
+/// remove a recipient's device from a group.
+pub async fn get_user_devices(
+    State(state): State<AppState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(username): Path<String>,
+) -> Response {
+    let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
+        return api::not_found();
+    };
+    match state.db.list_mls_devices(target.id).await {
+        Ok(devices) => {
+            let devices: Vec<_> = devices
+                .into_iter()
+                .map(|device| {
+                    json!({
+                        "device_id": device.device_id,
+                        "device_name": device.device_name,
+                        "signature_key": device
+                            .signature_key
+                            .as_deref()
+                            .map(|key| STANDARD.encode(key)),
+                    })
+                })
+                .collect();
+            Json(json!({ "user": target.username, "devices": devices })).into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `DELETE /api/mls/devices?device_id=` — remove one device from the
+/// roster after the client removed its MLS leaves.
+///
+/// The server cannot verify an MLS removal, so this endpoint only clears
+/// bookkeeping: the roster row, unpublished packages and stale epoch
+/// reports. Clients must post the actual remove commit(s) first.
+pub async fn delete_device(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<DeviceQuery>,
+) -> Response {
+    let device_id = query.device_id.trim();
+    if device_id.is_empty() || device_id.len() > 64 {
+        return api::bad_request("device_id must be 1–64 bytes");
+    }
+    match state.db.delete_mls_device(user.user_id, device_id).await {
+        Ok(removed) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "mls.device_forget",
+                device_id,
+                json!({ "removed": removed }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(_) => api::internal_error(),
     }
@@ -272,6 +436,11 @@ pub async fn get_group(
         Err(_) => return api::internal_error(),
     };
     let keyring = state.db.mls_keyring(access.node.id).await.ok().flatten();
+    let revocations = state
+        .db
+        .mls_group_revocations(access.node.id)
+        .await
+        .unwrap_or_default();
     let messages: Vec<_> = messages
         .into_iter()
         .map(|message| {
@@ -296,8 +465,105 @@ pub async fn get_group(
             "updated_at": keyring.updated_at,
             "revision": keyring.revision,
         })),
+        "revocations": revocations
+            .into_iter()
+            .map(|revocation| json!({
+                "signature_key": STANDARD.encode(&revocation.signature_key),
+                "device_id": revocation.device_id,
+                "revoked_at": revocation.revoked_at,
+            }))
+            .collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+/// `POST /api/mls/revocations?path=` — remember a removed device signature so
+/// automatic re-add skips its leftover key packages. A client asserts this
+/// after it posts the remove commit; the server cannot verify the removal.
+pub async fn post_revocation(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<PathQuery>,
+    Json(req): Json<RevocationRequest>,
+) -> Response {
+    let access = match access(&state, &user, &query.path).await {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
+    if access.perm != Perm::Write {
+        return api::forbidden("write access is required to record an MLS revocation");
+    }
+    let Ok(signature_key) = STANDARD.decode(req.signature_key.as_bytes()) else {
+        return api::bad_request("signature_key must be base64");
+    };
+    if signature_key.is_empty() || signature_key.len() > 256 {
+        return api::bad_request("signature_key size");
+    }
+    if req.device_id.len() > 64 {
+        return api::bad_request("device_id must be at most 64 bytes");
+    }
+    match state
+        .db
+        .revoke_mls_device(
+            access.node.id,
+            &signature_key,
+            req.device_id.trim(),
+            user.user_id,
+        )
+        .await
+    {
+        Ok(()) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "mls.device_revoke",
+                &query.path,
+                json!({ "device_id": req.device_id.trim() }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `DELETE /api/mls/revocations?path=&signature_key=` — clear a revocation
+/// when an explicit re-share intentionally adds the device again.
+pub async fn delete_revocation(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<RevocationQuery>,
+) -> Response {
+    let access = match access(&state, &user, &query.path).await {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
+    if access.perm != Perm::Write {
+        return api::forbidden("write access is required to clear an MLS revocation");
+    }
+    let Ok(signature_key) = STANDARD.decode(query.signature_key.as_bytes()) else {
+        return api::bad_request("signature_key must be base64");
+    };
+    match state
+        .db
+        .clear_mls_device_revocation(access.node.id, &signature_key)
+        .await
+    {
+        Ok(_) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "mls.device_unrevoke",
+                &query.path,
+                json!({}),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(_) => api::internal_error(),
+    }
 }
 
 /// `POST /api/mls/messages?path=` — append a proposal/commit/welcome.
@@ -329,6 +595,73 @@ pub async fn post_message(
         .await
     {
         Ok(seq) => Json(json!({ "seq": seq })).into_response(),
+        Err(kolimi_db::DbError::Conflict(message)) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
+        }
+        Err(kolimi_db::DbError::NotFound(_)) => api::not_found(),
+        Err(_) => api::internal_error(),
+    }
+}
+
+/// `POST /api/mls/commit?path=` — atomically append a commit and optional
+/// Welcome, advancing the epoch only if the commit wins.
+pub async fn post_commit(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<PathQuery>,
+    Json(req): Json<CommitRequest>,
+) -> Response {
+    let access = match access(&state, &user, &query.path).await {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
+    if access.perm != Perm::Write {
+        return api::forbidden("write access is required to send an MLS commit");
+    }
+    if req.epoch < 0 {
+        return api::bad_request("epoch must be non-negative");
+    }
+    let Ok(commit) = STANDARD.decode(req.commit.as_bytes()) else {
+        return api::bad_request("commit must be base64");
+    };
+    if commit.is_empty() || commit.len() > MAX_MESSAGE {
+        return api::bad_request("commit size");
+    }
+    let welcome = match req.welcome {
+        Some(encoded) => {
+            let Ok(welcome) = STANDARD.decode(encoded.as_bytes()) else {
+                return api::bad_request("welcome must be base64");
+            };
+            if welcome.is_empty() || welcome.len() > MAX_MESSAGE {
+                return api::bad_request("welcome size");
+            }
+            Some(welcome)
+        }
+        None => None,
+    };
+    match state
+        .db
+        .append_mls_commit(
+            access.node.id,
+            req.epoch,
+            &commit,
+            welcome.as_deref(),
+            user.user_id,
+        )
+        .await
+    {
+        Ok((seq, welcome_seq)) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "mls.commit",
+                &query.path,
+                json!({ "epoch": req.epoch, "welcome": welcome_seq.is_some() }),
+            )
+            .await;
+            Json(json!({ "seq": seq, "welcome_seq": welcome_seq })).into_response()
+        }
         Err(kolimi_db::DbError::Conflict(message)) => {
             (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
         }

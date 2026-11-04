@@ -516,8 +516,40 @@ async fn reset_and_reshare_recovers_lost_mls_state() {
     let first = sync_once(&bob).await;
     assert!(first.is_err() || first.as_ref().unwrap().pulled == 0);
 
-    // Re-sharing adds the new device at a new epoch; the next sync reads
-    // content added after the recovery.
+    // An owner sync notices the fresh device package and re-adds it
+    // automatically; no manual re-share is required.
+    std::fs::write(alice_dir.join("Private/Team/a.txt"), b"after recovery").unwrap();
+    sync_once(&alice).await.unwrap();
+    sync_once(&bob).await.unwrap();
+    assert_eq!(
+        std::fs::read(bob_dir.join("Shared with me/Team/a.txt")).unwrap(),
+        b"after recovery"
+    );
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn single_device_revoke_removes_only_that_leaf() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let alice_dir = root.path().join("alice");
+    let bob_laptop_dir = root.path().join("bob-laptop");
+    let bob_phone_dir = root.path().join("bob-phone");
+    std::fs::create_dir_all(alice_dir.join("Private/Team")).unwrap();
+    std::fs::create_dir_all(&bob_laptop_dir).unwrap();
+    std::fs::create_dir_all(&bob_phone_dir).unwrap();
+    setup_keyring(&server.url, "alice", &alice_dir).await;
+    setup_keyring(&server.url, "bob", &bob_laptop_dir).await;
+
+    let alice = config(&server.url, "alice", &alice_dir);
+    let bob_laptop = config(&server.url, "bob", &bob_laptop_dir);
+    let bob_phone = config(&server.url, "bob", &bob_phone_dir);
+    // Both Bob devices publish a distinct key package.
+    sync_once(&bob_laptop).await.unwrap();
+    sync_once(&bob_phone).await.unwrap();
+
+    std::fs::write(alice_dir.join("Private/Team/a.txt"), b"alpha").unwrap();
+    sync_once(&alice).await.unwrap();
     share_path_with_permission(
         &alice,
         "/",
@@ -527,13 +559,80 @@ async fn reset_and_reshare_recovers_lost_mls_state() {
     )
     .await
     .unwrap();
-    std::fs::write(alice_dir.join("Private/Team/a.txt"), b"after recovery").unwrap();
-    sync_once(&alice).await.unwrap();
-    sync_once(&bob).await.unwrap();
-    assert_eq!(
-        std::fs::read(bob_dir.join("Shared with me/Team/a.txt")).unwrap(),
-        b"after recovery"
+    sync_once(&bob_laptop).await.unwrap();
+    sync_once(&bob_phone).await.unwrap();
+    let stored = stored_dir(&server.url, "alice", "/Private/").await;
+    let (_, group) = get_json(
+        &server.url,
+        "alice",
+        &format!("/api/mls/group?path={}", query(&stored)),
+    )
+    .await;
+    assert_eq!(group["epoch"], 2, "both Bob devices were added: {group}");
+
+    let phone_id = kolimi_sync::mls_devices(&bob_phone)
+        .await
+        .unwrap()
+        .devices
+        .into_iter()
+        .find(|device| device.current)
+        .expect("phone device")
+        .device_id;
+    // Bob cannot self-revoke while the phone is still in Alice's read-only
+    // share; the attempt must not clear the roster entry.
+    assert!(
+        kolimi_sync::mls_revoke_device(&bob_laptop, &phone_id)
+            .await
+            .is_err()
     );
+    assert!(
+        kolimi_sync::mls_devices(&bob_laptop)
+            .await
+            .unwrap()
+            .devices
+            .iter()
+            .any(|device| device.device_id == phone_id)
+    );
+
+    // The owner removes only the phone's leaf; the laptop stays.
+    let report = kolimi_sync::mls_revoke_recipient_device(&alice, "bob", &phone_id)
+        .await
+        .unwrap();
+    assert_eq!(report.leaves, 1, "{report:?}");
+    assert_eq!(report.groups.len(), 1, "{report:?}");
+    assert!(!report.roster_removed);
+    let (_, group) = get_json(
+        &server.url,
+        "alice",
+        &format!("/api/mls/group?path={}", query(&stored)),
+    )
+    .await;
+    assert_eq!(group["epoch"], 3, "{group}");
+    assert_eq!(group["keyring"]["epoch"], 3, "{group}");
+
+    // The laptop follows the removal epoch and keeps decrypting new files.
+    std::fs::write(alice_dir.join("Private/Team/b.txt"), b"beta").unwrap();
+    sync_once(&alice).await.unwrap();
+    sync_once(&bob_laptop).await.unwrap();
+    assert_eq!(
+        std::fs::read(bob_laptop_dir.join("Shared with me/Team/b.txt")).unwrap(),
+        b"beta"
+    );
+    // Once every group is clean, Bob can clear the stale roster entry.
+    let cleanup = kolimi_sync::mls_revoke_device(&bob_laptop, &phone_id)
+        .await
+        .unwrap();
+    assert_eq!(cleanup.leaves, 0, "{cleanup:?}");
+    assert!(cleanup.roster_removed);
+    assert!(
+        kolimi_sync::mls_devices(&bob_laptop)
+            .await
+            .unwrap()
+            .devices
+            .iter()
+            .all(|device| device.device_id != phone_id)
+    );
+
     server.handle.abort();
 }
 

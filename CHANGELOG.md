@@ -4,6 +4,46 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **MLS fork recovery**: clients stage commits locally and merge only after
+  the server accepts them. A losing concurrent committer discards its pending
+  commit, replays the winning epoch and retries instead of stranding itself
+  on a phantom epoch. Pending commits are persisted before posting; a lost
+  response or crash is recovered only when the server echo matches those
+  exact bytes, never from unauthenticated private-message framing.
+- **MLS commit/welcome atomicity**: `POST /api/mls/commit` appends a commit
+  and its optional Welcome in one transaction, so a concurrent epoch advance
+  cannot leave a newly added device without a Welcome.
+
+### Added
+- **MLS device listing and revoke**: `kolimi-sync --mls-devices` shows the
+  account's device roster (id, name, signature key, last seen and visible
+  groups); `--mls-revoke-device <id>` removes one device's leaves, rotates
+  each keyring, then clears the roster row and unpublished packages. The web
+  UI lists the same roster under **Settings → Encryption → MLS devices**
+  with a revoke action. A share owner can remove a recipient's device with
+  `--mls-devices --with <user>` and `--mls-revoke-device <id> --with <user>`.
+  Read-only received shares must be cleaned up by their owner before a
+  self-revoke can clear the roster.
+- **MLS group revocations**: removed signatures are recorded per group so
+  automatic re-add skips leftover key packages. An explicit re-share clears
+  the revocation. This prevents a revoked device from silently returning on
+  the next owner sync.
+- **MLS device and key-package caps**: the server keeps a device roster,
+  allows at most 16 active MLS devices per account over a 180-day inactivity
+  window, and at most 8 live key packages per device. Roster entries are
+  pruned by the janitor; over-limit requests get `409` instead of growing the
+  group without bound.
+- **Automatic MLS re-join**: after a device loses its sealed state and
+  publishes a fresh key package, a working device on the same account
+  re-adds it on its next sync/unlock. This only touches a share's own group
+  root, never an ancestor group with wider membership, and a scoped sync only
+  refreshes shares under its root. Manual re-share (or recreating the share)
+  remains the fallback when no working member is online or the lost device
+  was the only owner device.
+
 ## [0.3.1] - 2026-11-04
 
 ### Fixed

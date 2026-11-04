@@ -4,6 +4,7 @@
 //! sealed with the user's master key before it touches disk. The file is
 //! written `0600` via a temporary file + rename.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use kolimi_crypto::MasterKey;
@@ -14,8 +15,9 @@ use crate::SyncError;
 const STATE_FILE: &str = "mls-state.bin";
 const STATE_AAD: &[u8] = b"kolimi-mls-state-v1";
 
-/// A restored MLS device and the group ids it manages.
-pub type MlsState = (Device, Vec<Vec<u8>>);
+/// A restored MLS device, the group ids it manages, and any serialized
+/// commits that were posted but not yet merged locally.
+pub type MlsState = (Device, Vec<Vec<u8>>, BTreeMap<Vec<u8>, Vec<u8>>);
 
 /// The on-disk MLS state for one sync pair.
 pub struct MlsStore {
@@ -40,9 +42,9 @@ impl MlsStore {
         let plaintext = master
             .open_local(&blob, STATE_AAD)
             .map_err(|_| SyncError::E2ee("could not decrypt MLS state".to_string()))?;
-        let (device, groups) = Device::import_state(&plaintext)
+        let (device, groups, pending) = Device::import_state(&plaintext)
             .map_err(|error| SyncError::E2ee(format!("could not load MLS state: {error}")))?;
-        Ok(Some((device, groups)))
+        Ok(Some((device, groups, pending)))
     }
 
     /// Deletes the sealed state and any interrupted-write temp file.
@@ -69,8 +71,11 @@ impl MlsStore {
         master: &MasterKey,
         device: &Device,
         groups: &[Vec<u8>],
+        pending: &BTreeMap<Vec<u8>, Vec<u8>>,
     ) -> Result<(), SyncError> {
-        let plaintext = device.export_state(groups).map_err(SyncError::E2ee)?;
+        let plaintext = device
+            .export_state(groups, pending)
+            .map_err(SyncError::E2ee)?;
         let blob = master.seal_local(&plaintext, STATE_AAD)?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -106,9 +111,20 @@ mod tests {
         let secret = group.export(&device, SHARE_KEYRING_EXPORTER, 32).unwrap();
 
         let store = MlsStore::new(dir.path());
-        store.save(&master, &device, &[group_id.to_vec()]).unwrap();
-        let (loaded, groups) = store.load(&master).unwrap().expect("state saved");
+        store
+            .save(
+                &master,
+                &device,
+                &[group_id.to_vec()],
+                &BTreeMap::from([(group_id.to_vec(), b"pending".to_vec())]),
+            )
+            .unwrap();
+        let (loaded, groups, pending) = store.load(&master).unwrap().expect("state saved");
         assert_eq!(groups, vec![group_id.to_vec()]);
+        assert_eq!(
+            pending.get(group_id.as_slice()).map(Vec::as_slice),
+            Some(b"pending".as_slice())
+        );
         let reloaded = Group::load(&loaded, &groups[0]).unwrap();
         assert_eq!(
             reloaded
@@ -128,7 +144,7 @@ mod tests {
         let master = MasterKey::generate().unwrap();
         let device = Device::new(b"alice@laptop").unwrap();
         let store = MlsStore::new(dir.path());
-        store.save(&master, &device, &[]).unwrap();
+        store.save(&master, &device, &[], &BTreeMap::new()).unwrap();
         assert!(store.load(&master).unwrap().is_some());
 
         assert!(store.reset().unwrap());

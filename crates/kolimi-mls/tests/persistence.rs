@@ -4,6 +4,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeMap;
+
 use kolimi_mls::SHARE_KEYRING_EXPORTER;
 use kolimi_mls::client::{Device, Group};
 
@@ -31,10 +33,14 @@ fn device_and_group_state_roundtrip() {
 
     // Persist and restore both devices, then reload the group from the
     // restored key-value storage.
-    let alice_state = alice.export_state(&[group_id.to_vec()]).unwrap();
-    let bob_state = bob.export_state(&[group_id.to_vec()]).unwrap();
-    let (alice2, alice_groups) = Device::import_state(&alice_state).unwrap();
-    let (bob2, bob_groups) = Device::import_state(&bob_state).unwrap();
+    let alice_state = alice
+        .export_state(&[group_id.to_vec()], &BTreeMap::new())
+        .unwrap();
+    let bob_state = bob
+        .export_state(&[group_id.to_vec()], &BTreeMap::new())
+        .unwrap();
+    let (alice2, alice_groups, _) = Device::import_state(&alice_state).unwrap();
+    let (bob2, bob_groups, _) = Device::import_state(&bob_state).unwrap();
     let mut alice_group2 = Group::load(&alice2, &alice_groups[0]).unwrap();
     let mut bob_group2 = Group::load(&bob2, &bob_groups[0]).unwrap();
     assert_eq!(

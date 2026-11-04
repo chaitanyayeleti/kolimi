@@ -111,8 +111,11 @@ Sharing / MLS:
 | `--update-permission` | Change an existing share to `--write`/read |
 | `--mls-migrate` | Promote existing encrypted folder shares to MLS |
 | `--mls-reset` | Delete this device's sealed MLS state (prompts for `reset`) |
-| `--yes` | Skip the `--mls-reset` confirmation |
+| `--yes` | Skip a destructive MLS confirmation (`--mls-reset`, `--mls-revoke-device`) |
 | `--mls-status PATH` | Print epoch and members for a path |
+| `--mls-devices` | List MLS devices, signature keys, last seen and visible groups |
+| `--mls-revoke-device ID` | Remove one device's leaves, rotate keyrings, then clear its roster row |
+| `--with USER` (MLS commands) | List or revoke that user's device from shares you own |
 
 Notes:
 
@@ -148,6 +151,7 @@ Notes:
 | `KOLIMI_SERVER`, `KOLIMI_USER`, `KOLIMI_PASSWORD` | `kolimi-sync` connection |
 | `KOLIMI_E2EE_PASSPHRASE`, `KOLIMI_E2EE_RECOVERY`, `KOLIMI_E2EE_PRF` | E2EE unlock |
 | `KOLIMI_MLS_SHARES` | Enable MLS in `kolimi-sync` |
+| `KOLIMI_DEVICE_NAME` | Label shown in the MLS device roster (default: hostname) |
 | `KOLIMI_DESKTOP_CONFIG` | Override `desktop.json` path |
 | `KOLIMI_ADMIN_PASSWORD` | Non-interactive `install.sh` admin password |
 | `KOLIMI_IMAGE` | Image override for the Compose examples |
@@ -177,14 +181,26 @@ Notes:
 | Shares | `/api/shares`, `/api/shares/received`, `/api/shares/owned`, `/api/shares/{id}`, `/api/shareable`, `/api/groups/{name}/members` |
 | Public links | `GET /public/{token}`, `/unlock`, `/list*`, `/download*` |
 | E2EE v1/v2 | `/api/e2ee/keyring`, `/api/e2ee/identity`, `/api/files/key`, `/api/e2ee/share-key`, `/api/e2ee/share-name`, `/api/e2ee/enrollments*`, `/api/e2ee/devices*` |
-| MLS | `/api/mls/key-packages`, `/api/mls/key-packages/consume`, `/api/mls/key-packages/{username}`, `/api/mls/group`, `/api/mls/messages`, `/api/mls/epoch`, `/api/mls/keyring` |
+| MLS | `/api/mls/key-packages`, `/api/mls/key-packages/consume`, `/api/mls/key-packages/{username}`, `/api/mls/devices`, `/api/mls/devices/{username}`, `/api/mls/group`, `/api/mls/commit`, `/api/mls/messages`, `/api/mls/epoch`, `/api/mls/keyring`, `/api/mls/revocations` |
 | Operations | `GET /healthz` (public), `GET /version` (authenticated), `GET /metrics` (admin) |
 
 E2EE and MLS request bodies are opaque ciphertext/protocol payloads to the
 server. The server validates sizes, ownership, ACLs and epoch ordering; it
-does not decrypt them. `POST /api/mls/epoch?path=` accepts
+does not decrypt them. `POST /api/mls/commit?path=` appends a commit and its
+optional Welcome in one transaction, so a concurrent committer cannot advance
+the epoch between them. `POST /api/mls/epoch?path=` accepts
 `{"device_id","epoch"}` from a member after it processes group state; the
 janitor uses the minimum fresh report to prune old messages and keyrings.
+An account may have at most 16 active MLS devices in the roster at a time and
+each device may have at most 8 live key packages; over-limit package uploads
+return `409`. Inactive roster entries are pruned after 180 days. The roster
+stores an optional device name and the public MLS signature key so a client
+can map a device id to its group leaf. `GET /api/mls/devices/{username}`
+exposes only that public metadata for a shared recipient. Removed signatures
+are recorded per group (`/api/mls/revocations`) so automatic re-add skips
+leftover key packages; an explicit re-share clears the entry. Deleting a
+roster row (`DELETE /api/mls/devices?device_id=`) is bookkeeping, not an MLS
+removal: clients must post the remove commit first.
 
 See the [sync protocol](rfc/0002-sync-protocol.md), [E2EE](rfc/0007-e2ee.md)
 and [MLS](rfc/0012-mls-groups.md) specs for wire details.

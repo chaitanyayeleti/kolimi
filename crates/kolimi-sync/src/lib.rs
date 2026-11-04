@@ -350,11 +350,23 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
     let mut mls = match e2ee.as_ref().filter(|e2ee| e2ee.mls) {
         Some(e2ee) => {
             let mut mls = crate::mls::MlsClient::load(config, &e2ee.master)?;
-            mls.publish_key_package(&http, &e2ee.master).await?;
+            // A device/package cap or a transient MLS error must not block
+            // ordinary file sync. Explicit share operations still surface it.
+            if let Err(error) = mls.publish_key_package(&http, &e2ee.master).await {
+                eprintln!("kolimi-sync: MLS key package publish failed: {error}");
+            }
             Some(mls)
         }
         None => None,
     };
+    // If a recipient lost MLS state, its next sync publishes a fresh key
+    // package. An owner pass re-adds that device automatically; no manual
+    // re-share is needed.
+    if let (Some(mls), Some(e2ee)) = (mls.as_mut(), e2ee.as_ref())
+        && let Err(error) = mls.refresh_owned_groups(&http, &e2ee.master, &root).await
+    {
+        eprintln!("kolimi-sync: MLS owned-share refresh failed: {error}");
+    }
     // The server's folder flags are the source of truth; local
     // `encrypted_roots` is only a fallback for older servers.
     let mut policy = EncryptPolicy {
@@ -1177,6 +1189,103 @@ pub async fn share_path_with_permission(
         rollback_share(&http, share_id).await;
     }
     result
+}
+
+/// Lists this account's MLS device roster and the share roots where this
+/// client can see each device.
+///
+/// Requires unlocked E2EE options and MLS enabled. `warnings` lists groups
+/// this client cannot inspect (for example after its own state was reset).
+pub async fn mls_devices(config: &SyncConfig) -> Result<crate::mls::MlsDeviceList, SyncError> {
+    let http = Http::new(config)?;
+    let Some(e2ee) = unlock_e2ee(&http, config).await? else {
+        return Err(SyncError::E2ee(
+            "listing MLS devices requires e2ee options".to_string(),
+        ));
+    };
+    if !e2ee.mls {
+        return Err(SyncError::E2ee(
+            "enable MLS (E2eeOptions::mls) first".to_string(),
+        ));
+    }
+    let mut mls = crate::mls::MlsClient::load(config, &e2ee.master)?;
+    mls.devices(&http, &e2ee.master).await
+}
+
+/// Lists another account's public MLS devices (id, name, signature key) with
+/// the groups this client can inspect. Multiply-authenticated users already
+/// see each other's key packages; this exposes the same public metadata so a
+/// share owner can remove one recipient device.
+pub async fn mls_user_devices(
+    config: &SyncConfig,
+    username: &str,
+) -> Result<crate::mls::MlsDeviceList, SyncError> {
+    let http = Http::new(config)?;
+    let Some(e2ee) = unlock_e2ee(&http, config).await? else {
+        return Err(SyncError::E2ee(
+            "listing MLS devices requires e2ee options".to_string(),
+        ));
+    };
+    if !e2ee.mls {
+        return Err(SyncError::E2ee(
+            "enable MLS (E2eeOptions::mls) first".to_string(),
+        ));
+    }
+    let mut mls = crate::mls::MlsClient::load(config, &e2ee.master)?;
+    mls.devices_for(&http, &e2ee.master, username).await
+}
+
+/// Revokes one MLS device: removes its leaf from every group this client can
+/// inspect, rotates each keyring, then clears the server roster row and its
+/// unpublished packages.
+///
+/// Call this from a device that can open every affected share. If the device
+/// is still in a read-only share, nothing is removed; the owner of that share
+/// must call [`mls_revoke_recipient_device`] first, or the share must be
+/// recreated.
+pub async fn mls_revoke_device(
+    config: &SyncConfig,
+    device_id: &str,
+) -> Result<crate::mls::MlsRevokeReport, SyncError> {
+    let http = Http::new(config)?;
+    let Some(e2ee) = unlock_e2ee(&http, config).await? else {
+        return Err(SyncError::E2ee(
+            "revoking an MLS device requires e2ee options".to_string(),
+        ));
+    };
+    if !e2ee.mls {
+        return Err(SyncError::E2ee(
+            "enable MLS (E2eeOptions::mls) first".to_string(),
+        ));
+    }
+    let mut mls = crate::mls::MlsClient::load(config, &e2ee.master)?;
+    mls.revoke_device(&http, &e2ee.master, device_id).await
+}
+
+/// Removes one device belonging to `username` from every group this client
+/// can write. A share owner uses this when a recipient loses a device.
+///
+/// The recipient's roster entry is intentionally left alone: only they can
+/// decide when every group they participate in has been cleaned up.
+pub async fn mls_revoke_recipient_device(
+    config: &SyncConfig,
+    username: &str,
+    device_id: &str,
+) -> Result<crate::mls::MlsRevokeReport, SyncError> {
+    let http = Http::new(config)?;
+    let Some(e2ee) = unlock_e2ee(&http, config).await? else {
+        return Err(SyncError::E2ee(
+            "revoking an MLS device requires e2ee options".to_string(),
+        ));
+    };
+    if !e2ee.mls {
+        return Err(SyncError::E2ee(
+            "enable MLS (E2eeOptions::mls) first".to_string(),
+        ));
+    }
+    let mut mls = crate::mls::MlsClient::load(config, &e2ee.master)?;
+    mls.revoke_recipient_device(&http, &e2ee.master, username, device_id)
+        .await
 }
 
 /// Reports the MLS epoch and members for an owned/joined path.

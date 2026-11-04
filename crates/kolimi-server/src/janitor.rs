@@ -28,6 +28,9 @@ pub const SCRUB_BATCH: usize = 200;
 pub const RECONCILE_BATCH: i64 = 50;
 /// Consumed/expired MLS key packages are retained this long for diagnostics.
 pub const MLS_KEY_PACKAGE_RETENTION_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// Inactive MLS device-roster entries are retained much longer than packages
+/// so a recipient cannot churn new device ids every cleanup cycle.
+pub const MLS_DEVICE_RETENTION_MILLIS: i64 = 180 * 24 * 60 * 60 * 1000;
 /// A device that has not reported its epoch for this long is ignored when
 /// calculating the safe pruning floor.
 pub const MLS_EPOCH_REPORT_FRESH_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -51,6 +54,8 @@ pub struct Report {
     pub expired_enrollments: u64,
     /// Consumed/expired MLS key packages removed.
     pub pruned_mls_key_packages: u64,
+    /// Inactive MLS device-roster entries removed.
+    pub pruned_mls_devices: u64,
     /// MLS protocol messages below the safe epoch floor.
     pub pruned_mls_messages: u64,
     /// MLS keyrings below the safe epoch floor.
@@ -100,6 +105,10 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
     report.pruned_mls_key_packages = state
         .db
         .purge_mls_key_packages(now - MLS_KEY_PACKAGE_RETENTION_MILLIS)
+        .await?;
+    report.pruned_mls_devices = state
+        .db
+        .prune_mls_devices(now - MLS_DEVICE_RETENTION_MILLIS)
         .await?;
     (report.pruned_mls_messages, report.pruned_mls_keyrings) = state
         .db
@@ -172,6 +181,7 @@ pub async fn run(state: AppState) {
                     expired_link_sessions = report.expired_link_sessions,
                     expired_enrollments = report.expired_enrollments,
                     pruned_mls_key_packages = report.pruned_mls_key_packages,
+                    pruned_mls_devices = report.pruned_mls_devices,
                     pruned_mls_messages = report.pruned_mls_messages,
                     pruned_mls_keyrings = report.pruned_mls_keyrings,
                     scrubbed = report.scrubbed,

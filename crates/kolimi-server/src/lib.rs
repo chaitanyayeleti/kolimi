@@ -251,6 +251,14 @@ pub fn build_app(state: AppState) -> Router {
             put(api_mls::put_key_package).get(api_mls::get_own_key_packages),
         )
         .route(
+            "/api/mls/devices",
+            get(api_mls::get_devices).delete(api_mls::delete_device),
+        )
+        .route(
+            "/api/mls/devices/{username}",
+            get(api_mls::get_user_devices),
+        )
+        .route(
             "/api/mls/key-packages/consume",
             post(api_mls::consume_key_packages),
         )
@@ -263,7 +271,12 @@ pub fn build_app(state: AppState) -> Router {
             get(api_mls::get_group).put(api_mls::init_group),
         )
         .route("/api/mls/messages", post(api_mls::post_message))
+        .route("/api/mls/commit", post(api_mls::post_commit))
         .route("/api/mls/epoch", post(api_mls::post_epoch))
+        .route(
+            "/api/mls/revocations",
+            post(api_mls::post_revocation).delete(api_mls::delete_revocation),
+        )
         .route("/api/mls/keyring", put(api_mls::put_keyring))
         .route(
             "/api/e2ee/enrollments",

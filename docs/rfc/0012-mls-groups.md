@@ -19,11 +19,18 @@ RFC 0010 (DAV boundary)
 > the web UI (IndexedDB; localStorage kill switch `kolimi-mls=0`).
 > Membership add/remove rotates the keyring, key packages are a consumable
 > pool, keyrings carry a revision, commits are serialized server-side
-> (`BEGIN IMMEDIATE` + an epoch compare-and-swap), consumed/expired key
-> packages are pruned by the janitor, clients report their last processed
-> epoch so old messages/keyrings can be pruned safely, and single-file write
-> shares are supported for sync/desktop and WebDAV (the file node holds its
-> own group; the web UI has no inline editor for a single-file share). The 89 temporary
+> (`BEGIN IMMEDIATE` + an epoch compare-and-swap), a commit and its Welcome
+> are appended atomically, clients stage commits locally and only merge after
+> acceptance (a losing committer replays the winning epoch), a working device
+> on the same account re-adds devices that lost state, the server bounds
+> MLS devices per account and live packages per device, single-device revoke
+> is available in the CLI and web Settings (with owner-side recipient
+> removal), per-group revocations stop automatic re-add, consumed/expired
+> key packages are pruned by the janitor, clients report their last
+> processed epoch so old
+> messages/keyrings can be pruned safely, and single-file write shares are
+> supported for sync/desktop and WebDAV (the file node holds its own group;
+> the web UI has no inline editor for a single-file share). The 89 temporary
 > `cargo-vet` exemptions and the review checklist live in
 > [`docs/audit/mls-delta.md`](../audit/mls-delta.md). **External review is
 > still required before treating MLS as audited.**
@@ -65,7 +72,11 @@ participating in a commit.
 - Each **enrolled device** publishes a key package (credential: username +
   device public key; lifetime bounded).
 - Membership = all devices of all users in the group. Adding a user adds
-  all their devices; removing a user removes all their devices.
+  all their devices; removing a user removes all their devices. A
+  single-device revoke removes one leaf from every group the caller can
+  write and rotates each keyring. A group revocation lists the removed
+  signature so automatic re-add skips its leftover key packages; an explicit
+  re-share clears the entry.
 - One device is the committer per change (last writer wins, server orders
   by `(epoch, seq)`); a proposal queue lets other devices propose adds or
   removes and the next committer commits them.
@@ -99,6 +110,10 @@ stored_blob   = AEAD(MLS exporter(epoch, "kolimi-share-keyring-v1"), share_keyri
 ```sql
 mls_key_packages (id, user_id, device_id, payload BLOB, expires_at,
                   consumed_at)
+mls_devices (user_id, device_id, device_name, signature_key BLOB,
+             created_at, last_seen_at)
+mls_group_revocations (node_id, signature_key BLOB, device_id, revoked_at,
+                       revoked_by, PRIMARY KEY(node_id, signature_key))
 mls_node_groups (node_id PRIMARY KEY, mls_group_id BLOB UNIQUE, epoch,
                  updated_at)
 mls_messages (id, node_id, seq, epoch, kind, payload BLOB, sender_id,
@@ -140,6 +155,9 @@ regression, and stores blobs. It never parses MLS plaintext.
   test).
 - Web/desktop interop: browser read/write/reload, sync recipient flows, and
   a Playwright suite for web rename/delete/share/revoke/migration/reset.
+- Single-device revoke: a share owner removes one recipient device, the
+  other device keeps decrypting, the revoked device is not re-added from its
+  package pool, and the roster row is cleared only after the group is clean.
 - Server sees only opaque payloads; no plaintext names/keys in logs.
 - Fuzz the keyring parser (landed as `fuzz/fuzz_targets/mls_keyring.rs`);
   message-parser and state-transition fuzzing are still pending.
@@ -161,9 +179,16 @@ regression, and stores blobs. It never parses MLS plaintext.
   must replay commits/welcomes in order.
 - Two clients committing at the same epoch are serialized server-side:
   the second commit gets a `409`, so only one epoch-N+1 transcript is
-  accepted. A client that had already advanced its **local** group state
-  still needs recovery (reset and re-add), and same-epoch fork detection
-  beyond the epoch number is still open.
+  accepted. Clients stage commits locally and merge only after acceptance;
+  the loser discards its pending state and replays the winning commit.
+  Remaining review question: whether every crash/transport-loss ordering is
+  covered by pending-commit reconciliation.
 - Multi-device membership can make groups large; bound devices per user.
 - Revocation is still not a remote wipe: a device that already holds old
   file keys retains them. Future epochs are protected.
+- A read-only recipient cannot commit its own removal. The share owner must
+  remove that device (or recreate the share); otherwise the recipient's
+  roster entry stays until every group is clean.
+- Group revocation records are client-asserted hints for honest clients, not
+  cryptographic proof. A malicious writer can ignore or clear them; the MLS
+  remove commit is the actual access change.

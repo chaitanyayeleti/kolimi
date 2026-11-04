@@ -5,6 +5,7 @@ use std::error::Error;
 use std::io::Write;
 use std::path::PathBuf;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use clap::Parser;
 use kolimi_crypto::recovery_code_display;
 use kolimi_sync::{
@@ -135,6 +136,16 @@ struct Cli {
     /// Print the MLS epoch and members for a path.
     #[arg(long = "mls-status", value_name = "PATH")]
     mls_status: Option<String>,
+
+    /// List this account's MLS devices, their signature keys and the shares
+    /// where this client can see them.
+    #[arg(long = "mls-devices")]
+    mls_devices: bool,
+
+    /// Revoke one MLS device by id: remove its leaf from every group this
+    /// client can inspect, rotate the keyrings, then clear the roster entry.
+    #[arg(long = "mls-revoke-device", value_name = "DEVICE_ID")]
+    mls_revoke_device: Option<String>,
 }
 
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
@@ -150,16 +161,40 @@ fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+fn age_label(ms: i64) -> String {
+    if ms <= 0 {
+        return "never".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    let seconds = ((now - ms) / 1000).max(0);
+    match seconds {
+        s if s < 60 => "just now".to_string(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s if s < 2_592_000 => format!("{}d ago", s / 86_400),
+        s if s < 31_536_000 => format!("{}mo ago", s / 2_592_000),
+        s => format!("{}y ago", s / 31_536_000),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
+    let mls_command = cli.mls_devices
+        || cli.mls_revoke_device.is_some()
+        || cli.mls_status.is_some()
+        || cli.mls_migrate;
+    let needs_e2ee = !cli.e2ee_roots.is_empty() || cli.e2ee_approve.is_some() || mls_command;
     let config = SyncConfig {
         server: cli.server,
         username: cli.user,
         password: cli.password,
         token: None,
         local_dir: cli.local,
-        e2ee: if cli.e2ee_roots.is_empty() && cli.e2ee_approve.is_none() {
+        e2ee: if !needs_e2ee {
             None
         } else {
             let prf_secret = match &cli.e2ee_prf {
@@ -171,7 +206,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 recovery_code: cli.e2ee_recovery.clone(),
                 prf_secret,
                 encrypted_roots: cli.e2ee_roots.clone(),
-                mls: cli.mls || cli.write,
+                mls: cli.mls || cli.write || mls_command,
             })
         },
     };
@@ -230,6 +265,96 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             println!("this device had no local key material");
         }
+        return Ok(());
+    }
+
+    if cli.mls_devices {
+        let list = match cli.with.as_deref() {
+            Some(user) if user != config.username => {
+                kolimi_sync::mls_user_devices(&config, user).await?
+            }
+            _ => kolimi_sync::mls_devices(&config).await?,
+        };
+        if list.devices.is_empty() {
+            println!("no MLS devices enrolled");
+        } else {
+            println!("MLS devices ({}):", list.devices.len());
+            for device in list.devices {
+                let name = if device.device_name.is_empty() {
+                    "(unnamed)"
+                } else {
+                    &device.device_name
+                };
+                println!(
+                    "  {}{}",
+                    name,
+                    if device.current {
+                        "  (this device)"
+                    } else {
+                        ""
+                    }
+                );
+                println!("    id: {}", device.device_id);
+                if let Some(signature) = device.signature_key {
+                    println!("    signature key: {}", STANDARD.encode(signature));
+                }
+                println!("    last seen: {}", age_label(device.last_seen_at));
+                if device.groups.is_empty() {
+                    println!("    groups: none visible from this client");
+                } else {
+                    println!("    groups: {}", device.groups.join(", "));
+                }
+            }
+        }
+        for warning in list.warnings {
+            eprintln!("warning: cannot inspect group {warning}");
+        }
+        return Ok(());
+    }
+
+    if let Some(device_id) = cli.mls_revoke_device.clone() {
+        if !cli.yes {
+            print!(
+                "Revoke MLS device {device_id}?\n\
+                 This removes its leaf from every group this client can write and rotates the share keyrings.\n\
+                 A read-only received share must be handled by its owner first.\n\
+                 It cannot erase files or keys the device already has; it only protects future epochs.\n\
+                 Type \"revoke\" to continue: "
+            );
+            std::io::stdout().flush()?;
+            let mut confirmation = String::new();
+            std::io::stdin().read_line(&mut confirmation)?;
+            if confirmation.trim() != "revoke" {
+                println!("cancelled");
+                return Ok(());
+            }
+        }
+        let report = match cli.with.as_deref() {
+            Some(user) if user != config.username => {
+                kolimi_sync::mls_revoke_recipient_device(&config, user, &device_id).await?
+            }
+            _ => kolimi_sync::mls_revoke_device(&config, &device_id).await?,
+        };
+        if report.groups.is_empty() {
+            println!("no MLS leaves for {device_id} were found in writable groups");
+        } else {
+            println!(
+                "removed {} MLS leaf/leaves from {} group(s): {}",
+                report.leaves,
+                report.groups.len(),
+                report.groups.join(", ")
+            );
+        }
+        if report.roster_removed {
+            println!("removed the MLS roster entry and unpublished packages for {device_id}");
+        } else if let Some(user) = cli.with.as_deref().filter(|user| *user != config.username) {
+            println!(
+                "left {user}'s roster entry in place; they still need to clear any read-only shares"
+            );
+        }
+        println!(
+            "The device keeps any files and keys it already downloaded; only future epochs are protected."
+        );
         return Ok(());
     }
 

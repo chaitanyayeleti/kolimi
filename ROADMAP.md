@@ -45,12 +45,21 @@ entries. Do not describe MLS as audited before this completes.
 
 ### 2. MLS operational hardening
 
-- **Automatic MLS re-join**: `--mls-reset` and the web reset button guide a
-  manual re-add; automatically re-establishing every group after state loss
-  is still open.
-- **Concurrent committers**: commits are serialized server-side and the
-  loser gets `409`; client-side same-epoch fork detection and automatic
-  recovery remain.
+- **Automatic MLS re-join**: done for any lost device once a working device
+  on the same account syncs — it publishes a fresh key package and is re-added
+  at a new epoch. A scoped sync only refreshes shares under its root. If no
+  working member is online, or the lost device was the only owner device, the
+  share still needs manual recovery or recreation.
+- **Concurrent committers**: commits are serialized server-side, clients
+  stage commits locally, and a losing committer discards its pending state
+  and replays the winning epoch. A commit and its Welcome are appended
+  atomically.
+- **MLS device roster caps and revoke**: done — 16 active devices per
+  account over a 180-day window, 8 live packages per device, janitor
+  pruning, `409` on over-limit uploads, `--mls-devices` /
+  `--mls-revoke-device`, a web Settings device list, owner-side recipient
+  removal, and per-group revocations so automatic re-add cannot undo a
+  revoke. A remote wipe is still impossible by design.
 - **MLS message retention tuning**: per-device epoch reports now drive
   pruning (7-day grace, 30-day report freshness); review the thresholds
   with the external auditor.

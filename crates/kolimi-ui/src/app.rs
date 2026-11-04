@@ -1,6 +1,9 @@
 //! The authenticated application: login, file browser, shares, trash.
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use kolimi_crypto::MasterKey;
 use leptos::ev;
 use leptos::prelude::*;
@@ -878,7 +881,9 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
     Effect::new(move |_| {
         if let Some(master) = e2ee_master.get() {
             spawn_local(async move {
-                let _ = crate::mls::publish_key_package(&master).await;
+                if crate::mls::publish_key_package(&master).await.is_ok() {
+                    let _ = crate::mls::refresh_owned_groups(&master).await;
+                }
             });
         }
     });
@@ -3811,6 +3816,10 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
     let resetting = RwSignal::new(false);
     let enrollments = RwSignal::new(Vec::<Value>::new());
     let devices = RwSignal::new(Vec::<Value>::new());
+    let mls_devices = RwSignal::new(Vec::<crate::mls::MlsDevice>::new());
+    let mls_warnings = RwSignal::new(Vec::<String>::new());
+    let mls_error = RwSignal::new(String::new());
+    let mls_busy = RwSignal::new(false);
     let device_name = RwSignal::new(String::new());
     let enrolling = RwSignal::new(Option::<(i64, [u8; 32], String)>::None);
     // An in-progress enrollment survives a reload: the pending id + device
@@ -3930,6 +3939,18 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
             }
             if let Ok(list) = crate::e2ee::devices().await {
                 devices.set(list);
+            }
+            if crate::mls::enabled()
+                && let Some(master) = master.get_untracked()
+            {
+                match crate::mls::devices(&master).await {
+                    Ok(list) => {
+                        mls_devices.set(list.devices);
+                        mls_warnings.set(list.warnings);
+                        mls_error.set(String::new());
+                    }
+                    Err(message) => mls_error.set(message),
+                }
             }
         });
     });
@@ -4090,6 +4111,38 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
             }
         });
     };
+
+    let revoke_mls = Callback::new(move |device_id: String| {
+        let Some(unlocked) = master.get_untracked() else {
+            mls_error.set("Unlock encryption first.".to_string());
+            return;
+        };
+        if !api::confirm(
+            "Revoke this MLS device? This removes its leaf from every group this browser can write and rotates those share keyrings. A read-only received share must be handled by its owner first. It cannot erase files or keys the device already downloaded — only future epochs are protected.",
+        ) {
+            return;
+        }
+        mls_busy.set(true);
+        mls_error.set(String::new());
+        spawn_local(async move {
+            match crate::mls::revoke_device(&unlocked, &device_id).await {
+                Ok(report) if report.groups.is_empty() => {
+                    notice.set("MLS device removed from the roster".to_string());
+                }
+                Ok(report) => {
+                    notice.set(format!(
+                        "Removed {} MLS leaf/leaves from {} share(s): {}",
+                        report.leaves,
+                        report.groups.len(),
+                        report.groups.join(", ")
+                    ));
+                }
+                Err(message) => mls_error.set(message),
+            }
+            mls_busy.set(false);
+            load_devices.run(());
+        });
+    });
 
     let start_enroll = move |_| {
         let name = device_name.get_untracked().trim().to_string();
@@ -4439,6 +4492,87 @@ fn E2eeDialog(master: RwSignal<Option<MasterKey>>, on_close: Callback<()>) -> im
                                             >
                                                 <Icon name="trash"/>
                                             </button>
+                                        </span>
+                                    </li>
+                                }
+                            }
+                        />
+                    </ul>
+
+                    <h3>"MLS devices"</h3>
+                    <p class="muted">
+                        "Devices enrolled for encrypted group shares. Revoking removes the device's MLS leaf from every share this browser can open and rotates those keyrings. Files and keys it already downloaded stay readable to it; only future epochs are protected."
+                    </p>
+                    <Show when=move || !mls_error.get().is_empty()>
+                        <p class="error">{move || mls_error.get()}</p>
+                    </Show>
+                    <Show when=move || !mls_warnings.get().is_empty()>
+                        <p class="muted">
+                            "Some groups cannot be inspected from this browser: "
+                            {move || mls_warnings.get().join("; ")}
+                        </p>
+                    </Show>
+                    <ul class="shares">
+                        <For
+                            each=move || mls_devices.get()
+                            key=|device| device.device_id.clone()
+                            children=move |device| {
+                                let id = device.device_id.clone();
+                                let click_id = id.clone();
+                                let name = if device.device_name.is_empty() {
+                                    "Unnamed MLS device".to_string()
+                                } else {
+                                    device.device_name.clone()
+                                };
+                                let current = device.current;
+                                let last_seen = relative_time(device.last_seen_at);
+                                let signature = device
+                                    .signature_key
+                                    .as_deref()
+                                    .map(|key| STANDARD.encode(key))
+                                    .unwrap_or_else(|| "not reported yet".to_string());
+                                let groups = if device.groups.is_empty() {
+                                    "none visible".to_string()
+                                } else {
+                                    device.groups.join(", ")
+                                };
+                                view! {
+                                    <li class="file">
+                                        <span class="file-body">
+                                            <span class="file-name">
+                                                {name}
+                                                {current
+                                                    .then(|| view! { <span class="badge">"this device"</span> })}
+                                            </span>
+                                            <span class="file-meta">
+                                                <span class="muted">"id " {id.clone()}</span>
+                                                <span class="muted">"last seen " {last_seen}</span>
+                                            </span>
+                                            <span class="file-meta">
+                                                <span class="muted">"signature key " {signature}</span>
+                                            </span>
+                                            <span class="file-meta">
+                                                <span class="muted">"groups " {groups}</span>
+                                            </span>
+                                        </span>
+                                        <span class="file-actions">
+                                            <Show when=move || !current>
+                                                {
+                                                    let button_id = click_id.clone();
+                                                    view! {
+                                                        <button
+                                                            class="icon-btn"
+                                                            title="Revoke MLS device"
+                                                            disabled=move || mls_busy.get()
+                                                            on:click=move |_| {
+                                                                revoke_mls.run(button_id.clone())
+                                                            }
+                                                        >
+                                                            <Icon name="trash"/>
+                                                        </button>
+                                                    }
+                                                }
+                                            </Show>
                                         </span>
                                     </li>
                                 }
