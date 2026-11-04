@@ -534,6 +534,7 @@ forward-only; back up first and do not downgrade across a migration.
 | Passkey registration fails | `KOLIMI_ORIGIN` does not match the URL you visit (scheme + host + port). Fix and restart. |
 | Cookies not sent over HTTPS | Set `KOLIMI_SECURE_COOKIES=true` (and ensure the proxy forwards `https`). |
 | 413 on uploads | The reverse proxy's body limit; set `client_max_body_size 0` (nginx) and `proxy_request_buffering off`. |
+| Upload fails at exactly 60s with `500` | Traefik's default `readTimeout` is 60s. Set `transport.respondingTimeouts.readTimeout: 0` (or a high value) on the HTTPS entrypoint and restart Traefik; `idleTimeout` still drops stalled connections. |
 | Previews fail with 422/415 | Unsupported format, encrypted file (no server-side preview by design), or a kernel without Landlock (the worker still runs under seccomp/rlimits). |
 | “too many failed attempts” | Login lockout (5 failures / 15 min, keyed on account **and** client address) or per-client rate limiting on auth/link/MLS endpoints; wait it out, then check the audit log for `auth.login_failed` reasons. |
 | Sync reports conflicts | Expected when both sides edited a file: the server version wins and your edit is kept as `name.conflict-<ts>`. |

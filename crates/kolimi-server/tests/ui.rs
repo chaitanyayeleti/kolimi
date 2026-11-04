@@ -66,6 +66,17 @@ async fn serves_app_shell_assets_and_public_pages() {
         assert!(!body.is_empty());
     }
 
+    // Keep the strict style policy: the UI sets individual CSS properties
+    // through the CSSOM, not inline `style` attributes.
+    let (_, headers, _) = get(&app, "/app/").await;
+    let csp = headers
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("style-src 'self';"), "{csp}");
+    assert!(!csp.contains("'unsafe-inline'"), "{csp}");
+
     // Missing files under /app 404 rather than falling back to HTML.
     let (status, _, _) = get(&app, "/app/nope.js").await;
     assert_eq!(status, StatusCode::NOT_FOUND);

@@ -94,6 +94,54 @@ test("web share and revoke", async ({ page }) => {
   await modal.getByRole("button", { name: "Close" }).click();
 });
 
+test("upload progress and context menu avoid inline-style CSP violations", async ({
+  page,
+}) => {
+  await login(page);
+  const csp: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.text().includes("Content Security Policy")) {
+      csp.push(msg.text());
+    }
+  });
+
+  // Slow the upload enough that the progress bar stays visible while we
+  // inspect it; localhost otherwise completes before the first frame.
+  const client = await page.context().newCDPSession(page);
+  await client.send("Network.enable");
+  await client.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 50,
+    downloadThroughput: 5 * 1024 * 1024,
+    uploadThroughput: 500 * 1024,
+  });
+
+  const name = `browser-csp-${Date.now()}.bin`;
+  await page.locator('input[type="file"]').setInputFiles({
+    name,
+    mimeType: "application/octet-stream",
+    buffer: Buffer.alloc(2 * 1024 * 1024, 97),
+  });
+
+  const bar = page.locator(".upload-bar-fill").first();
+  await bar.waitFor({ state: "attached" });
+  await page.waitForTimeout(1_000);
+  const width = await bar.evaluate((el) =>
+    Number.parseFloat(getComputedStyle(el).width),
+  );
+  expect(width).toBeGreaterThan(0);
+
+  await page.getByText(name, { exact: true }).first().waitFor({
+    timeout: 60_000,
+  });
+
+  await (await row(page, name)).click({ button: "right" });
+  const menu = page.locator(".ctx-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu).not.toHaveCSS("left", "auto");
+  expect(csp).toEqual([]);
+});
+
 test("web migration upgrades a legacy folder share and reset clears state", async ({
   page,
   request,

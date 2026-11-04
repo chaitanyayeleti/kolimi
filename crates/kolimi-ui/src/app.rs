@@ -3160,7 +3160,7 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                                         <span class="upload-bar">
                                             <span
                                                 class="upload-bar-fill"
-                                                style=move || format!("width:{}%", progress.get())
+                                                style:width=move || format!("{}%", progress.get())
                                             ></span>
                                         </span>
                                         <span class="upload-status">
@@ -3229,7 +3229,11 @@ fn Browser(view: RwSignal<View>) -> impl IntoView {
                             is_dir && !shared && entry.path.matches('/').count() == 1;
                         view! {
                             <div class="ctx-scrim" on:click=move |_| context_menu.set(None)></div>
-                            <div class="ctx-menu" style=format!("left:{}px; top:{}px;", x.max(0), y.max(0))>
+                            <div
+                                class="ctx-menu"
+                                style:left=format!("{}px", x.max(0))
+                                style:top=format!("{}px", y.max(0))
+                            >
                                 {is_dir
                                     .then(|| {
                                         view! {

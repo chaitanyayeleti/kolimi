@@ -164,6 +164,20 @@ redirect and stores ACME state in a volume; the Docker socket is mounted
 read-only for label discovery. `kolimi-data` holds the database and blobs;
 back it up as described in [operations.md](operations.md#backup-and-restore).
 
+The bundled Traefik disables its 60-second `readTimeout` because it would
+abort large uploads on slow links. If you run Traefik outside this compose
+file, set the same option:
+
+```yaml
+entryPoints:
+  websecure:
+    address: ":443"
+    transport:
+      respondingTimeouts:
+        readTimeout: 0
+        idleTimeout: 180s
+```
+
 There is a second, direct-port example in `packaging/docker/compose.yaml`
 if you terminate TLS elsewhere.
 
