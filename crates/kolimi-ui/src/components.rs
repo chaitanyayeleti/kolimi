@@ -124,6 +124,32 @@ pub fn ErrorText(#[prop(into)] message: Signal<String>) -> impl IntoView {
     }
 }
 
+/// A centered empty state with an optional primary action.
+#[component]
+pub fn EmptyState(
+    icon: &'static str,
+    title: &'static str,
+    hint: &'static str,
+    #[prop(optional)] action_label: Option<&'static str>,
+    #[prop(optional)] on_action: Option<Callback<()>>,
+) -> impl IntoView {
+    view! {
+        <div class="empty">
+            <Icon name=icon/>
+            <p>{title}</p>
+            <small class="muted">{hint}</small>
+            {on_action
+                .map(|on_action| {
+                    view! {
+                        <button class="primary" on:click=move |_| on_action.run(())>
+                            {action_label.unwrap_or("Continue")}
+                        </button>
+                    }
+                })}
+        </div>
+    }
+}
+
 /// Sanitizes SVG content to prevent XSS via `inner_html`.
 pub(crate) fn sanitize_svg(svg: &str) -> String {
     svg.replace("<script", "<!-script")

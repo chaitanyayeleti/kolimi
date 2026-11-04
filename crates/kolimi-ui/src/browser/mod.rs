@@ -7,21 +7,24 @@ use leptos::task::spawn_local;
 use serde_json::{Value, json};
 use wasm_bindgen::{JsCast, closure::Closure};
 
+use self::overlays::{ContextMenu, Lightbox, Toasts, UploadTray};
+use self::rows::{FileArea, SearchResults, TrashArea};
 use self::search::{encrypted_name_hits, received_mounts};
 use self::types::{
-    Entry, SearchHit, Tab, TrashItem, UploadItem, UploadStatus, file_icon, is_image_name,
-    is_text_name, parent_of, parse_entries, parse_results, parse_trash,
+    Entry, SearchHit, Tab, TrashItem, UploadItem, UploadStatus, is_image_name, is_text_name,
+    parent_of, parse_entries, parse_results, parse_trash,
 };
 use crate::api;
 use crate::app::{
-    Logo, View as AppView, encode, encode_path, human_size, mark_session_expired, relative_time,
-    toggle_theme,
+    Logo, View as AppView, encode, encode_path, human_size, mark_session_expired, toggle_theme,
 };
 use crate::components::Icon;
 use crate::dialogs::{
     AdminDialog, SettingsDialog, SettingsTab, ShareDialog, VaultSetupDialog, VersionsDialog,
 };
 
+mod overlays;
+mod rows;
 mod search;
 mod types;
 
@@ -54,6 +57,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         settings_tab.set(tab);
         e2ee_open.set(true);
     });
+    let open_encryption = Callback::new(move |_: ()| {
+        open_settings.run(SettingsTab::Encryption);
+    });
     let quota_warn = RwSignal::new(Option::<u8>::None);
     let usage = RwSignal::new(Value::Null);
     let loading = RwSignal::new(false);
@@ -62,79 +68,6 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let folder_encrypted = RwSignal::new(false);
     let context_menu = RwSignal::new(Option::<(Entry, i32, i32)>::None);
     let lightbox = RwSignal::new(Option::<Entry>::None);
-    let lightbox_url = RwSignal::new(String::new());
-    let lightbox_text = RwSignal::new(String::new());
-    // Decrypts the lightbox file client-side when it is encrypted, fetches
-    // text previews, and revokes the previous blob URL whenever the
-    // lightbox changes.
-    Effect::new(move |_| {
-        let old = lightbox_url.get_untracked();
-        if old.starts_with("blob:") {
-            let _ = web_sys::Url::revoke_object_url(&old);
-        }
-        lightbox_url.set(String::new());
-        lightbox_text.set(String::new());
-        let current = lightbox.get();
-        let master = e2ee_master.get();
-        let Some(entry) = current else {
-            return;
-        };
-        let preview_text = is_text_name(&entry.name);
-        if entry.encrypted {
-            let Some(master) = master else {
-                error.set("Unlock encryption first (Settings → Encryption).".to_string());
-                open_settings.run(SettingsTab::Encryption);
-                lightbox.set(None);
-                return;
-            };
-            // Previews decrypt in memory: refuse absurd sizes instead of
-            // OOMing the tab (the server preview caps at 20 MiB too).
-            let cap = if preview_text {
-                5 * 1024 * 1024
-            } else {
-                20 * 1024 * 1024
-            };
-            if entry.size > cap {
-                error.set("This file is too large to preview — download it instead.".to_string());
-                lightbox.set(None);
-                return;
-            }
-            let path = entry.path.clone();
-            let display_name = entry.name.clone();
-            let shared = entry.shared;
-            spawn_local(async move {
-                let result = if shared {
-                    crate::mls::decrypt_shared_or_legacy(&master, &path, &display_name).await
-                } else {
-                    crate::e2ee::decrypt_file(&master, &path).await
-                };
-                match result {
-                    Ok((name, bytes)) => {
-                        if preview_text {
-                            lightbox_text.set(String::from_utf8_lossy(&bytes).into_owned());
-                        } else {
-                            lightbox_url.set(crate::e2ee::blob_url(&name, &bytes));
-                        }
-                    }
-                    Err(e) => {
-                        error.set(e);
-                        lightbox.set(None);
-                    }
-                }
-            });
-        } else if preview_text {
-            let path = entry.path.clone();
-            spawn_local(async move {
-                match api::get_text(&format!("/api/preview?path={}", encode(&path))).await {
-                    Ok(text) => lightbox_text.set(text),
-                    Err(e) => {
-                        error.set(e);
-                        lightbox.set(None);
-                    }
-                }
-            });
-        }
-    });
     let move_drag = RwSignal::new(Option::<Entry>::None);
     // A reload in the same tab keeps the unlock: the master key lives in
     // sessionStorage until the tab closes, Lock, or sign out.
@@ -219,6 +152,16 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     // fall back to the root without recursive closures.
     let nav = RwSignal::new("/".to_string());
     let load = move |next: String| nav.set(next);
+    let undo_trash = Callback::new(move |_: ()| {
+        if let Some((_, id)) = undo.get_untracked() {
+            spawn_local(async move {
+                let _ =
+                    api::send_json("POST", &format!("/api/trash/{id}/restore"), &json!({})).await;
+                undo.set(None);
+                load(path.get_untracked());
+            });
+        }
+    });
     let load_seq = RwSignal::new(0u32);
     // Mounts received from others, with their permissions: gates Upload /
     // New folder inside read-only shared folders. `shared_names` carries the
@@ -619,6 +562,19 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         }
         selected
     };
+
+    let retry_upload = Callback::new(
+        move |(file, dir, progress, status): (
+            web_sys::File,
+            String,
+            RwSignal<u8>,
+            RwSignal<UploadStatus>,
+        )| {
+            progress.set(0);
+            status.set(UploadStatus::Uploading);
+            start_upload(file, dir, progress, status);
+        },
+    );
 
     let upload = move |ev: ev::Event| {
         let Some(input) = ev
@@ -1318,6 +1274,28 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         });
     };
 
+    let ctx_open = Callback::new(move |entry: Entry| open(entry));
+    let ctx_decrypt = Callback::new(move |entry: Entry| decrypt_entry(entry));
+    let ctx_share = Callback::new(move |entry: Entry| share_entry(entry));
+    let ctx_rename = Callback::new(move |entry: Entry| rename_entry(entry));
+    let ctx_delete = Callback::new(move |entry: Entry| delete_entry(entry));
+    let ctx_versions = Callback::new(move |entry: Entry| versions_for.set(Some(entry)));
+    let ctx_toggle_encryption = Callback::new(move |entry: Entry| toggle_encryption(entry));
+    let file_load = Callback::new(move |next: String| load(next));
+    let file_toggle_select = Callback::new(move |target: String| toggle_select(target));
+    let file_move_into =
+        Callback::new(move |(entry, dest): (Entry, String)| move_into(entry, dest));
+    let search_open = Callback::new(move |hit: SearchHit| {
+        search_active.set(false);
+        if hit.is_dir {
+            load(hit.path);
+        } else {
+            load(parent_of(&hit.path));
+        }
+    });
+    let trash_restore = Callback::new(move |item: TrashItem| restore(item));
+    let trash_purge = Callback::new(move |item: TrashItem| purge(item));
+
     let search_submit = move |ev: ev::SubmitEvent| {
         ev.prevent_default();
         let text = query.get_untracked();
@@ -1352,11 +1330,11 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
             }
         });
     };
-    let clear_search = move |_| {
+    let clear_search = Callback::new(move |_: ()| {
         search_active.set(false);
         results.set(Vec::new());
         query.set(String::new());
-    };
+    });
 
     view! {
         <div
@@ -1658,651 +1636,52 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
 
         {move || {
             if search_active.get() {
-                let clear = clear_search;
                 return view! {
-                    <div class="section-head">
-                        <h2>"Search"</h2>
-                        <button on:click=clear>"Clear"</button>
-                    </div>
-                    <ul class="files">
-                        <For
-                            each=move || results.get()
-                            key=|hit| hit.path.clone()
-                            children=move |hit| {
-                                let navigate = parent_of(&hit.path);
-                                let download_path = hit.path.clone();
-                                let is_dir = hit.is_dir;
-                                let name = hit.name.clone();
-                                let snippet = hit.snippet.clone();
-                                let path = hit.path.clone();
-                                let path_click = path.clone();
-                                let encrypted = hit.encrypted;
-                                let kind = if is_dir { "dir".to_string() } else { "file".to_string() };
-                                view! {
-                                    <li class="file">
-                                        <button
-                                            class="file-open"
-                                            on:click=move |_| {
-                                                search_active.set(false);
-                                                if is_dir {
-                                                    load(path_click.clone());
-                                                } else {
-                                                    load(navigate.clone());
-                                                }
-                                            }
-                                        >
-                                            <span class="file-icon">
-                                                <Icon name=file_icon(&name, &kind)/>
-                                            </span>
-                                            <span class="file-body">
-                                                <span class="file-name">{name.clone()}</span>
-                                                <span class="file-meta">
-                                                    {crate::e2ee::decode_display_path_with_shares(
-                                                        e2ee_master.get_untracked().as_ref(),
-                                                        &path,
-                                                        &shared_names.get_untracked(),
-                                                    )}
-                                                    {(!snippet.is_empty())
-                                                        .then(|| {
-                                                            view! {
-                                                                <span class="muted">" — " {snippet.clone()}</span>
-                                                            }
-                                                        })}
-                                                </span>
-                                            </span>
-                                        </button>
-                                        {(!is_dir)
-                                            .then(|| {
-                                                if encrypted {
-                                                    let dl = Entry {
-                                                        name: name.clone(),
-                                                        path: download_path.clone(),
-                                                        kind: kind.clone(),
-                                                        size: 0,
-                                                        modified_at: 0,
-                                                        shared: false,
-                                                        owner: None,
-                                                        permission: None,
-                                                        encrypted: true,
-                                                    };
-                                                    view! {
-                                                        <span class="file-actions">
-                                                            <button
-                                                                class="icon-btn"
-                                                                title="Download & decrypt"
-                                                                on:click=move |_| decrypt_entry(dl.clone())
-                                                            >
-                                                                <Icon name="download"/>
-                                                            </button>
-                                                        </span>
-                                                    }
-                                                        .into_any()
-                                                } else {
-                                                    view! {
-                                                        <span class="file-actions">
-                                                            <a
-                                                                class="icon-btn"
-                                                                title="Download"
-                                                                href=format!("/dav{}", encode_path(&download_path))
-                                                                download
-                                                            >
-                                                                <Icon name="download"/>
-                                                            </a>
-                                                        </span>
-                                                    }
-                                                        .into_any()
-                                                }
-                                            })}
-                                    </li>
-                                }
-                            }
-                        />
-                    </ul>
-                }.into_any();
+                    <SearchResults
+                        results=results
+                        master=e2ee_master
+                        shared_names=shared_names
+                        on_open=search_open
+                        on_decrypt=ctx_decrypt
+                        on_clear=clear_search
+                    />
+                }
+                    .into_any();
             }
             match tab.get() {
                 Tab::Files => {
                     view! {
-                        {move || {
-                            parent
-                                .get()
-                                .map(|target| {
-                                    view! {
-                                        <button class="nav-item" on:click=move |_| load(target.clone())>
-                                            <Icon name="folder"/>
-                                            "Up one level"
-                                        </button>
-                                    }
-                                })
-                        }}
-                        {move || {
-                            if loading.get() {
-                                return view! {
-                                    <ul class="files skeleton-list">
-                                        {(0..6)
-                                            .map(|_| {
-                                                view! {
-                                                    <li class="file skeleton">
-                                                        <span class="sk sk-icon"></span>
-                                                        <span class="file-body">
-                                                            <span class="sk sk-line"></span>
-                                                            <span class="sk sk-line short"></span>
-                                                        </span>
-                                                    </li>
-                                                }
-                                            })
-                                            .collect_view()}
-                                    </ul>
-                                }
-                                    .into_any();
-                            }
-                            // A locked encrypted folder shows no names: the
-                            // client hides them until the key is available.
-                            if folder_encrypted.get() && e2ee_master.get().is_none() {
-                                return view! {
-                                    <div class="empty">
-                                        <Icon name="lock"/>
-                                        <p>"Vault is locked"</p>
-                                        <small class="muted">
-                                            "Unlock encryption to see what's inside."
-                                        </small>
-                                        <button
-                                            class="primary"
-                                            on:click=move |_| open_settings.run(SettingsTab::Encryption)
-                                        >
-                                            "Unlock"
-                                        </button>
-                                    </div>
-                                }
-                                    .into_any();
-                            }
-                            if entries.get().is_empty() {
-                                return view! {
-                                    <div class="empty">
-                                        <Icon name="folder"/>
-                                        <p>"This folder is empty"</p>
-                                        <small class="muted">
-                                            "Upload a file or create a folder to get started."
-                                        </small>
-                                    </div>
-                                }
-                                    .into_any();
-                            }
-                            if grid.get() {
-                                view! {
-                                    <div class="grid">
-                                        <For
-                                            each=move || entries.get()
-                                            key=|entry| entry.path.clone()
-                                            children=move |entry| {
-                                                let is_dir = entry.kind == "dir";
-                                                let is_img = !is_dir
-                                                    && !entry.encrypted
-                                                    && is_image_name(&entry.name);
-                                                let shared = entry.shared;
-                                                // Rename/Delete need ownership or a "write"
-                                                // share; Share stays owner-only.
-                                                let can_edit = !shared
-                                                    || entry.permission.as_deref() == Some("write");
-                                                let name = entry.name.clone();
-                                                let kind = entry.kind.clone();
-                                                let meta = if is_dir {
-                                                    if entry.encrypted {
-                                                        "Folder · Encrypted".to_string()
-                                                    } else {
-                                                        "Folder".to_string()
-                                                    }
-                                                } else {
-                                                    let when = relative_time(entry.modified_at);
-                                                    let size = if entry.encrypted {
-                                                        "Encrypted".to_string()
-                                                    } else {
-                                                        human_size(entry.size)
-                                                    };
-                                                    if when.is_empty() {
-                                                        size
-                                                    } else {
-                                                        format!("{size} · {when}")
-                                                    }
-                                                };
-                                                let open_entry = entry.clone();
-                                                let share_copy = entry.clone();
-                                                let rename_copy = entry.clone();
-                                                let delete_copy = entry.clone();
-                                                let preview = entry.path.clone();
-                                                let download = entry.path.clone();
-                                                let encrypted = entry.encrypted;
-                                                let download_copy = entry.clone();
-                                                let ctx_copy = entry.clone();
-                                                let lightbox_copy = entry.clone();
-                                                let drag_copy = entry.clone();
-                                                let drop_copy = entry.clone();
-                                                let select_path = entry.path.clone();
-                                                let selected_path = entry.path.clone();
-                                                view! {
-                                                    <div
-                                                        class="tile"
-                                                        class:selected=move || {
-                                                            selected.get().contains(&selected_path)
-                                                        }
-                                                        draggable="true"
-                                                        on:dragstart=move |_| {
-                                                            move_drag.set(Some(drag_copy.clone()));
-                                                        }
-                                                        on:contextmenu=move |ev: ev::MouseEvent| {
-                                                            ev.prevent_default();
-                                                            context_menu
-                                                                .set(
-                                                                    Some((
-                                                                        ctx_copy.clone(),
-                                                                        ev.client_x(),
-                                                                        ev.client_y(),
-                                                                    )),
-                                                                );
-                                                        }
-                                                        on:dragover=move |ev: ev::DragEvent| {
-                                                            if is_dir {
-                                                                ev.prevent_default();
-                                                            }
-                                                        }
-                                                        on:drop=move |ev: ev::DragEvent| {
-                                                            if is_dir {
-                                                                ev.prevent_default();
-                                                                if let Some(src) = move_drag.get_untracked() {
-                                                                    move_into(src, drop_copy.path.clone());
-                                                                    move_drag.set(None);
-                                                                }
-                                                            }
-                                                        }
-                                                    >
-                                                        <button
-                                                            class="tile-open"
-                                                            on:click=move |ev: ev::MouseEvent| {
-                                                                if ev.ctrl_key()
-                                                                    || ev.meta_key()
-                                                                    || ev.shift_key()
-                                                                {
-                                                                    toggle_select(select_path.clone());
-                                                                } else {
-                                                                    open(open_entry.clone());
-                                                                }
-                                                            }
-                                                        >
-                                                            <span class=format!(
-                                                                "tile-thumb {}",
-                                                                if is_dir { "folder" } else { "" },
-                                                            )>
-                                                                {is_img
-                                                                    .then(|| {
-                                                                        view! {
-                                                                            <img
-                                                                                loading="lazy"
-                                                                                alt=""
-                                                                                src=format!(
-                                                                                    "/api/preview?path={}&size=256",
-                                                                                    encode(&preview),
-                                                                                )
-                                                                                on:click=move |ev: ev::MouseEvent| {
-                                                                                    ev.stop_propagation();
-                                                                                    lightbox.set(Some(lightbox_copy.clone()));
-                                                                                }
-                                                                            />
-                                                                        }
-                                                                    })}
-                                                                {(!is_img)
-                                                                    .then(|| {
-                                                                        view! { <Icon name=file_icon(&name, &kind)/> }
-                                                                    })}
-                                                            </span>
-                                                            <span class="tile-name">{name.clone()}</span>
-                                                            <span class="tile-meta">{meta}</span>
-                                                        </button>
-                                                        <div class="tile-actions">
-                                                            {(!is_dir)
-                                                                .then(|| {
-                                                                    if encrypted {
-                                                                        view! {
-                                                                            <button
-                                                                                class="icon-btn"
-                                                                                title="Download & decrypt"
-                                                                                on:click=move |_| decrypt_entry(download_copy.clone())
-                                                                            >
-                                                                                <Icon name="download"/>
-                                                                            </button>
-                                                                        }
-                                                                            .into_any()
-                                                                    } else {
-                                                                        view! {
-                                                                            <a
-                                                                                class="icon-btn"
-                                                                                title="Download"
-                                                                                href=format!("/dav{}", encode_path(&download))
-                                                                                download
-                                                                            >
-                                                                                <Icon name="download"/>
-                                                                            </a>
-                                                                        }
-                                                                            .into_any()
-                                                                    }
-                                                                })}
-                                                            {can_edit
-                                                                .then(|| {
-                                                                    view! {
-                                                                        {(!shared)
-                                                                            .then(|| {
-                                                                                view! {
-                                                                                    <button
-                                                                                        class="icon-btn"
-                                                                                        title="Share"
-                                                                                        on:click=move |_| share_entry(share_copy.clone())
-                                                                                    >
-                                                                                        <Icon name="share"/>
-                                                                                    </button>
-                                                                                }
-                                                                            })}
-                                                                        <button
-                                                                            class="icon-btn"
-                                                                            title="Rename"
-                                                                            on:click=move |_| rename_entry(rename_copy.clone())
-                                                                        >
-                                                                            <Icon name="edit"/>
-                                                                        </button>
-                                                                        <button
-                                                                            class="icon-btn"
-                                                                            title="Delete"
-                                                                            on:click=move |_| delete_entry(delete_copy.clone())
-                                                                        >
-                                                                            <Icon name="trash"/>
-                                                                        </button>
-                                                                    }
-                                                                })}
-                                                        </div>
-                                                    </div>
-                                                }
-                                            }
-                                        />
-                                    </div>
-                                }
-                                    .into_any()
-                            } else {
-                                view! {
-                                    <ul class="files">
-                                        <For
-                                            each=move || entries.get()
-                                            key=|entry| entry.path.clone()
-                                            children=move |entry| {
-                                                let is_dir = entry.kind == "dir";
-                                                let is_img = !is_dir
-                                                    && !entry.encrypted
-                                                    && is_image_name(&entry.name);
-                                                let shared = entry.shared;
-                                                // Rename/Delete need ownership or a "write"
-                                                // share; Share stays owner-only.
-                                                let can_edit = !shared
-                                                    || entry.permission.as_deref() == Some("write");
-                                                let owner = entry.owner.clone().unwrap_or_default();
-                                                let permission = entry
-                                                    .permission
-                                                    .clone()
-                                                    .unwrap_or_default();
-                                                let name = entry.name.clone();
-                                                let kind = entry.kind.clone();
-                                                let meta = if is_dir {
-                                                    if entry.encrypted {
-                                                        "Folder · Encrypted".to_string()
-                                                    } else {
-                                                        "Folder".to_string()
-                                                    }
-                                                } else {
-                                                    let when = relative_time(entry.modified_at);
-                                                    let size = if entry.encrypted {
-                                                        "Encrypted".to_string()
-                                                    } else {
-                                                        human_size(entry.size)
-                                                    };
-                                                    if when.is_empty() {
-                                                        size
-                                                    } else {
-                                                        format!("{size} · {when}")
-                                                    }
-                                                };
-                                                let open_entry = entry.clone();
-                                                let share_copy = entry.clone();
-                                                let rename_copy = entry.clone();
-                                                let delete_copy = entry.clone();
-                                                let preview = entry.path.clone();
-                                                let download = entry.path.clone();
-                                                let encrypted = entry.encrypted;
-                                                let download_copy = entry.clone();
-                                                let ctx_copy = entry.clone();
-                                                let drag_copy = entry.clone();
-                                                let drop_copy = entry.clone();
-                                                let select_path = entry.path.clone();
-                                                let selected_path = entry.path.clone();
-                                                view! {
-                                                    <li
-                                                        class="file"
-                                                        class:selected=move || {
-                                                            selected.get().contains(&selected_path)
-                                                        }
-                                                        draggable="true"
-                                                        on:dragstart=move |_| {
-                                                            move_drag.set(Some(drag_copy.clone()));
-                                                        }
-                                                        on:contextmenu=move |ev: ev::MouseEvent| {
-                                                            ev.prevent_default();
-                                                            context_menu
-                                                                .set(
-                                                                    Some((
-                                                                        ctx_copy.clone(),
-                                                                        ev.client_x(),
-                                                                        ev.client_y(),
-                                                                    )),
-                                                                );
-                                                        }
-                                                        on:dragover=move |ev: ev::DragEvent| {
-                                                            if is_dir {
-                                                                ev.prevent_default();
-                                                            }
-                                                        }
-                                                        on:drop=move |ev: ev::DragEvent| {
-                                                            if is_dir {
-                                                                ev.prevent_default();
-                                                                if let Some(src) = move_drag.get_untracked() {
-                                                                    move_into(src, drop_copy.path.clone());
-                                                                    move_drag.set(None);
-                                                                }
-                                                            }
-                                                        }
-                                                    >
-                                                        <button
-                                                            class="file-open"
-                                                            on:click=move |ev: ev::MouseEvent| {
-                                                                if ev.ctrl_key()
-                                                                    || ev.meta_key()
-                                                                    || ev.shift_key()
-                                                                {
-                                                                    toggle_select(select_path.clone());
-                                                                } else {
-                                                                    open(open_entry.clone());
-                                                                }
-                                                            }
-                                                        >
-                                                            <span class=format!(
-                                                                "file-icon {}",
-                                                                if is_dir {
-                                                                    "folder"
-                                                                } else if is_img {
-                                                                    "img"
-                                                                } else {
-                                                                    ""
-                                                                },
-                                                            )>
-                                                                {is_img
-                                                                    .then(|| {
-                                                                        view! {
-                                                                            <img
-                                                                                loading="lazy"
-                                                                                alt=""
-                                                                                src=format!(
-                                                                                    "/api/preview?path={}&size=64",
-                                                                                    encode(&preview),
-                                                                                )
-                                                                            />
-                                                                        }
-                                                                    })}
-                                                                {(!is_img)
-                                                                    .then(|| {
-                                                                        view! { <Icon name=file_icon(&name, &kind)/> }
-                                                                    })}
-                                                            </span>
-                                                            <span class="file-body">
-                                                                <span class="file-name">{name.clone()}</span>
-                                                                <span class="file-meta">
-                                                                    {meta}
-                                                                    {shared
-                                                                        .then(|| {
-                                                                            view! {
-                                                                                <span class="badge">
-                                                                                    {format!("shared by {owner} ({permission})")}
-                                                                                </span>
-                                                                            }
-                                                                        })}
-                                                                </span>
-                                                            </span>
-                                                        </button>
-                                                        <span class="file-actions">
-                                                            {(!is_dir)
-                                                                .then(|| {
-                                                                    if encrypted {
-                                                                        view! {
-                                                                            <button
-                                                                                class="icon-btn"
-                                                                                title="Download & decrypt"
-                                                                                on:click=move |_| decrypt_entry(download_copy.clone())
-                                                                            >
-                                                                                <Icon name="download"/>
-                                                                            </button>
-                                                                        }
-                                                                            .into_any()
-                                                                    } else {
-                                                                        view! {
-                                                                            <a
-                                                                                class="icon-btn"
-                                                                                title="Download"
-                                                                                href=format!("/dav{}", encode_path(&download))
-                                                                                download
-                                                                            >
-                                                                                <Icon name="download"/>
-                                                                            </a>
-                                                                        }
-                                                                            .into_any()
-                                                                    }
-                                                                })}
-                                                            {can_edit
-                                                                .then(|| {
-                                                                    view! {
-                                                                        {(!shared)
-                                                                            .then(|| {
-                                                                                view! {
-                                                                                    <button
-                                                                                        class="icon-btn"
-                                                                                        title="Share"
-                                                                                        on:click=move |_| share_entry(share_copy.clone())
-                                                                                    >
-                                                                                        <Icon name="share"/>
-                                                                                    </button>
-                                                                                }
-                                                                            })}
-                                                                        <button
-                                                                            class="icon-btn"
-                                                                            title="Rename"
-                                                                            on:click=move |_| rename_entry(rename_copy.clone())
-                                                                        >
-                                                                            <Icon name="edit"/>
-                                                                        </button>
-                                                                        <button
-                                                                            class="icon-btn"
-                                                                            title="Delete"
-                                                                            on:click=move |_| delete_entry(delete_copy.clone())
-                                                                        >
-                                                                            <Icon name="trash"/>
-                                                                        </button>
-                                                                    }
-                                                                })}
-                                                        </span>
-                                                    </li>
-                                                }
-                                            }
-                                        />
-                                    </ul>
-                                }
-                                    .into_any()
-                            }
-                        }}
+                        <FileArea
+                            parent=parent
+                            loading=loading
+                            folder_encrypted=folder_encrypted
+                            master=e2ee_master
+                            entries=entries
+                            grid=grid
+                            selected=selected
+                            move_drag=move_drag
+                            context_menu=context_menu
+                            lightbox=lightbox
+                            on_load=file_load
+                            on_open=ctx_open
+                            on_toggle_select=file_toggle_select
+                            on_move_into=file_move_into
+                            on_decrypt=ctx_decrypt
+                            on_share=ctx_share
+                            on_rename=ctx_rename
+                            on_delete=ctx_delete
+                            on_unlock=open_encryption
+                        />
                     }
                         .into_any()
                 }
                 Tab::Trash => {
                     view! {
-                        {move || {
-                            if trash.get().is_empty() {
-                                return view! {
-                                    <div class="empty">
-                                        <Icon name="trash"/>
-                                        <p>"Trash is empty"</p>
-                                        <small class="muted">
-                                            "Deleted files appear here for 30 days."
-                                        </small>
-                                    </div>
-                                }
-                                    .into_any();
-                            }
-                            view! {
-                                <ul class="files">
-                                    <For
-                                        each=move || trash.get()
-                                        key=|item| item.id
-                                        children=move |item| {
-                                            let restore_copy = item.clone();
-                                            let purge_copy = item.clone();
-                                            let original = item.original_path.clone().unwrap_or_default();
-                                            let size = human_size(item.size);
-                                            view! {
-                                                <li class="file">
-                                                    <div class="file-open">
-                                                        <span class="file-icon">
-                                                            <Icon name="trash"/>
-                                                        </span>
-                                                        <span class="file-body">
-                                                            <span class="file-name">{item.name.clone()}</span>
-                                                            <span class="file-meta">
-                                                                {size}
-                                                                <span class="muted">{original}</span>
-                                                            </span>
-                                                        </span>
-                                                    </div>
-                                                    <span class="file-actions">
-                                                        <button on:click=move |_| restore(restore_copy.clone())>
-                                                            <Icon name="refresh"/>
-                                                            "Restore"
-                                                        </button>
-                                                        <button
-                                                            class="danger"
-                                                            on:click=move |_| purge(purge_copy.clone())
-                                                        >
-                                                            <Icon name="trash"/>
-                                                            "Delete forever"
-                                                        </button>
-                                                    </span>
-                                                </li>
-                                            }
-                                        }
-                                    />
-                                </ul>
-                            }
-                                .into_any()
-                        }}
+                        <TrashArea
+                            trash=trash
+                            on_restore=trash_restore
+                            on_purge=trash_purge
+                        />
                     }
                         .into_any()
                 }
@@ -2311,428 +1690,32 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 </main>
             </div>
 
-            <div class="toasts">
-                <Show when=move || !error.get().is_empty()>
-                    <div class="toast error">
-                        <span class="toast-msg">{move || error.get()}</span>
-                        <button
-                            class="icon-btn"
-                            aria-label="Dismiss"
-                            on:click=move |_| error.set(String::new())
-                        >
-                            <Icon name="x"/>
-                        </button>
-                    </div>
-                </Show>
-                <Show when=move || !notice.get().is_empty()>
-                    <div class="toast ok">
-                        <span class="toast-msg">{move || notice.get()}</span>
-                        <button
-                            class="icon-btn"
-                            aria-label="Dismiss"
-                            on:click=move |_| notice.set(String::new())
-                        >
-                            <Icon name="x"/>
-                        </button>
-                    </div>
-                </Show>
-                <Show when=move || quota_warn.get().is_some()>
-                    <div class="toast error">
-                        <span class="toast-msg">
-                            {move || {
-                                quota_warn
-                                    .get()
-                                    .map(|percent| {
-                                        format!(
-                                            "Storage almost full: {percent}% of your quota used.",
-                                        )
-                                    })
-                                    .unwrap_or_default()
-                            }}
-                        </span>
-                        <button
-                            class="icon-btn"
-                            aria-label="Dismiss"
-                            on:click=move |_| quota_warn.set(None)
-                        >
-                            <Icon name="x"/>
-                        </button>
-                    </div>
-                </Show>
-                <Show when=move || undo.get().is_some()>
-                    <div class="toast ok">
-                        <span class="toast-msg">
-                            {move || {
-                                undo
-                                    .get()
-                                    .map(|(name, _)| format!("Moved “{name}” to trash"))
-                                    .unwrap_or_default()
-                            }}
-                        </span>
-                        <button
-                            on:click=move |_| {
-                                if let Some((_, id)) = undo.get_untracked() {
-                                    spawn_local(async move {
-                                        let _ = api::send_json(
-                                            "POST",
-                                            &format!("/api/trash/{id}/restore"),
-                                            &json!({}),
-                                        )
-                                        .await;
-                                        undo.set(None);
-                                        load(path.get_untracked());
-                                    });
-                                }
-                            }
-                        >
-                            "Undo"
-                        </button>
-                        <button
-                            class="icon-btn"
-                            aria-label="Dismiss"
-                            on:click=move |_| undo.set(None)
-                        >
-                            <Icon name="x"/>
-                        </button>
-                    </div>
-                </Show>
-            </div>
+            <Toasts
+                error=error
+                notice=notice
+                quota_warn=quota_warn
+                undo=undo
+                on_undo=undo_trash
+            />
+            <UploadTray uploads=uploads on_retry=retry_upload/>
+            <ContextMenu
+                menu=context_menu
+                on_open=ctx_open
+                on_decrypt=ctx_decrypt
+                on_share=ctx_share
+                on_rename=ctx_rename
+                on_delete=ctx_delete
+                on_versions=ctx_versions
+                on_toggle_encryption=ctx_toggle_encryption
+            />
+            <Lightbox
+                open=lightbox
+                master=e2ee_master
+                error=error
+                on_unlock=open_encryption
+                on_decrypt=ctx_decrypt
+            />
 
-            <Show when=move || !uploads.get().is_empty()>
-                <div class="upload-tray">
-                    <div class="upload-tray-head">
-                        <b>"Uploads"</b>
-                        <button
-                            class="icon-btn"
-                            aria-label="Clear"
-                            on:click=move |_| uploads.set(Vec::new())
-                        >
-                            <Icon name="x"/>
-                        </button>
-                    </div>
-                    <ul>
-                        <For
-                            each=move || uploads.get()
-                            key=|item| item.id
-                            children=move |item| {
-                                let name = item.name.clone();
-                                let dir = item.dir.clone();
-                                let file = item.file.clone();
-                                // Per-item signals: O(1) reads, no tray scan.
-                                let progress = item.progress;
-                                let status = item.status;
-                                view! {
-                                    <li class="upload-item">
-                                        <span class="upload-name">{name}</span>
-                                        <span class="upload-bar">
-                                            <span
-                                                class="upload-bar-fill"
-                                                style:width=move || format!("{}%", progress.get())
-                                            ></span>
-                                        </span>
-                                        <span class="upload-status">
-                                            {move || match status.get() {
-                                                UploadStatus::Uploading => {
-                                                    view! { <span class="muted">{format!("{}%", progress.get())}</span> }
-                                                        .into_any()
-                                                }
-                                                UploadStatus::Done => {
-                                                    view! { <span class="ok">"done"</span> }.into_any()
-                                                }
-                                                UploadStatus::Failed => {
-                                                    let file = file.clone();
-                                                    let dir = dir.clone();
-                                                    view! {
-                                                        <button
-                                                            class="icon-btn"
-                                                            title="Retry"
-                                                            on:click=move |_| {
-                                                                progress.set(0);
-                                                                status.set(UploadStatus::Uploading);
-                                                                start_upload(
-                                                                    file.clone(),
-                                                                    dir.clone(),
-                                                                    progress,
-                                                                    status,
-                                                                );
-                                                            }
-                                                        >
-                                                            <Icon name="refresh"/>
-                                                        </button>
-                                                    }
-                                                        .into_any()
-                                                }
-                                            }}
-                                        </span>
-                                    </li>
-                                }
-                            }
-                        />
-                    </ul>
-                </div>
-            </Show>
-
-            {move || {
-                context_menu
-                    .get()
-                    .map(|(entry, x, y)| {
-                        let is_dir = entry.kind == "dir";
-                        let shared = entry.shared;
-                        // Rename/Delete need ownership or a "write" share.
-                        let ctx_edit = !shared
-                            || entry.permission.as_deref() == Some("write");
-                        let encrypted = entry.encrypted;
-                        let open_e = entry.clone();
-                        let download = entry.path.clone();
-                        let copy_path = entry.path.clone();
-                        let share_e = entry.clone();
-                        let rename_e = entry.clone();
-                        let delete_e = entry.clone();
-                        let versions_e = entry.clone();
-                        let encrypt_e = entry.clone();
-                        // Only top-level folders own their flag; nested
-                        // folders inherit their parent's policy.
-                        let encrypt_toggle =
-                            is_dir && !shared && entry.path.matches('/').count() == 1;
-                        view! {
-                            <div class="ctx-scrim" on:click=move |_| context_menu.set(None)></div>
-                            <div
-                                class="ctx-menu"
-                                style:left=format!("{}px", x.max(0))
-                                style:top=format!("{}px", y.max(0))
-                            >
-                                {is_dir
-                                    .then(|| {
-                                        view! {
-                                            <button
-                                                class="ctx-item"
-                                                on:click=move |_| {
-                                                    context_menu.set(None);
-                                                    open(open_e.clone());
-                                                }
-                                            >
-                                                <Icon name="folder"/>
-                                                "Open"
-                                            </button>
-                                        }
-                                    })}
-                                {(!is_dir)
-                                    .then(|| {
-                                        if encrypted {
-                                            view! {
-                                                <button
-                                                    class="ctx-item"
-                                                    title="Download & decrypt"
-                                                    on:click=move |_| {
-                                                        context_menu.set(None);
-                                                        decrypt_entry(entry.clone());
-                                                    }
-                                                >
-                                                    <Icon name="download"/>
-                                                    "Download & decrypt"
-                                                </button>
-                                            }
-                                                .into_any()
-                                        } else {
-                                            view! {
-                                                <a
-                                                    class="ctx-item"
-                                                    href=format!("/dav{}", encode_path(&download))
-                                                    download
-                                                    on:click=move |_| context_menu.set(None)
-                                                >
-                                                    <Icon name="download"/>
-                                                    "Download"
-                                                </a>
-                                            }
-                                                .into_any()
-                                        }
-                                    })}
-                                <button
-                                    class="ctx-item"
-                                    on:click=move |_| {
-                                        context_menu.set(None);
-                                        let path = copy_path.clone();
-                                        spawn_local(async move {
-                                            crate::api::copy_to_clipboard(&path).await;
-                                        });
-                                    }
-                                >
-                                    <Icon name="link"/>
-                                    "Copy path"
-                                </button>
-                                {ctx_edit
-                                    .then(|| {
-                                        view! {
-                                            {(!shared)
-                                                .then(|| {
-                                                    view! {
-                                                        <button
-                                                            class="ctx-item"
-                                                            on:click=move |_| {
-                                                                context_menu.set(None);
-                                                                share_entry(share_e.clone());
-                                                            }
-                                                        >
-                                                            <Icon name="share"/>
-                                                            "Share"
-                                                        </button>
-                                                    }
-                                                })}
-                                            <button
-                                                class="ctx-item"
-                                                on:click=move |_| {
-                                                    context_menu.set(None);
-                                                    rename_entry(rename_e.clone());
-                                                }
-                                            >
-                                                <Icon name="edit"/>
-                                                "Rename"
-                                            </button>
-                                            <button
-                                                class="ctx-item danger"
-                                                on:click=move |_| {
-                                                    context_menu.set(None);
-                                                    delete_entry(delete_e.clone());
-                                                }
-                                            >
-                                                <Icon name="trash"/>
-                                                "Move to trash"
-                                            </button>
-                                            {(!is_dir && !shared)
-                                                .then(|| {
-                                                    view! {
-                                                        <button
-                                                            class="ctx-item"
-                                                            on:click=move |_| {
-                                                                context_menu.set(None);
-                                                                versions_for.set(Some(versions_e.clone()));
-                                                            }
-                                                        >
-                                                            <Icon name="history"/>
-                                                            "Versions"
-                                                        </button>
-                                                    }
-                                                })}
-                                            {encrypt_toggle
-                                                .then(|| {
-                                                    view! {
-                                                        <button
-                                                            class="ctx-item"
-                                                            on:click=move |_| {
-                                                                context_menu.set(None);
-                                                                toggle_encryption(encrypt_e.clone());
-                                                            }
-                                                        >
-                                                            <Icon name="lock"/>
-                                                            {if encrypted {
-                                                                "Make this folder plaintext"
-                                                            } else {
-                                                                "Encrypt this folder"
-                                                            }}
-                                                        </button>
-                                                    }
-                                                })}
-                                        }
-                                    })}
-                            </div>
-                        }
-                    })
-            }}
-
-            {move || {
-                lightbox
-                    .get()
-                    .map(|entry| {
-                        let name = entry.name.clone();
-                        let name2 = name.clone();
-                        let name3 = name.clone();
-                        let encrypted = entry.encrypted;
-                        let preview_text = is_text_name(&entry.name);
-                        let src = if encrypted {
-                            lightbox_url.get()
-                        } else {
-                            format!("/api/preview?path={}&size=1024", encode(&entry.path))
-                        };
-                        let download = entry.path.clone();
-                        let dl_entry = entry.clone();
-                        view! {
-                            <div class="lightbox" on:click=move |_| lightbox.set(None)>
-                                {preview_text
-                                    .then(|| {
-                                        view! {
-                                            <Show
-                                                when=move || !lightbox_text.get().is_empty()
-                                                fallback=|| view! { <p class="muted">"Loading preview…"</p> }
-                                            >
-                                                <pre class="lightbox-text">{move || lightbox_text.get()}</pre>
-                                            </Show>
-                                        }
-                                    })}
-                                {(!preview_text)
-                                    .then(|| {
-                                        view! {
-                                            {encrypted
-                                                .then(|| {
-                                                    view! {
-                                                        <Show
-                                                            when=move || !lightbox_url.get().is_empty()
-                                                            fallback=|| view! { <p class="muted">"Decrypting…"</p> }
-                                                        >
-                                                            <img src=move || lightbox_url.get() alt=name2.clone()/>
-                                                        </Show>
-                                                    }
-                                                })}
-                                            {(!encrypted)
-                                                .then(|| {
-                                                    view! { <img src=src alt=name3.clone()/> }
-                                                })}
-                                        }
-                                    })}
-                                <div
-                                    class="lightbox-bar"
-                                    on:click=move |ev: ev::MouseEvent| ev.stop_propagation()
-                                >
-                                    <span class="lightbox-name">{name.clone()}</span>
-                                    {if encrypted {
-                                        view! {
-                                            <button
-                                                class="icon-btn"
-                                                title="Download & decrypt"
-                                                on:click=move |_| {
-                                                    lightbox.set(None);
-                                                    decrypt_entry(dl_entry.clone());
-                                                }
-                                            >
-                                                <Icon name="download"/>
-                                            </button>
-                                        }
-                                            .into_any()
-                                    } else {
-                                        view! {
-                                            <a
-                                                class="icon-btn"
-                                                title="Download"
-                                                href=format!("/dav{}", encode_path(&download))
-                                                download
-                                            >
-                                                <Icon name="download"/>
-                                            </a>
-                                        }
-                                            .into_any()
-                                    }}
-                                    <button
-                                        class="icon-btn"
-                                        aria-label="Close"
-                                        on:click=move |_| lightbox.set(None)
-                                    >
-                                        <Icon name="x"/>
-                                    </button>
-                                </div>
-                            </div>
-                        }
-                    })
-            }}
 
             {move || {
                 vault_setup
