@@ -35,7 +35,7 @@ ship-blocker for calling group E2EE production-grade.
 
 ## Next milestone: 0.4.5 — UI refinement
 
-Status: **implementation complete; no release tag yet.** Keep Leptos and the
+Status: **released as `v0.4.5` on 2026-11-05.** Keep Leptos and the
 single-binary/embedded-assets model; this is not a framework rewrite. Landed:
 `Modal`, `Notice`, `ErrorText`, `EmptyState`, `MlsDevicesPanel`, `FileRow`,
 `FileTile`, `TrashRow`, `Sidebar`, `Topbar`, toast/upload/context/lightbox
