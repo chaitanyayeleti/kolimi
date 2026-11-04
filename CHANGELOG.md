@@ -4,6 +4,18 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-11-04
+
+### Fixed
+- **Release container build**: the per-target build job now passes the staged
+  `dist/kolimi-<target>/Dockerfile` path to `docker/build-push-action`.
+  `v0.4.0` built the binaries and Helm chart but the container jobs failed
+  because the action looked for a workspace-root Dockerfile; no `v0.4.0`
+  release was published.
+- **Desktop macOS asset**: `*.app` is now expanded inside the macOS bundle
+  directory before `tar`, so `kolimi-desktop_<version>_<arch>.app.tar.gz` is
+  produced. The Linux and Windows bundles were unaffected.
+
 ## [0.4.0] - 2026-11-04
 
 ### Fixed
