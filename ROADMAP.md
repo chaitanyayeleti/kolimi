@@ -33,6 +33,28 @@ backlog and the honest list of limitations. Shipped history lives in
 E2EE is **alpha** and MLS is **not externally audited**. That is the main
 ship-blocker for calling group E2EE production-grade.
 
+## Next milestone: 0.4.5 — UI refinement
+
+Status: **planned; do not start until the owner green-lights it.** Keep
+Leptos and the single-binary/embedded-assets model; this is not a framework
+rewrite.
+
+- **Reusable components**: extract modal, buttons, notices, empty states,
+  share rows and device rows from the large app modules.
+- **Split `app.rs` and `mls.rs`**: separate MLS persistence/state, protocol
+  helpers, API operations and display types so the UI modules stay
+  reviewable.
+- **Design tokens**: add CSS variables for colors, spacing, radius,
+  typography and elevation, then migrate the modal/settings surfaces first.
+- **Settings dialogs**: group Encryption, MLS shares, MLS devices, Passkeys
+  and device enrollment; add loading/empty/error states and a clear current
+  device marker.
+- **Component tests**: cover pure helpers and the extracted modal/device
+  components; keep the Playwright suite as the end-to-end guard.
+
+Validation for the milestone remains the full workspace tests, clippy
+(including wasm), formatting, docs checks and browser E2E.
+
 ## Next
 
 ### 1. External MLS crypto audit (blocker)
