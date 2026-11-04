@@ -23,7 +23,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runs-on: ubuntu-latest
+            # Pinned: the gnu binary requires the runner's glibc (2.39 on
+            # 24.04). `ubuntu-latest` moves to 26.04 in late 2026, which
+            # would silently raise that requirement again.
+            runs-on: ubuntu-24.04
             deps: cmake libssl-dev
             deb: true
             container: true
@@ -33,7 +36,7 @@ jobs:
             # build does not (it uses the `0600` device-file fallback).
             sync_features: --features kolimi-sync/keystore
           - target: x86_64-unknown-linux-musl
-            runs-on: ubuntu-latest
+            runs-on: ubuntu-24.04
             deps: cmake musl-tools
             cc: musl-gcc
             deb: false
@@ -101,6 +104,28 @@ jobs:
       - if: matrix.container
         name: Stage release Dockerfile
         run: cp packaging/docker/Dockerfile.release "dist/kolimi-${{ matrix.target }}/Dockerfile"
+      # Catch runtime-base/glibc mismatches before the image is tagged. This
+      # would have caught the v0.4.1 image, which built on Ubuntu 24.04 but
+      # shipped in a Debian 12 distroless base.
+      - if: matrix.container
+        name: Smoke-test the release image
+        run: |
+          IMAGE="kolimi-smoke:${{ matrix.target }}"
+          CONTAINER="kolimi-smoke-${{ matrix.arch }}"
+          docker buildx build --platform "${{ matrix.platform }}" --load \
+            -f "dist/kolimi-${{ matrix.target }}/Dockerfile" \
+            -t "$IMAGE" "dist/kolimi-${{ matrix.target }}"
+          docker run -d --name "$CONTAINER" -p 18080:8080 "$IMAGE"
+          trap 'docker rm -f "$CONTAINER"' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1; then
+              echo "container smoke test ok"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$CONTAINER"
+          exit 1
       - if: matrix.container
         name: Build and push ${{ matrix.arch }} image
         id: container

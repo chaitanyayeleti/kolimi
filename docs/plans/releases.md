@@ -32,6 +32,12 @@ separate workflows but should be tagged together when both changed.
    the x86_64 `.deb`, emits a CycloneDX SBOM and signs the tarballs with
    cosign (keyless). The two glibc jobs also build their container image
    from those release binaries; there is no second Rust compile in Docker.
+   The gnu jobs are pinned to Ubuntu 24.04 (glibc 2.39), so the release
+   image stays on `distroless/cc-debian13` (glibc 2.41). Do not move the
+   runner forward or the runtime base backward without checking the glibc
+   pair; `v0.4.1` shipped an Ubuntu 24.04 binary in a Debian 12 image and
+   crash-looped with `GLIBC_2.38 not found`. A smoke test starts the built
+   image and waits for `/healthz` before it is pushed.
 2. **container manifest** — merges the amd64/arm64 digests into one manifest
    with the `X.Y.Z`, `X.Y` and `latest` tags.
 3. **helm** — sets chart `version`/`appVersion` from the tag and packages
@@ -102,6 +108,8 @@ Then verify:
       SBOM and signatures.
 - [ ] `ghcr.io/chaitanyayeleti/kolimi:X.Y.Z` pulls on amd64 and arm64 and
       reports the right `/version`.
+- [ ] The container image starts and returns `ok` from `/healthz`; CI
+      smoke-tests this before pushing, but verify the published tag too.
 - [ ] The Helm chart `appVersion` matches the image tag.
 - [ ] The AUR package points at the new tag and its checksum matches.
 - [ ] `install.sh --version vX.Y.Z` installs and starts a working server.

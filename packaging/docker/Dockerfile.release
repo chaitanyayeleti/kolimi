@@ -3,7 +3,11 @@
 # The CI build jobs upload `dist/kolimi-<target>/` and the container step
 # uses that directory as its context, so the release no longer compiles the
 # server a second time inside Docker.
-FROM gcr.io/distroless/cc-debian12:nonroot
+#
+# The gnu binaries are built on the pinned Ubuntu 24.04 runners (glibc
+# 2.39). The runtime base must therefore be at least that new; Debian 12's
+# glibc 2.36 made `v0.4.1` exit at startup with GLIBC_2.38 not found.
+FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY kolimi-server /usr/local/bin/kolimi-server
 COPY kolimi-sync /usr/local/bin/kolimi-sync

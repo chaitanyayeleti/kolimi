@@ -143,8 +143,10 @@ cargo vet --locked
 - Releases: `vX.Y.Z` triggers the server/CLI/container/Helm/AUR release;
   `desktop-vX.Y.Z` triggers the desktop bundles. Push both tags for a paired
   release. Server containers are built from the release binaries (no second
-  Rust compile in Docker); desktop platform builds run in parallel and
-  publish once.
+  Rust compile in Docker); the gnu build is pinned to Ubuntu 24.04 and the
+  runtime image to `distroless/cc-debian13`, so keep that glibc pair aligned.
+  CI smoke-tests the built image's `/healthz` before pushing. Desktop
+  platform builds run in parallel and publish once.
 - Before tagging: `main` green (dispatch any expensive gates the path filters
   skipped), `CHANGELOG.md` entry, version bumped in `[workspace.package]`,
   every `version =` in `[workspace.dependencies]` (including
