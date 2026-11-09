@@ -30,7 +30,7 @@ DAV collections, E2EE keys and group memberships (database rows cascade),
 null actor. `user disable` takes effect immediately (existing sessions stop
 working) and is the reversible alternative.
 
-Passkeys are registered in the web UI (toolbar → **Passkeys**). A
+Passkeys are registered in the web UI (**Settings → Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is rejected
 (and audited).
 

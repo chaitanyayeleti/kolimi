@@ -379,7 +379,7 @@ limits and login lockout use the real client address from
 4. Upload a file and try a share. Encrypted folder shares use MLS when both
    clients support it; legacy per-file shares remain readable.
 5. Recommended:
-   - Register a passkey (toolbar → **Passkeys**) and optionally run
+   - Register a passkey (**Settings → Passkeys**) and optionally run
      `kolimi-server user passkey-only <name>`.
    - Enable TOTP and store the recovery codes.
    - Point a WebDAV client at `https://cloud.example.com/dav/`, and

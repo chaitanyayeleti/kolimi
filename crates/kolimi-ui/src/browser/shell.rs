@@ -19,7 +19,6 @@ pub(crate) fn Sidebar(
     username: RwSignal<String>,
     on_files: Callback<()>,
     on_trash: Callback<()>,
-    on_passkeys: Callback<()>,
     on_settings: Callback<()>,
     on_admin: Callback<()>,
     on_theme: Callback<()>,
@@ -49,10 +48,6 @@ pub(crate) fn Sidebar(
                         "Trash"
                     </button>
                     <div class="nav-sep"></div>
-                    <button class="nav-item" on:click=move |_| on_passkeys.run(())>
-                        <Icon name="key"/>
-                        "Passkeys"
-                    </button>
                     <button class="nav-item" on:click=move |_| on_settings.run(())>
                         <Icon name="settings"/>
                         "Settings"

@@ -540,9 +540,6 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         load_trash();
         nav_open.set(false);
     });
-    let nav_passkeys = Callback::new(move |_: ()| {
-        open_settings.run(SettingsTab::Passkeys);
-    });
     let nav_settings = Callback::new(move |_: ()| {
         open_settings.run(SettingsTab::Encryption);
     });
@@ -581,7 +578,6 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 username=username
                 on_files=nav_files
                 on_trash=nav_trash
-                on_passkeys=nav_passkeys
                 on_settings=nav_settings
                 on_admin=nav_admin
                 on_theme=nav_theme

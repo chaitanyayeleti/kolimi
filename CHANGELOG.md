@@ -4,6 +4,13 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Removed the duplicate Passkeys sidebar entry**: passkeys and two-factor
+  remain in **Settings → Passkeys**. The sidebar no longer shows a second
+  entry that opened the same Settings dialog.
+
 ## [0.4.6] - 2026-11-05
 
 ### Changed

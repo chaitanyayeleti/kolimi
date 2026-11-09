@@ -57,8 +57,17 @@ async function row(page: Page, name: string) {
   return page.locator("li.file", { hasText: name }).first();
 }
 
-test("web settings tabs and the passkeys shortcut", async ({ page }) => {
+test("web settings tabs and the passkeys panel", async ({ page }) => {
   await login(page);
+
+  // Passkeys live only in Settings; the sidebar has no duplicate entry.
+  await expect(
+    page.locator(".sidebar").getByRole("button", {
+      name: "Passkeys",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const modal = page.locator(".modal");
 
@@ -70,15 +79,8 @@ test("web settings tabs and the passkeys shortcut", async ({ page }) => {
     modal.getByRole("heading", { name: "Passkeys", exact: true }),
   ).toBeVisible();
   await expect(modal.getByText("Two-factor (TOTP)", { exact: true })).toBeVisible();
-
-  await modal.getByRole("button", { name: "Close", exact: true }).click();
-  await page.getByRole("button", { name: "Passkeys", exact: true }).click();
-  const shortcut = page.locator(".modal");
   await expect(
-    shortcut.getByRole("heading", { name: "Passkeys", exact: true }),
-  ).toBeVisible();
-  await expect(
-    shortcut.getByLabel("Passphrase", { exact: true }),
+    modal.getByLabel("Passphrase", { exact: true }),
   ).toHaveCount(0);
 });
 
