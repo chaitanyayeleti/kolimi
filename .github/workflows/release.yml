@@ -259,7 +259,9 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - if: steps.gate.outputs.present == 'true'
         name: Install tools
-        run: pacman -Sy --noconfirm git openssh curl
+        # Arch is rolling: a partial `-Sy` upgrade can break base packages
+        # (openssl 4.1 vs libarchive/sudo in the container). Upgrade first.
+        run: pacman -Syu --noconfirm --needed git openssh curl
       - if: steps.gate.outputs.present == 'true'
         name: Bump PKGBUILD and .SRCINFO
         run: |
