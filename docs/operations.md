@@ -32,7 +32,9 @@ working) and is the reversible alternative.
 
 Passkeys are registered in the web UI (**Settings → Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is rejected
-(and audited).
+(and audited). Adding or removing a passkey asks for the account password
+(or a current TOTP/recovery code); changing the E2EE passphrase and
+replacing the keyring use the same short-lived re-authentication proof.
 
 ## Account recovery
 
@@ -331,8 +333,11 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
 ### Unlock and devices
 
 - Unlock with the passphrase, recovery code, or a platform passkey-PRF
-  output. The web client keeps sealed MLS state in IndexedDB after unlock;
-  the CLI/desktop use `.kolimi/` and the OS keychain (or `0600` fallback).
+  output. Because a command-line argument is visible in the process list,
+  prefer the environment variable (`KOLIMI_E2EE_PRF`) or pipe the PRF output
+  to `--e2ee-prf-stdin` rather than passing `--e2ee-prf` in a shared shell.
+  The web client keeps sealed MLS state in IndexedDB after unlock; the
+  CLI/desktop use `.kolimi/` and the OS keychain (or `0600` fallback).
 - Enroll another device without re-typing the passphrase:
 
   ```sh

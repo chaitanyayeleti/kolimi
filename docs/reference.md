@@ -99,6 +99,7 @@ E2EE:
 | `--e2ee-passphrase PW` | `KOLIMI_E2EE_PASSPHRASE` | Unlock passphrase |
 | `--e2ee-recovery CODE` | `KOLIMI_E2EE_RECOVERY` | Recovery-code unlock |
 | `--e2ee-prf HEX` | `KOLIMI_E2EE_PRF` | Platform passkey-PRF output (64 hex chars) |
+| `--e2ee-prf-stdin` | — | Read the PRF output from stdin instead of argv |
 | `--e2ee-enroll NAME` | — | Enroll this device and wait for approval |
 | `--e2ee-approve ID` | — | Approve a pending device enrollment |
 | `--e2ee-code CODE` | — | Approval code for `--e2ee-approve` |
@@ -155,7 +156,7 @@ Notes:
 | Variable | Used for |
 | --- | --- |
 | `KOLIMI_SERVER`, `KOLIMI_USER`, `KOLIMI_PASSWORD` | `kolimi-sync` connection |
-| `KOLIMI_E2EE_PASSPHRASE`, `KOLIMI_E2EE_RECOVERY`, `KOLIMI_E2EE_PRF` | E2EE unlock |
+| `KOLIMI_E2EE_PASSPHRASE`, `KOLIMI_E2EE_RECOVERY`, `KOLIMI_E2EE_PRF` | E2EE unlock (PRF can also come from `--e2ee-prf-stdin`) |
 | `KOLIMI_MLS_SHARES` | Enable MLS in `kolimi-sync` |
 | `KOLIMI_DEVICE_NAME` | Label shown in the MLS device roster (default: hostname) |
 | `KOLIMI_DESKTOP_CONFIG` | Override `desktop.json` path |

@@ -62,8 +62,18 @@ struct Cli {
 
     /// WebAuthn PRF output as hex (64 chars) for passkey unlock; platform
     /// shells usually pass this via the library API instead.
-    #[arg(long, env = "KOLIMI_E2EE_PRF", hide_env_values = true)]
+    #[arg(
+        long,
+        env = "KOLIMI_E2EE_PRF",
+        hide_env_values = true,
+        conflicts_with = "e2ee_prf_stdin"
+    )]
     e2ee_prf: Option<String>,
+
+    /// Read the WebAuthn PRF output as hex from stdin (keeps it out of the
+    /// process list and shell history).
+    #[arg(long = "e2ee-prf-stdin")]
+    e2ee_prf_stdin: bool,
 
     /// Enroll this device (RFC 0008): create an enrollment and wait for an
     /// already-unlocked device to approve it, then save `.kolimi/device.json`.
@@ -197,9 +207,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         e2ee: if !needs_e2ee {
             None
         } else {
-            let prf_secret = match &cli.e2ee_prf {
-                Some(hex) => Some(hex_decode(hex).map_err(|e| format!("--e2ee-prf: {e}"))?),
-                None => None,
+            let prf_secret = if cli.e2ee_prf_stdin {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                Some(hex_decode(line.trim()).map_err(|e| format!("--e2ee-prf-stdin: {e}"))?)
+            } else {
+                match &cli.e2ee_prf {
+                    Some(hex) => Some(hex_decode(hex).map_err(|e| format!("--e2ee-prf: {e}"))?),
+                    None => None,
+                }
             };
             Some(E2eeOptions {
                 passphrase: cli.e2ee_passphrase.clone(),
@@ -500,4 +516,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         report.pulled, report.pushed, report.removed_local, report.removed_remote, report.conflicts
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base() -> Vec<&'static str> {
+        vec![
+            "kolimi-sync",
+            "--server",
+            "http://localhost",
+            "--user",
+            "alice",
+            "--password",
+            "test-password",
+            "--local",
+            "/tmp/kolimi",
+        ]
+    }
+
+    #[test]
+    fn prf_stdin_and_argv_are_mutually_exclusive() {
+        let mut args = base();
+        args.extend(["--e2ee-prf", "00", "--e2ee-prf-stdin"]);
+        assert!(Cli::try_parse_from(args).is_err());
+
+        let mut args = base();
+        args.push("--e2ee-prf-stdin");
+        assert!(Cli::try_parse_from(args).is_ok());
+    }
 }
