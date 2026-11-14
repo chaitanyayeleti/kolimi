@@ -1,5 +1,6 @@
 //! Modal dialogs and Settings sections.
 
+mod account;
 mod admin;
 mod enrollment;
 mod passkeys;

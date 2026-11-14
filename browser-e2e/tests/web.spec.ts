@@ -91,6 +91,16 @@ test("web settings tabs and the passkeys panel", async ({ page }) => {
   await expect(
     modal.getByRole("tab", { name: "Encryption", exact: true }),
   ).toBeVisible();
+
+  await modal.getByRole("tab", { name: "Account", exact: true }).click();
+  await expect(
+    modal.getByRole("heading", { name: "Account", exact: true }),
+  ).toBeVisible();
+  await expect(
+    modal.getByText("Active sessions", { exact: true }),
+  ).toBeVisible();
+  await expect(modal.getByText("this device", { exact: true })).toBeVisible();
+
   await modal.getByRole("tab", { name: "Passkeys", exact: true }).click();
   await expect(
     modal.getByRole("heading", { name: "Passkeys", exact: true }),

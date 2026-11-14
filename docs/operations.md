@@ -30,6 +30,11 @@ DAV collections, E2EE keys and group memberships (database rows cascade),
 null actor. `user disable` takes effect immediately (existing sessions stop
 working) and is the reversible alternative.
 
+Users manage their own login password and active sessions under
+**Settings → Account**. A password change asks for a fresh password or
+two-factor proof and revokes every other session; the current session stays
+signed in.
+
 Passkeys are registered in the web UI (**Settings → Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is rejected
 (and audited). Adding or removing a passkey asks for the account password

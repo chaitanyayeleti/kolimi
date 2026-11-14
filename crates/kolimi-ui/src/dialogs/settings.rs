@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::Value;
 
+use super::account::AccountPanel;
 use super::enrollment::EnrollmentPanel;
 use super::passkeys::PasskeysPanel;
 use crate::api;
@@ -11,6 +12,7 @@ use crate::components::{ErrorText, Icon, MlsDevicesPanel, Modal, Notice};
 /// Sections shown inside the Settings dialog.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsTab {
+    Account,
     Encryption,
     Sharing,
     Devices,
@@ -328,6 +330,13 @@ pub(crate) fn SettingsDialog(
             <div class="segmented settings-tabs" role="tablist">
                 <button
                     role="tab"
+                    class:active=move || tab.get() == SettingsTab::Account
+                    on:click=move |_| tab.set(SettingsTab::Account)
+                >
+                    "Account"
+                </button>
+                <button
+                    role="tab"
                     class:active=move || tab.get() == SettingsTab::Encryption
                     on:click=move |_| tab.set(SettingsTab::Encryption)
                 >
@@ -355,6 +364,12 @@ pub(crate) fn SettingsDialog(
                     "Passkeys"
                 </button>
             </div>
+
+            <Show when=move || tab.get() == SettingsTab::Account>
+                <div class="settings-section">
+                    <AccountPanel/>
+                </div>
+            </Show>
 
             <Show when=move || tab.get() == SettingsTab::Encryption>
                 <div class="settings-section">

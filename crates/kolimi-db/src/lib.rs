@@ -147,6 +147,10 @@ pub struct Session {
     pub expires_at: i64,
     /// Last time the session was used.
     pub last_seen_at: i64,
+    /// Client address captured when the session was created.
+    pub ip: Option<String>,
+    /// Client `User-Agent` captured when the session was created.
+    pub user_agent: Option<String>,
 }
 
 /// A file or directory in a user's tree.
@@ -834,11 +838,18 @@ impl Db {
         token_hash: &[u8],
         csrf_hash: &[u8],
         expires_at: i64,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
     ) -> Result<(), DbError> {
         let now = now_millis();
+        // Bound attacker-controlled header/address sizes before they reach
+        // the session list.
+        let ip = ip.map(|value| value.chars().take(64).collect::<String>());
+        let user_agent = user_agent.map(|value| value.chars().take(512).collect::<String>());
         sqlx::query(
-            "INSERT INTO sessions (user_id, token_hash, csrf_hash, created_at, expires_at, last_seen_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sessions
+                 (user_id, token_hash, csrf_hash, created_at, expires_at, last_seen_at, ip, user_agent)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(user_id)
         .bind(token_hash)
@@ -846,9 +857,52 @@ impl Db {
         .bind(now)
         .bind(expires_at)
         .bind(now)
+        .bind(ip)
+        .bind(user_agent)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Lists a user's live sessions, most recently used first.
+    pub async fn list_user_sessions(&self, user_id: i64) -> Result<Vec<Session>, DbError> {
+        Ok(sqlx::query_as::<_, Session>(
+            "SELECT * FROM sessions
+             WHERE user_id = ? AND expires_at > ?
+             ORDER BY last_seen_at DESC, id DESC",
+        )
+        .bind(user_id)
+        .bind(now_millis())
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Deletes one session owned by `user_id`, returning whether it existed.
+    pub async fn delete_user_session(
+        &self,
+        user_id: i64,
+        session_id: i64,
+    ) -> Result<bool, DbError> {
+        let result = sqlx::query("DELETE FROM sessions WHERE user_id = ? AND id = ?")
+            .bind(user_id)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Drops every session for a user except the one with `keep_hash`.
+    pub async fn delete_user_sessions_except(
+        &self,
+        user_id: i64,
+        keep_hash: &[u8],
+    ) -> Result<u64, DbError> {
+        let result = sqlx::query("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?")
+            .bind(user_id)
+            .bind(keep_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 
     /// The CSRF token hash bound to a session (for cookie CSRF binding).
@@ -1764,15 +1818,26 @@ mod tests {
         let (_dir, db) = db().await;
         let user = db.create_user("alice", "hash").await.unwrap();
         let token = [7u8; 32];
-        db.create_session(user.id, &token, &[0u8; 32], now_millis() + 60_000)
-            .await
-            .unwrap();
+        db.create_session(
+            user.id,
+            &token,
+            &[0u8; 32],
+            now_millis() + 60_000,
+            Some("127.0.0.1"),
+            Some("test-agent"),
+        )
+        .await
+        .unwrap();
 
         let session = db.find_session(&token).await.unwrap().unwrap();
         assert_eq!(session.user_id, user.id);
+        assert_eq!(session.ip.as_deref(), Some("127.0.0.1"));
+        assert_eq!(session.user_agent.as_deref(), Some("test-agent"));
+        assert_eq!(db.list_user_sessions(user.id).await.unwrap().len(), 1);
 
         db.touch_session(session.id, now_millis()).await.unwrap();
-        db.delete_session(&token).await.unwrap();
+        assert!(db.delete_user_session(user.id, session.id).await.unwrap());
+        assert!(!db.delete_user_session(user.id, session.id).await.unwrap());
         assert!(db.find_session(&token).await.unwrap().is_none());
     }
 
@@ -1780,9 +1845,16 @@ mod tests {
     async fn expired_sessions_are_purged() {
         let (_dir, db) = db().await;
         let user = db.create_user("alice", "hash").await.unwrap();
-        db.create_session(user.id, &[1u8; 32], &[0u8; 32], now_millis() - 1)
-            .await
-            .unwrap();
+        db.create_session(
+            user.id,
+            &[1u8; 32],
+            &[0u8; 32],
+            now_millis() - 1,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(db.delete_expired_sessions(now_millis()).await.unwrap(), 1);
     }
 

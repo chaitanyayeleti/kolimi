@@ -68,6 +68,8 @@ async fn recover_restores_password_login_and_clears_totp() {
             b"session-hash",
             b"csrf-hash",
             kolimi_db::now_millis() + 3_600_000,
+            None,
+            None,
         )
         .await
         .unwrap();

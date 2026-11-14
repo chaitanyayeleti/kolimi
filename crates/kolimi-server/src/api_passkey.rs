@@ -345,8 +345,13 @@ pub struct LoginFinish {
 pub async fn login_finish(
     State(state): State<AppState>,
     crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
+    headers: HeaderMap,
     Json(req): Json<LoginFinish>,
 ) -> Response {
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let lockout_key = format!("passkey:{}:{}", req.username, ip);
     if state.lockout.check(&lockout_key).is_some() {
         return too_many();
@@ -386,7 +391,7 @@ pub async fn login_finish(
         json!({ "method": "passkey" }),
     )
     .await;
-    start_session(&state, &user).await
+    start_session(&state, &user, &ip, user_agent.as_deref()).await
 }
 
 /// `POST /api/reauth/passkey/begin` — start a fresh assertion for an

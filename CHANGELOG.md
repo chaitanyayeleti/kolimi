@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Self-service account security**: the web UI now has **Settings → Account**
+  with a login-password change and active-session management. New endpoints:
+  `POST /api/me/password`, `GET /api/me/sessions`,
+  `DELETE /api/me/sessions`, and `DELETE /api/me/sessions/{id}`. Password
+  changes require a re-authentication token and revoke every other session.
+- Session rows now record the client IP and `User-Agent` (migration 0026), so
+  the account page can show where each session came from.
+
 ## [0.4.7] - 2026-11-14
 
 ### Security

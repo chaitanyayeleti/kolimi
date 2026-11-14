@@ -173,6 +173,12 @@ Notes:
 - `DELETE /api/session` signs out. `GET /api/me` is session-only (HTTP
   Basic is deliberately rejected); most other API endpoints and WebDAV
   accept HTTP Basic for scripts and DAV clients.
+- `POST /api/me/password` requires `X-Reauth-Token` from
+  `POST /api/reauth`. It keeps the current session and revokes the others.
+- `GET /api/me/sessions` lists the caller's live sessions with creation,
+  last-seen, IP and `User-Agent` metadata. `DELETE /api/me/sessions/{id}`
+  revokes one; `DELETE /api/me/sessions` revokes all, or all others with
+  `?keep_current=true`. Session tokens are never returned.
 - Public links use `/public/{token}` and set a scoped unlock cookie after
   `POST /public/{token}/unlock`.
 
@@ -180,7 +186,7 @@ Notes:
 
 | Area | Endpoints |
 | --- | --- |
-| Session / account | `POST /api/session`, `DELETE /api/session`, `GET /api/me`, `GET /api/me/usage`, `GET /api/users`, `/api/users/{name}`, `/api/users/{name}/usage` |
+| Session / account | `POST /api/session`, `DELETE /api/session`, `GET /api/me`, `GET /api/me/usage`, `POST /api/me/password`, `GET|DELETE /api/me/sessions`, `DELETE /api/me/sessions/{id}`, `GET /api/users`, `/api/users/{name}`, `/api/users/{name}/usage` |
 | Passkeys / TOTP | `/api/passkeys*`, `/api/passkeys/login/*`, `/api/totp*` |
 | Browse / files | `GET /api/browse`, `GET /api/files/info`, `POST /api/files/move`, `POST /api/files/encrypt`, `GET /api/search`, `GET /api/preview` |
 | Trash / versions | `/api/trash*`, `/api/versions*` |

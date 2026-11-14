@@ -1,6 +1,6 @@
 # User management — plan
 
-Status: **proposed** · Date: 2026-11-14
+Status: **in progress** · Date: 2026-11-14 · Phase 1 landed on `main`
 Builds on: [operations.md](../operations.md), [reference.md](../reference.md),
 [red-team report](../audit/redteam-2026-11-14.md)
 

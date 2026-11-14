@@ -54,6 +54,9 @@ fn icon_svg(name: &str) -> String {
         "logout" => {
             r#"<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="m10 17-5-5 5-5"/><path d="M5 12h12"/>"#
         }
+        "device" => {
+            r#"<rect x="4" y="3" width="16" height="13" rx="2"/><path d="M8 20h8M12 16v4"/>"#
+        }
         "dots" => {
             r#"<circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>"#
         }

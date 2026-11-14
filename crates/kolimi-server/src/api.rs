@@ -1,7 +1,7 @@
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use kolimi_auth::{CurrentUser, password, token};
@@ -38,8 +38,10 @@ pub struct LoginRequest {
 pub async fn login(
     State(state): State<AppState>,
     crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
+    headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Response {
+    let user_agent = user_agent(&headers);
     if req.username.is_empty() || req.password.is_empty() {
         return bad_request("username and password are required");
     }
@@ -212,7 +214,7 @@ pub async fn login(
             json!({ "method": method }),
         )
         .await;
-        return start_session(&state, &user).await;
+        return start_session(&state, &user, &ip, user_agent.as_deref()).await;
     }
 
     state.lockout.record_success(&lockout_key);
@@ -226,11 +228,16 @@ pub async fn login(
     )
     .await;
 
-    start_session(&state, &user).await
+    start_session(&state, &user, &ip, user_agent.as_deref()).await
 }
 
 /// Creates a session for `user` and returns the login response with cookies.
-pub(crate) async fn start_session(state: &AppState, user: &kolimi_db::User) -> Response {
+pub(crate) async fn start_session(
+    state: &AppState,
+    user: &kolimi_db::User,
+    ip: &str,
+    user_agent: Option<&str>,
+) -> Response {
     let (Ok(session_token), Ok(csrf_token)) = (token::new_session_token(), token::new_csrf_token())
     else {
         return internal_error();
@@ -240,7 +247,14 @@ pub(crate) async fn start_session(state: &AppState, user: &kolimi_db::User) -> R
     let csrf_hash = token::hash_token(&csrf_token);
     if state
         .db
-        .create_session(user.id, &token_hash, &csrf_hash, expires_at)
+        .create_session(
+            user.id,
+            &token_hash,
+            &csrf_hash,
+            expires_at,
+            Some(ip),
+            user_agent,
+        )
         .await
         .is_err()
     {
@@ -301,6 +315,11 @@ pub async fn logout(
         json!({}),
     )
     .await;
+    clear_session_cookies(&state)
+}
+
+/// Expires both session cookies, leaving a 204 response.
+fn clear_session_cookies(state: &AppState) -> Response {
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
@@ -311,6 +330,14 @@ pub async fn logout(
         cookie(CSRF_COOKIE, "", 0, false, state.secure_cookies),
     );
     response
+}
+
+/// Returns the request's `User-Agent`, if it is valid UTF-8.
+fn user_agent(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 /// `GET|POST /logout` — end the session and navigate to the login page.
@@ -370,11 +397,213 @@ fn redirect_to_app(state: &AppState) -> Response {
 }
 
 /// `GET /api/me` — information about the authenticated user.
-pub async fn me(Extension(user): Extension<CurrentUser>) -> Json<Value> {
-    Json(json!({
-        "username": user.username,
-        "is_admin": user.is_admin,
-    }))
+pub async fn me(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    match state.db.get_user(user.user_id).await {
+        Ok(Some(account)) => Json(json!({
+            "username": account.username,
+            "is_admin": account.is_admin,
+            "created_at": account.created_at,
+            "password_login": !account.password_hash.is_empty(),
+        }))
+        .into_response(),
+        Ok(None) => unauthorized("invalid credentials"),
+        Err(_) => internal_error(),
+    }
+}
+
+/// `GET /api/me/sessions` — the caller's live sessions.
+pub async fn my_sessions(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    match state.db.list_user_sessions(user.user_id).await {
+        Ok(sessions) => {
+            let current = user.session_hash.as_ref();
+            let sessions: Vec<Value> = sessions
+                .iter()
+                .map(|session| session_json(session, current))
+                .collect();
+            Json(json!({ "sessions": sessions })).into_response()
+        }
+        Err(_) => internal_error(),
+    }
+}
+
+fn session_json(session: &kolimi_db::Session, current: Option<&[u8; 32]>) -> Value {
+    json!({
+        "id": session.id,
+        "current": current.is_some_and(|hash| session.token_hash.as_slice() == hash.as_slice()),
+        "created_at": session.created_at,
+        "last_seen_at": session.last_seen_at,
+        "expires_at": session.expires_at,
+        "ip": session.ip.clone(),
+        "user_agent": session.user_agent.clone(),
+    })
+}
+
+/// Query for [`revoke_my_sessions`].
+#[derive(Deserialize, Default)]
+pub struct SessionRevokeQuery {
+    /// Keep the session that issued this request.
+    #[serde(default)]
+    keep_current: bool,
+}
+
+/// `DELETE /api/me/sessions/{id}` — revoke one of the caller's sessions.
+pub async fn revoke_my_session(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(session_id): Path<i64>,
+) -> Response {
+    let sessions = match state.db.list_user_sessions(user.user_id).await {
+        Ok(sessions) => sessions,
+        Err(_) => return internal_error(),
+    };
+    let Some(target) = sessions.iter().find(|session| session.id == session_id) else {
+        return not_found();
+    };
+    let current = user
+        .session_hash
+        .as_ref()
+        .is_some_and(|hash| target.token_hash.as_slice() == hash.as_slice());
+    match state.db.delete_user_session(user.user_id, session_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(_) => return internal_error(),
+    }
+    audit(
+        &state,
+        Some(user.user_id),
+        Some(&user.username),
+        "session.revoke",
+        &user.username,
+        json!({ "session_id": session_id, "current": current }),
+    )
+    .await;
+    if current {
+        clear_session_cookies(&state)
+    } else {
+        StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+/// `DELETE /api/me/sessions` — revoke all sessions, optionally keeping the
+/// current one.
+pub async fn revoke_my_sessions(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Query(query): Query<SessionRevokeQuery>,
+) -> Response {
+    let keep_current = query.keep_current && user.session_hash.is_some();
+    let result = if keep_current {
+        match user.session_hash.as_ref() {
+            Some(hash) => {
+                state
+                    .db
+                    .delete_user_sessions_except(user.user_id, hash)
+                    .await
+            }
+            None => state.db.delete_user_sessions(user.user_id).await,
+        }
+    } else {
+        state.db.delete_user_sessions(user.user_id).await
+    };
+    let revoked = match result {
+        Ok(count) => count,
+        Err(_) => return internal_error(),
+    };
+    audit(
+        &state,
+        Some(user.user_id),
+        Some(&user.username),
+        "session.revoke_all",
+        &user.username,
+        json!({ "revoked": revoked, "kept_current": keep_current }),
+    )
+    .await;
+    if keep_current {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        clear_session_cookies(&state)
+    }
+}
+
+/// Body for [`change_password`].
+#[derive(Deserialize)]
+pub struct ChangePasswordRequest {
+    new_password: String,
+}
+
+/// `POST /api/me/password` — change the caller's login password.
+///
+/// Requires a fresh re-authentication token. Other sessions are revoked;
+/// the session that made the change stays valid.
+pub async fn change_password(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Response {
+    let Some(account) = state.db.get_user(user.user_id).await.ok().flatten() else {
+        return unauthorized("invalid credentials");
+    };
+    if account.password_hash.is_empty() {
+        return bad_request("this account is passkey-only; manage passkeys instead");
+    }
+    // Cheap validation happens before the re-auth token is consumed. The
+    // expensive Argon2 hash runs only after fresh proof of presence, so a
+    // stolen session cannot burn CPU by posting new passwords.
+    if req.new_password.chars().count() < password::MIN_PASSWORD_LEN {
+        return bad_request(&format!(
+            "password must be at least {} characters",
+            password::MIN_PASSWORD_LEN
+        ));
+    }
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
+    }
+    let candidate = req.new_password;
+    let hash = match tokio::task::spawn_blocking(move || password::hash_password(&candidate)).await
+    {
+        Ok(Ok(hash)) => hash,
+        Ok(Err(error)) => return bad_request(&error.to_string()),
+        Err(_) => return internal_error(),
+    };
+    if state
+        .db
+        .set_password(&account.username, &hash)
+        .await
+        .is_err()
+    {
+        return internal_error();
+    }
+    let revoked = match user.session_hash.as_ref() {
+        Some(hash) => {
+            state
+                .db
+                .delete_user_sessions_except(user.user_id, hash)
+                .await
+        }
+        None => state.db.delete_user_sessions(user.user_id).await,
+    };
+    let revoked = match revoked {
+        Ok(count) => count,
+        Err(_) => return internal_error(),
+    };
+    state.cred_cache.clear();
+    audit(
+        &state,
+        Some(user.user_id),
+        Some(&user.username),
+        "user.password_change",
+        &user.username,
+        json!({ "sessions_revoked": revoked }),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `GET /api/me/usage` — the caller's own storage usage (for the sidebar).
