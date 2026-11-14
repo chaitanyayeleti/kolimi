@@ -82,14 +82,15 @@ pub(crate) fn SearchResults(
                                 let path = hit.path.clone();
                                 let encrypted = hit.encrypted;
                                 let kind = if is_dir { "dir".to_string() } else { "file".to_string() };
+                                let icon = file_icon(&name, &kind);
                                 view! {
                                     <li class="file">
                                         <button
                                             class="file-open"
                                             on:click=move |_| on_open.run(hit_for_open.clone())
                                         >
-                                            <span class="file-icon">
-                                                <Icon name=file_icon(&name, &kind)/>
+                                            <span class=format!("file-icon {icon}")>
+                                                <Icon name=icon/>
                                             </span>
                                             <span class="file-body">
                                                 <span class="file-name">{name.clone()}</span>
@@ -500,6 +501,7 @@ fn FileTile(
     let is_img = !is_dir && !entry.encrypted && is_image_name(&entry.name);
     let name = entry.name.clone();
     let kind = entry.kind.clone();
+    let icon = file_icon(&name, &kind);
     let meta = file_meta(&entry);
     let preview = entry.path.clone();
     let selected_path = entry.path.clone();
@@ -560,7 +562,13 @@ fn FileTile(
             >
                 <span class=format!(
                     "tile-thumb {}",
-                    if is_dir { "folder" } else { "" },
+                    if is_dir {
+                        "folder"
+                    } else if is_img {
+                        "img"
+                    } else {
+                        icon
+                    },
                 )>
                     {is_img
                         .then(|| {
@@ -578,7 +586,7 @@ fn FileTile(
                         })}
                     {(!is_img)
                         .then(|| {
-                            view! { <Icon name=file_icon(&name, &kind)/> }
+                            view! { <Icon name=icon/> }
                         })}
                 </span>
                 <span class="tile-name">{name.clone()}</span>
@@ -613,6 +621,7 @@ fn FileRow(
     let permission = entry.permission.clone().unwrap_or_default();
     let name = entry.name.clone();
     let kind = entry.kind.clone();
+    let icon = file_icon(&name, &kind);
     let meta = file_meta(&entry);
     let size_label = if is_dir {
         "—".to_string()
@@ -693,7 +702,7 @@ fn FileRow(
                     } else if is_img {
                         "img"
                     } else {
-                        ""
+                        icon
                     },
                 )>
                     {is_img
@@ -708,7 +717,7 @@ fn FileRow(
                         })}
                     {(!is_img)
                         .then(|| {
-                            view! { <Icon name=file_icon(&name, &kind)/> }
+                            view! { <Icon name=icon/> }
                         })}
                 </span>
                 <span class="file-body">

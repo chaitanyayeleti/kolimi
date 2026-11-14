@@ -109,6 +109,48 @@ function relativeTime(ms) {
   return Math.round(seconds / 86400) + "d ago";
 }
 
+function pairKey(value) {
+  return JSON.stringify([
+    value.server,
+    value.username,
+    value.local_dir,
+    value.remote,
+  ]);
+}
+
+function accountKey(value) {
+  return JSON.stringify([value.server, value.username]);
+}
+
+function pairSyncText(ms) {
+  return ms ? "Last synced " + relativeTime(ms) : "Not synced yet";
+}
+
+function latestSync(pairs) {
+  return pairs.reduce((latest, pair) => Math.max(latest, pair.last_synced_at || 0), 0);
+}
+
+function updatePairTimestamps(pairs) {
+  const byKey = new Map((pairs || []).map((pair) => [pairKey(pair), pair]));
+  document.querySelectorAll(".pair[data-pair-key]").forEach((row) => {
+    const info = byKey.get(row.dataset.pairKey);
+    const node = row.querySelector(".pair-sync");
+    if (node) node.textContent = pairSyncText(info && info.last_synced_at);
+  });
+  document.querySelectorAll(".account[data-account-key]").forEach((card) => {
+    const mine = (pairs || []).filter(
+      (pair) =>
+        JSON.stringify([pair.server, pair.username]) === card.dataset.accountKey,
+    );
+    const node = card.querySelector(".account-sync");
+    if (node) {
+      node.textContent = mine.length
+        ? "Last sync " + (relativeTime(latestSync(mine)) || "never")
+        : "";
+    }
+  });
+}
+
 async function refreshSyncStatus() {
   let status;
   try {
@@ -120,6 +162,7 @@ async function refreshSyncStatus() {
   const title = $("sync-title");
   const detail = $("sync-detail");
   const action = $("sync-status-now");
+  const pause = $("sync-pause");
   const labels = {
     idle: "Sync idle",
     syncing: "Syncing…",
@@ -144,13 +187,11 @@ async function refreshSyncStatus() {
         : status.state === "no_account"
           ? ""
           : "warn");
-  action.disabled = status.state === "paused" || status.state === "syncing";
-  action.textContent =
-    status.state === "paused"
-      ? "Paused"
-      : status.state === "syncing"
-        ? "Syncing…"
-        : "Sync now";
+  action.disabled = status.paused || status.state === "syncing";
+  action.textContent = status.state === "syncing" ? "Syncing…" : "Sync now";
+  pause.dataset.paused = status.paused ? "true" : "false";
+  pause.textContent = status.paused ? "Resume" : "Pause";
+  pause.setAttribute("aria-pressed", status.paused ? "true" : "false");
   const errors = $("sync-errors");
   const list = $("sync-error-list");
   if (status.errors && status.errors.length) {
@@ -160,10 +201,19 @@ async function refreshSyncStatus() {
     errors.hidden = true;
     list.replaceChildren();
   }
+  updatePairTimestamps(status.pairs);
 }
 
 function renderPair(account, pair, editable) {
-  const li = el("li", { class: "pair" });
+  const li = el("li", {
+    class: "pair",
+    "data-pair-key": pairKey({
+      server: account.server,
+      username: account.username,
+      local_dir: pair.local_dir,
+      remote: pair.remote,
+    }),
+  });
   let menu;
 
   async function share() {
@@ -273,7 +323,8 @@ function renderPair(account, pair, editable) {
       el("div", { class: "pair-text" },
         el("div", { class: "pair-local" }, pair.local_dir),
         el("div", { class: "pair-remote" }, "→ ", pair.remote),
-        el("div", { class: "chips" }, ...chips)));
+        el("div", { class: "chips" }, ...chips),
+        el("div", { class: "pair-sync" }, pairSyncText(pair.last_synced_at))));
     li.replaceChildren(
       main,
       editable ? el("div", { class: "pair-actions" },
@@ -329,18 +380,23 @@ function renderPair(account, pair, editable) {
 }
 
 function renderAccount(account, status) {
-  const card = el("article", { class: "card account" });
+  const card = el("article", {
+    class: "card account",
+    "data-account-key": accountKey(account),
+  });
   const e2ee = E2EE[status] || E2EE.unknown;
   const initial = (account.username.trim()[0] || "?").toUpperCase();
   const open = account.signed_in
     ? btn("Open", "small ghost", () => invoke("open_account", { server: account.server }).catch((error) => setMsg(String(error), "err")))
     : null;
+  const lastSync = latestSync(account.pairs);
 
   const head = el("header", { class: "account-head" },
     el("span", { class: "avatar", "aria-hidden": "true" }, initial),
     el("div", { class: "account-id" },
       el("h2", { class: "who" }, account.username),
-      el("div", { class: "host" }, account.server)),
+      el("div", { class: "host" }, account.server),
+      el("div", { class: "account-sync" }, lastSync ? "Last sync " + relativeTime(lastSync) : "")),
     el("div", { class: "account-meta" },
       badge(account.signed_in ? "Signed in" : "Signed out", account.signed_in ? "ok" : "muted"),
       badge(e2ee.label, e2ee.kind)));
@@ -771,6 +827,21 @@ $("sync-now").addEventListener("click", () => triggerSync($("sync-now")));
 $("sync-status-now").addEventListener("click", () =>
   triggerSync($("sync-status-now")),
 );
+$("sync-pause").addEventListener("click", async () => {
+  const button = $("sync-pause");
+  button.disabled = true;
+  try {
+    const status = await invoke("set_sync_paused", {
+      paused: button.dataset.paused !== "true",
+    });
+    setMsg(status.paused ? "Syncing paused" : "Syncing resumed", "ok");
+    refreshSyncStatus();
+  } catch (error) {
+    setMsg(String(error), "err");
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $("theme").addEventListener("click", () => {
   applyTheme(currentTheme() === "dark" ? "light" : "dark");

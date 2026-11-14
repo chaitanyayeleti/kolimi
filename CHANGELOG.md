@@ -4,7 +4,7 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.9] - 2026-11-15
 
 ### Changed
 - Web UI polish: file names are left-aligned in list view, grid labels stack
@@ -33,6 +33,21 @@ follow [Semantic Versioning](https://semver.org/).
   status card with last-sync time, conflict counts and expandable error
   details, plus a first-run checklist. Sync failures and conflicts notify
   once per state change instead of every interval.
+- Desktop Accounts & Sync now records and shows a **last-sync timestamp per
+  synced folder**, with an account-level latest time, and has **Pause** /
+  **Resume** controls next to Sync now. Pause state is shared with the tray
+  item, and a pass that is already running finishes without overwriting the
+  paused state.
+- The web and desktop clients now share the same design-token names and
+  values for surfaces, status colours, spacing, type sizes, radii, shadows
+  and focus rings. The web UI gained the missing `--warn-soft` token and a
+  pill-radius token.
+- File rows and tiles use distinct icons and colours for PDFs, documents,
+  spreadsheets, presentations, archives, audio, video, source code, and
+  plain text, instead of a generic document icon.
+- The sign-in page has a responsive split layout: a product panel on wide
+  screens and the same focused card on small screens. Password-change and
+  invite pages keep the centred card.
 
 ## [0.4.8] - 2026-11-14
 

@@ -78,6 +78,18 @@ async function row(page: Page, name: string) {
   return page.locator("li.file", { hasText: name }).first();
 }
 
+test("web login shows the product panel", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto(`${BASE}/app/`);
+  await expect(
+    page.getByText("Your files. Your server. Your keys.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Sign in with a passkey", exact: true }),
+  ).toBeVisible();
+});
+
 test("web settings tabs and the passkeys panel", async ({ page }) => {
   await login(page);
 
@@ -230,6 +242,7 @@ test("web file list sorts, filters, selects, and shows details", async ({
 
   const names = page.locator("main.content li.file .file-name");
   await expect(names).toHaveText(["alpha.txt", "beta.txt"]);
+  await expect(page.locator("main.content li.file .file-icon.text")).toHaveCount(2);
 
   await page.getByRole("button", { name: "Sort descending" }).click();
   await expect(names).toHaveText(["beta.txt", "alpha.txt"]);

@@ -13,6 +13,14 @@ type SyncStatus = {
   conflicts: number;
   errors: string[];
   offline: boolean;
+  paused?: boolean;
+  pairs?: Array<{
+    server: string;
+    username: string;
+    local_dir: string;
+    remote: string;
+    last_synced_at: number | null;
+  }>;
 };
 
 async function loadDesktop(page: Page, status: SyncStatus) {
@@ -33,22 +41,34 @@ async function loadDesktop(page: Page, status: SyncStatus) {
               local_dir: "/home/alice/Kolimi",
               remote: "/",
               encrypted_roots: ["Private"],
+              last_synced_at: now - 120_000,
             },
           ],
         },
       ],
     };
+    const state = {
+      ...mockStatus,
+      synced_at: mockStatus.synced_at ? now + mockStatus.synced_at : null,
+      paused: mockStatus.paused ?? false,
+      pairs: mockStatus.pairs ?? [
+        {
+          server: "https://cloud.example.com",
+          username: "alice",
+          local_dir: "/home/alice/Kolimi",
+          remote: "/",
+          last_synced_at: now - 120_000,
+        },
+      ],
+    };
     (window as any).__TAURI__ = {
       core: {
-        invoke: async (command: string) => {
+        invoke: async (command: string, args?: Record<string, unknown>) => {
           if (command === "get_settings") return settings;
-          if (command === "get_sync_status") {
-            return {
-              ...mockStatus,
-              synced_at: mockStatus.synced_at
-                ? now + mockStatus.synced_at
-                : null,
-            };
+          if (command === "get_sync_status") return state;
+          if (command === "set_sync_paused") {
+            state.paused = Boolean(args?.paused);
+            return state;
           }
           if (command === "e2ee_status") return "unlocked";
           if (
@@ -65,7 +85,7 @@ async function loadDesktop(page: Page, status: SyncStatus) {
   await page.goto(UI);
 }
 
-test("desktop Accounts & Sync shows status and account cards", async ({
+test("desktop Accounts & Sync shows status, timestamps, and pause", async ({
   page,
 }) => {
   await loadDesktop(page, {
@@ -85,6 +105,14 @@ test("desktop Accounts & Sync shows status and account cards", async ({
   await expect(page.getByText("alice", { exact: true })).toBeVisible();
   await expect(page.getByText("/home/alice/Kolimi")).toBeVisible();
   await expect(page.getByText("1 folder", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Last synced 2m ago/)).toBeVisible();
+  await expect(page.getByText(/Last sync 2m ago/)).toBeVisible();
+
+  const pause = page.getByRole("button", { name: "Pause", exact: true });
+  await pause.click();
+  await expect(
+    page.getByRole("button", { name: "Resume", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
 });
 
 test("desktop Accounts & Sync surfaces an offline sync error", async ({

@@ -1,6 +1,6 @@
 # Kolimi Roadmap
 
-Current release: **0.4.8** (2026-11-14). This file is the forward-looking
+Current release: **0.4.9** (2026-11-15). This file is the forward-looking
 backlog and the honest list of limitations. Shipped history lives in
 [CHANGELOG.md](CHANGELOG.md); design details live in [docs/rfc/](docs/rfc/).
 
@@ -17,7 +17,7 @@ backlog and the honest list of limitations. Shipped history lives in
 5. **No speculative platform work.** A plugin host or extra backend is
    added only with a concrete use case.
 
-## Current state (0.4.8)
+## Current state (0.4.9)
 
 | Area | Status |
 | --- | --- |
@@ -35,6 +35,11 @@ ship-blocker for calling group E2EE production-grade.
 
 ## Recently completed
 
+- **0.4.9 — UI depth and desktop status**: Phase 1–4 UI work — URL-backed
+  navigation, a full Settings page, admin tables, sortable file browser,
+  richer file-type icons, a split login layout, shared design tokens, and
+  desktop sync status/offline/pause controls with per-folder timestamps. See
+  the [CHANGELOG](CHANGELOG.md).
 - **0.4.8 — account management**: self-service password/profile/session
   controls and the admin users, invites, groups, and audit pages. See the
   [completed plan](docs/plans/user-management.md) and [CHANGELOG](CHANGELOG.md).
@@ -49,7 +54,7 @@ ship-blocker for calling group E2EE production-grade.
 
 The review package is [`docs/audit/mls-delta.md`](docs/audit/mls-delta.md)
 and is intentionally frozen at the 0.4.3 surface even though the server is
-now 0.4.8. The 89 openmls `cargo-vet` exemptions (724 total) are temporary
+now 0.4.9. The 89 openmls `cargo-vet` exemptions (724 total) are temporary
 and are not audits. Engage an independent reviewer, land only fixes during
 the review, then replace the exemptions with real audit entries. Do not
 describe MLS as audited before this completes.
@@ -75,7 +80,7 @@ describe MLS as audited before this completes.
   pruning (7-day grace, 30-day report freshness); review the thresholds
   with the external auditor.
 - **Deployment validation**: upgrade from 0.4.7 (and older 0.3.x data) to
-  0.4.8 with real data, a restore drill in CI, and a post-upgrade `verify`
+  0.4.9 with real data, a restore drill in CI, and a post-upgrade `verify`
   run.
 
 ### 3. Clients

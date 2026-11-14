@@ -83,9 +83,11 @@ The desktop app loads the server's web UI in a native window and adds the
 tray menu, background sync, and OS keychain storage. Create a local folder
 pair from **Accounts & Sync**. The sidebar **Sync** item and the tray show
 idle, syncing, paused, error, locked, and conflict states; click either to
-open Accounts & Sync. If the server is unreachable, the main window shows an
-offline banner with a Retry action, and the Accounts & Sync status card keeps
-the last error and last successful sync visible.
+open Accounts & Sync. The status card shows the last sync for each folder,
+and **Pause** / **Resume** controls there match the tray item. If the server
+is unreachable, the main window shows an offline banner with a Retry action,
+and the Accounts & Sync status card keeps the last error and last successful
+sync visible.
 
 The `kolimi-sync` CLI mirrors a local directory:
 

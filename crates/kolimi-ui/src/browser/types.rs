@@ -289,10 +289,25 @@ pub(super) fn file_icon(name: &str, kind: &str) -> &'static str {
     if kind == "dir" {
         return "folder";
     }
-    if is_image_name(name) {
-        return "image";
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "avif" | "heic" => "image",
+        "pdf" => "pdf",
+        "doc" | "docx" | "odt" | "rtf" | "pages" | "epub" => "doc",
+        "xls" | "xlsx" | "ods" | "csv" | "tsv" | "numbers" => "sheet",
+        "ppt" | "pptx" | "odp" | "key" => "slides",
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "zst" => "archive",
+        "mp3" | "flac" | "wav" | "ogg" | "m4a" | "aac" | "opus" => "audio",
+        "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" => "video",
+        "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "go" | "java" | "c" | "h" | "cpp" | "hpp"
+        | "css" | "html" | "htm" | "json" | "xml" | "toml" | "yaml" | "yml" | "sh" | "bash"
+        | "zsh" | "sql" | "kt" | "swift" | "rb" | "php" => "code",
+        "txt" | "md" | "markdown" | "log" => "text",
+        _ => "file",
     }
-    "file"
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
@@ -316,6 +331,21 @@ mod wasm_tests {
         assert!(is_text_name("README.MD"));
         assert!(is_text_name("script.rs"));
         assert!(!is_text_name("archive.zip"));
+    }
+
+    #[wasm_bindgen_test]
+    fn file_icons_cover_documents_media_and_archives() {
+        assert_eq!(file_icon("notes.txt", "file"), "text");
+        assert_eq!(file_icon("report.PDF", "file"), "pdf");
+        assert_eq!(file_icon("budget.xlsx", "file"), "sheet");
+        assert_eq!(file_icon("deck.pptx", "file"), "slides");
+        assert_eq!(file_icon("backup.tar.gz", "file"), "archive");
+        assert_eq!(file_icon("song.flac", "file"), "audio");
+        assert_eq!(file_icon("clip.webm", "file"), "video");
+        assert_eq!(file_icon("lib.rs", "file"), "code");
+        assert_eq!(file_icon("photo.JPG", "file"), "image");
+        assert_eq!(file_icon("unknown.bin", "file"), "file");
+        assert_eq!(file_icon("anything.bin", "dir"), "folder");
     }
 
     fn view_entry(

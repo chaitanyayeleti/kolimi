@@ -275,7 +275,7 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
     };
 
     view! {
-        <div class="login-wrap">
+        <div class="login-wrap login-split">
         <button
             class="icon-btn login-theme"
             aria-label="Toggle theme"
@@ -283,6 +283,40 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
         >
             <Icon name="sun"/>
         </button>
+        <aside class="login-brand" aria-label="About Kolimi">
+            <div class="login-wordmark">
+                <span class="brand-logo"><Logo/></span>
+                <span>Kolimi</span>
+            </div>
+            <p class="login-eyebrow">"Self-hosted cloud"</p>
+            <h1>"Your files. Your server. Your keys."</h1>
+            <p class="login-lede">
+                "Kolimi keeps files in sync across your devices without handing them to a third party."
+            </p>
+            <ul class="login-points">
+                <li>
+                    <span class="point-icon"><Icon name="lock"/></span>
+                    <span>
+                        <strong>"End-to-end encryption"</strong>
+                        <small>"Encrypted folders stay unreadable on the server."</small>
+                    </span>
+                </li>
+                <li>
+                    <span class="point-icon"><Icon name="cloud"/></span>
+                    <span>
+                        <strong>"Your infrastructure"</strong>
+                        <small>"Run it on a box you control, with WebDAV access."</small>
+                    </span>
+                </li>
+                <li>
+                    <span class="point-icon"><Icon name="device"/></span>
+                    <span>
+                        <strong>"Every device"</strong>
+                        <small>"A web app, a desktop tray client, and a sync CLI."</small>
+                    </span>
+                </li>
+            </ul>
+        </aside>
         <form class="card login" on:submit=submit>
             <div class="hero">
                 <Logo/>

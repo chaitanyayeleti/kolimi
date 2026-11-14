@@ -248,6 +248,9 @@ struct SyncPair {
     /// Opt in to MLS group shares (write-enabled encrypted shares).
     #[serde(default)]
     mls: bool,
+    /// Last successful sync for this folder (Unix milliseconds).
+    #[serde(default)]
+    last_synced_at: Option<i64>,
 }
 
 fn default_remote() -> String {
@@ -504,6 +507,16 @@ mod keyctl {
 // State + paths
 // ---------------------------------------------------------------------------
 
+/// Per-folder sync state shown in Accounts & Sync and the injected web chip.
+#[derive(Debug, Clone, Serialize)]
+struct PairSyncInfo {
+    server: String,
+    username: String,
+    local_dir: String,
+    remote: String,
+    last_synced_at: Option<i64>,
+}
+
 /// Current sync state, shared by the tray, the Accounts & Sync window and the
 /// status chip injected into the remote web UI.
 #[derive(Debug, Clone, Serialize)]
@@ -514,6 +527,8 @@ struct SyncStatus {
     conflicts: u64,
     errors: Vec<String>,
     offline: bool,
+    paused: bool,
+    pairs: Vec<PairSyncInfo>,
 }
 
 impl Default for SyncStatus {
@@ -525,6 +540,8 @@ impl Default for SyncStatus {
             conflicts: 0,
             errors: Vec::new(),
             offline: false,
+            paused: false,
+            pairs: Vec::new(),
         }
     }
 }
@@ -568,6 +585,7 @@ impl SyncStatus {
 struct DesktopState {
     settings: Mutex<Settings>,
     status_item: MenuItem<tauri::Wry>,
+    pause_item: MenuItem<tauri::Wry>,
     status: Mutex<SyncStatus>,
     syncing: AtomicBool,
     paused: AtomicBool,
@@ -716,6 +734,7 @@ fn migrated_settings(v1: &V1Config) -> Settings {
                 remote: "/".to_string(),
                 encrypted_roots: v1.encrypted_roots.clone(),
                 mls: false,
+                last_synced_at: None,
             }],
         }],
     }
@@ -855,18 +874,40 @@ fn now_ms() -> i64 {
 }
 
 fn current_status(app: &AppHandle) -> SyncStatus {
-    app.state::<DesktopState>()
+    let state = app.state::<DesktopState>();
+    let mut status = state
         .status
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+        .clone();
+    status.paused = state.paused.load(Ordering::SeqCst);
+    status.pairs = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .accounts
+        .iter()
+        .flat_map(|account| {
+            account.pairs.iter().map(|pair| PairSyncInfo {
+                server: account.server.clone(),
+                username: account.username.clone(),
+                local_dir: pair.local_dir.clone(),
+                remote: pair.remote.clone(),
+                last_synced_at: pair.last_synced_at,
+            })
+        })
+        .collect();
+    status
 }
 
 fn push_status_to_main(app: &AppHandle, status: &SyncStatus) {
-    if let Some(window) = app.get_webview_window("main")
-        && let Ok(json) = serde_json::to_string(status)
-    {
-        let _ = window.eval(format!("window.__kolimiDesktopSync = {json};"));
+    if let Some(window) = app.get_webview_window("main") {
+        // The remote server origin must not learn local folder paths.
+        let mut web = status.clone();
+        web.pairs.clear();
+        if let Ok(json) = serde_json::to_string(&web) {
+            let _ = window.eval(format!("window.__kolimiDesktopSync = {json};"));
+        }
     }
 }
 
@@ -876,12 +917,39 @@ fn set_sync_status(app: &AppHandle, status: SyncStatus) {
         *state
             .status
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = status.clone();
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = status;
         state.status_item.clone()
     };
+    let status = current_status(app);
     let _ = status_item.set_text(status.tray_text());
     set_tray_icon(app, status.icon_state());
     push_status_to_main(app, &status);
+}
+
+/// Shared by the tray item and the Accounts & Sync window.
+fn apply_pause(app: &AppHandle, paused: bool) {
+    {
+        let state = app.state::<DesktopState>();
+        state.paused.store(paused, Ordering::SeqCst);
+        let _ = state.pause_item.set_text(if paused {
+            "Resume syncing"
+        } else {
+            "Pause syncing"
+        });
+    }
+    if paused {
+        set_sync_status(
+            app,
+            SyncStatus {
+                state: "paused".to_string(),
+                detail: "Syncing paused".to_string(),
+                paused: true,
+                ..Default::default()
+            },
+        );
+    } else {
+        run_sync(app.clone());
+    }
 }
 
 fn looks_offline(errors: &[String]) -> bool {
@@ -1077,7 +1145,14 @@ fn run_sync(app: AppHandle) {
     }
 
     // Build the sync jobs up front (keychain reads are blocking).
-    let mut jobs: Vec<(String, String, kolimi_sync::SyncConfig)> = Vec::new();
+    let mut jobs: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        kolimi_sync::SyncConfig,
+    )> = Vec::new();
     let mut startup_errors: Vec<String> = Vec::new();
     for account in &settings.accounts {
         // An entry with an empty password means "signed out, passphrase kept".
@@ -1096,8 +1171,11 @@ fn run_sync(app: AppHandle) {
         };
         for pair in &account.pairs {
             jobs.push((
-                short_dir(&pair.local_dir),
+                account.server.clone(),
+                account.username.clone(),
+                pair.local_dir.clone(),
                 pair.remote.clone(),
+                short_dir(&pair.local_dir),
                 pair_sync_config(account, pair, &secrets),
             ));
         }
@@ -1118,18 +1196,43 @@ fn run_sync(app: AppHandle) {
         let (mut pushed, mut pulled, mut conflicts, mut failed) = (0u64, 0u64, 0u64, 0u64);
         let mut errors = startup_errors;
         let mut locked: Vec<String> = Vec::new();
-        for (label, remote, config) in jobs {
+        let mut synced_pairs: Vec<(String, String, String, String, i64)> = Vec::new();
+        for (server, username, local_dir, remote, label, config) in jobs {
             match kolimi_sync::sync_once_rooted(&config, &remote).await {
                 Ok(report) => {
                     pushed += report.pushed;
                     pulled += report.pulled;
                     conflicts += report.conflicts;
                     failed += report.failed;
+                    synced_pairs.push((server, username, local_dir, remote, now_ms()));
                 }
                 // Encryption locked: a state to resolve, not a failure.
                 Err(error) if error.is_locked() => locked.push(label),
                 Err(error) => errors.push(format!("{label}: {error}")),
             }
+        }
+        if !synced_pairs.is_empty() {
+            let state = app_handle.state::<DesktopState>();
+            let mut settings = state
+                .settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (server, username, local_dir, remote, synced_at) in synced_pairs {
+                if let Some(pair) = settings
+                    .accounts
+                    .iter_mut()
+                    .find(|account| account.server == server && account.username == username)
+                    .and_then(|account| {
+                        account
+                            .pairs
+                            .iter_mut()
+                            .find(|pair| pair.local_dir == local_dir && pair.remote == remote)
+                    })
+                {
+                    pair.last_synced_at = Some(synced_at);
+                }
+            }
+            let _ = save_settings_file(&settings);
         }
         // Keep multi-pair accounts consistent: epoch and device files updated
         // in one pair's `.kolimi` are shared with the others.
@@ -1177,6 +1280,31 @@ fn run_sync(app: AppHandle) {
             .state::<DesktopState>()
             .syncing
             .store(false, Ordering::SeqCst);
+        if app_handle
+            .state::<DesktopState>()
+            .paused
+            .load(Ordering::SeqCst)
+        {
+            let offline = looks_offline(&errors);
+            let detail = if errors.is_empty() {
+                "Syncing paused".to_string()
+            } else {
+                format!("Syncing paused · {} folder error(s)", errors.len())
+            };
+            set_sync_status(
+                &app_handle,
+                SyncStatus {
+                    state: "paused".to_string(),
+                    detail,
+                    conflicts,
+                    errors,
+                    offline,
+                    paused: true,
+                    ..Default::default()
+                },
+            );
+            return;
+        }
         if !errors.is_empty() {
             let first = errors.first().cloned().unwrap_or_default();
             let offline = looks_offline(&errors);
@@ -1237,6 +1365,7 @@ fn run_sync(app: AppHandle) {
                     conflicts,
                     errors: Vec::new(),
                     offline: false,
+                    ..Default::default()
                 },
             );
             if !approved.is_empty() {
@@ -1268,6 +1397,7 @@ struct PairView {
     local_dir: String,
     remote: String,
     encrypted_roots: Vec<String>,
+    last_synced_at: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -1293,6 +1423,14 @@ struct SettingsView {
 /// The current sync state for the Accounts & Sync window.
 #[tauri::command]
 fn get_sync_status(app: AppHandle) -> SyncStatus {
+    current_status(&app)
+}
+
+/// Pause or resume background sync from Accounts & Sync (same state as the
+/// tray item).
+#[tauri::command]
+fn set_sync_paused(app: AppHandle, paused: bool) -> SyncStatus {
+    apply_pause(&app, paused);
     current_status(&app)
 }
 
@@ -1331,6 +1469,7 @@ fn get_settings(app: AppHandle) -> SettingsView {
                         local_dir: pair.local_dir.clone(),
                         remote: pair.remote.clone(),
                         encrypted_roots: pair.encrypted_roots.clone(),
+                        last_synced_at: pair.last_synced_at,
                     })
                     .collect(),
             }
@@ -1453,6 +1592,7 @@ fn add_pair(
             remote: normalize_remote(&remote),
             encrypted_roots: normalize_roots(encrypted_roots),
             mls: false,
+            last_synced_at: None,
         });
         settings.clone()
     };
@@ -1538,6 +1678,7 @@ fn update_pair(
         // so the next pass re-baselines instead of deleting local files as
         // "remote deletions".
         if old_remote != pair.remote || old_local != pair.local_dir {
+            pair.last_synced_at = None;
             let _ = std::fs::remove_file(
                 std::path::Path::new(&pair.local_dir).join(".kolimi/state.json"),
             );
@@ -2155,6 +2296,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_sync_status,
+            set_sync_paused,
             sign_in,
             sign_out,
             remove_account,
@@ -2267,29 +2409,8 @@ fn main() {
                     }
                     "sync" => run_sync(app.clone()),
                     "pause" => {
-                        let paused = {
-                            let state = app.state::<DesktopState>();
-                            let paused = !state.paused.load(Ordering::SeqCst);
-                            state.paused.store(paused, Ordering::SeqCst);
-                            paused
-                        };
-                        let _ = pause_item.set_text(if paused {
-                            "Resume syncing"
-                        } else {
-                            "Pause syncing"
-                        });
-                        if paused {
-                            set_sync_status(
-                                app,
-                                SyncStatus {
-                                    state: "paused".to_string(),
-                                    detail: "Syncing paused".to_string(),
-                                    ..Default::default()
-                                },
-                            );
-                        } else {
-                            run_sync(app.clone());
-                        }
+                        let paused = !app.state::<DesktopState>().paused.load(Ordering::SeqCst);
+                        apply_pause(app, paused);
                     }
                     "autostart" => {
                         let enabled = autostart_item.is_checked().unwrap_or(false);
@@ -2319,6 +2440,7 @@ fn main() {
             app.manage(DesktopState {
                 settings: Mutex::new(settings),
                 status_item: status,
+                pause_item,
                 status: Mutex::new(SyncStatus::default()),
                 syncing: AtomicBool::new(false),
                 paused: AtomicBool::new(false),
