@@ -6,10 +6,28 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+- Hardened the internal red-team findings: stored XSS through shared
+  HTML/SVG, E2EE folder downgrade, MLS keyring/roster scoping, CLI encrypted
+  roots not marked server-side, TOTP re-enrollment from a session, and
+  passkey retention through account recovery.
+- Passkey registration/removal and account-keyring replacement now require
+  a short-lived re-authentication proof (password, TOTP/recovery code, or a
+  fresh passkey assertion). Keyring writes also carry an optimistic epoch,
+  so a stale or rolled-back keyring is rejected.
+- Added `--e2ee-prf-stdin` so platform shells can supply the passkey-PRF
+  output without exposing it in the process list.
+- API/CLI recovery now removes passkeys by default; `--keep-passkeys` is an
+  explicit opt-in. `user recover` keeps TOTP clearing unchanged.
+- Browser E2EE tests now cover encrypted uploads, ciphertext at rest,
+  recipient decryption, shared-name decoding, and the passkey re-auth flow.
+
 ### Changed
 - **Removed the duplicate Passkeys sidebar entry**: passkeys and two-factor
   remain in **Settings → Passkeys**. The sidebar no longer shows a second
   entry that opened the same Settings dialog.
+- Changing the E2EE passphrase asks for the account password (or a passkey)
+  because it replaces the account keyring.
 
 ## [0.4.6] - 2026-11-05
 
