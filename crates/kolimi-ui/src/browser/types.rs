@@ -12,6 +12,23 @@ pub(super) enum Tab {
     Admin,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FileSort {
+    Name,
+    Modified,
+    Size,
+    Type,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FileFilter {
+    All,
+    Folders,
+    Files,
+    Encrypted,
+    Shared,
+}
+
 #[derive(Clone, PartialEq)]
 pub(super) struct Entry {
     pub(super) name: String,
@@ -209,6 +226,64 @@ pub(super) fn parse_trash(
         .unwrap_or_default()
 }
 
+fn extension(name: &str) -> String {
+    name.rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn matches_filter(entry: &Entry, filter: FileFilter) -> bool {
+    match filter {
+        FileFilter::All => true,
+        FileFilter::Folders => entry.kind == "dir",
+        FileFilter::Files => entry.kind != "dir",
+        FileFilter::Encrypted => entry.encrypted,
+        FileFilter::Shared => entry.shared,
+    }
+}
+
+/// Applies the list filter and sort. Folders always stay above files; the
+/// direction only reverses the order within each group.
+pub(super) fn view_entries(
+    entries: &[Entry],
+    filter: FileFilter,
+    sort: FileSort,
+    descending: bool,
+) -> Vec<Entry> {
+    let mut visible: Vec<Entry> = entries
+        .iter()
+        .filter(|entry| matches_filter(entry, filter))
+        .cloned()
+        .collect();
+    visible.sort_by(|a, b| {
+        let a_dir = a.kind == "dir";
+        let b_dir = b.kind == "dir";
+        if a_dir != b_dir {
+            return b_dir.cmp(&a_dir);
+        }
+        let order = match sort {
+            FileSort::Name => a
+                .name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.name.cmp(&b.name)),
+            FileSort::Modified => a
+                .modified_at
+                .cmp(&b.modified_at)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+            FileSort::Size => a
+                .size
+                .cmp(&b.size)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+            FileSort::Type => extension(&a.name)
+                .cmp(&extension(&b.name))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+        };
+        if descending { order.reverse() } else { order }
+    });
+    visible
+}
+
 /// The icon used for a file-list entry.
 pub(super) fn file_icon(name: &str, kind: &str) -> &'static str {
     if kind == "dir" {
@@ -241,5 +316,85 @@ mod wasm_tests {
         assert!(is_text_name("README.MD"));
         assert!(is_text_name("script.rs"));
         assert!(!is_text_name("archive.zip"));
+    }
+
+    fn view_entry(
+        name: &str,
+        kind: &str,
+        size: u64,
+        modified_at: i64,
+        encrypted: bool,
+        shared: bool,
+    ) -> Entry {
+        Entry {
+            name: name.to_string(),
+            path: format!("/{name}"),
+            kind: kind.to_string(),
+            size,
+            modified_at,
+            shared,
+            owner: None,
+            permission: None,
+            encrypted,
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn view_entries_filters_and_keeps_folders_first() {
+        let entries = vec![
+            view_entry("b.txt", "file", 20, 2, false, false),
+            view_entry("zeta", "dir", 0, 1, false, false),
+            view_entry("a.txt", "file", 10, 3, false, true),
+            view_entry("alpha", "dir", 0, 1, true, false),
+        ];
+
+        assert_eq!(
+            view_entries(&entries, FileFilter::All, FileSort::Name, false)
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta", "a.txt", "b.txt"]
+        );
+
+        assert_eq!(
+            view_entries(&entries, FileFilter::Folders, FileSort::Name, false)
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+
+        assert_eq!(
+            view_entries(&entries, FileFilter::Encrypted, FileSort::Name, false)
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha"]
+        );
+
+        assert_eq!(
+            view_entries(&entries, FileFilter::Shared, FileSort::Size, true)
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a.txt"]
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn view_entries_reverses_only_within_folder_and_file_groups() {
+        let entries = vec![
+            view_entry("small.txt", "file", 1, 1, false, false),
+            view_entry("large.txt", "file", 99, 1, false, false),
+            view_entry("alpha", "dir", 0, 1, false, false),
+            view_entry("zeta", "dir", 0, 1, false, false),
+        ];
+        assert_eq!(
+            view_entries(&entries, FileFilter::All, FileSort::Size, true)
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["zeta", "alpha", "large.txt", "small.txt"]
+        );
     }
 }

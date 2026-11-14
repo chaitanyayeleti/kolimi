@@ -15,8 +15,8 @@ use self::search::{encrypted_name_hits, received_mounts};
 use self::sharing::SharingContext;
 use self::shell::{Sidebar, Topbar};
 use self::types::{
-    Entry, SearchHit, Tab, TrashItem, UploadItem, is_image_name, is_text_name, parent_of,
-    parse_entries, parse_results, parse_trash,
+    Entry, FileFilter, FileSort, SearchHit, Tab, TrashItem, UploadItem, is_image_name,
+    is_text_name, parent_of, parse_entries, parse_results, parse_trash,
 };
 use self::uploads::UploadContext;
 use crate::api;
@@ -50,11 +50,40 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let query = RwSignal::new(String::new());
     let results = RwSignal::new(Vec::<SearchHit>::new());
     let search_active = RwSignal::new(false);
+    let search_shortcut =
+        window_event_listener(ev::keydown, move |event: web_sys::KeyboardEvent| {
+            if !(event.ctrl_key() || event.meta_key()) || !event.key().eq_ignore_ascii_case("k") {
+                return;
+            }
+            let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+                return;
+            };
+            if document
+                .query_selector("[role='dialog']")
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                return;
+            }
+            if let Some(input) = document
+                .get_element_by_id("file-search")
+                .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
+            {
+                event.prevent_default();
+                let _ = input.focus();
+            }
+        });
+    on_cleanup(move || search_shortcut.remove());
     let settings_tab = RwSignal::new(SettingsTab::Account);
     let is_admin = RwSignal::new(false);
     let username = RwSignal::new(String::new());
     let nav_open = RwSignal::new(false);
     let grid = RwSignal::new(false);
+    let sort = RwSignal::new(FileSort::Name);
+    let sort_desc = RwSignal::new(false);
+    let filter = RwSignal::new(FileFilter::All);
+    let details_for = RwSignal::new(Option::<Entry>::None);
     let dragging = RwSignal::new(false);
     let e2ee_master = RwSignal::new(Option::<MasterKey>::None);
     let open_settings = Callback::new(move |settings: SettingsTab| {
@@ -445,6 +474,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let ctx_rename = file_actions.rename;
     let ctx_delete = file_actions.delete;
     let ctx_versions = Callback::new(move |entry: Entry| versions_for.set(Some(entry)));
+    let ctx_details = Callback::new(move |entry: Entry| details_for.set(Some(entry)));
     let file_toggle_select = file_actions.toggle_select;
     let file_move_into = file_actions.move_into;
     let sharing_ctx = SharingContext {
@@ -651,6 +681,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                             master=e2ee_master
                             entries=entries
                             grid=grid
+                            sort=sort
+                            sort_desc=sort_desc
+                            filter=filter
                             selected=selected
                             move_drag=move_drag
                             context_menu=context_menu
@@ -662,9 +695,6 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                             on_toggle_select=file_toggle_select
                             on_move_into=file_move_into
                             on_decrypt=ctx_decrypt
-                            on_share=ctx_share
-                            on_rename=ctx_rename
-                            on_delete=ctx_delete
                             on_unlock=open_encryption
                         />
                     }
@@ -714,6 +744,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 on_rename=ctx_rename
                 on_delete=ctx_delete
                 on_versions=ctx_versions
+                on_details=ctx_details
                 on_toggle_encryption=ctx_toggle_encryption
             />
             <Lightbox
@@ -729,10 +760,15 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 vault_setup=vault_setup
                 share_target=share_target
                 versions_for=versions_for
+                details_for=details_for
                 master_signal=e2ee_master
                 current_path=path
                 notice=notice
                 on_load=file_load
+                on_decrypt=ctx_decrypt
+                on_share=ctx_share
+                on_rename=ctx_rename
+                on_delete=ctx_delete
             />
         </div>
     }

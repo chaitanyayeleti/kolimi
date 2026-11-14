@@ -5,9 +5,34 @@ use leptos::ev;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use super::types::{Entry, SearchHit, TrashItem, file_icon, is_image_name};
-use crate::app::{encode, encode_path, human_size, relative_time};
+use super::types::{
+    Entry, FileFilter, FileSort, SearchHit, TrashItem, file_icon, is_image_name, view_entries,
+};
+use crate::app::{encode, encode_path, human_size, plural, relative_time};
 use crate::components::{EmptyState, Icon};
+
+/// Keeps a context menu inside the viewport. The menu is roughly 320px tall
+/// and 240px wide; opening near the bottom edge must flip it upward enough to
+/// remain clickable.
+fn clamp_menu_position(x: i32, y: i32) -> (i32, i32) {
+    let Some(window) = web_sys::window() else {
+        return (x.max(8), y.max(8));
+    };
+    let width = window
+        .inner_width()
+        .ok()
+        .and_then(|value| value.as_f64())
+        .unwrap_or(1280.0) as i32;
+    let height = window
+        .inner_height()
+        .ok()
+        .and_then(|value| value.as_f64())
+        .unwrap_or(800.0) as i32;
+    (
+        x.clamp(8, (width - 240).max(8)),
+        y.clamp(8, (height - 340).max(8)),
+    )
+}
 
 /// Opens the topbar's file picker from an empty-state action.
 fn open_upload_picker() {
@@ -144,6 +169,9 @@ pub(crate) fn FileArea(
     master: RwSignal<Option<MasterKey>>,
     entries: RwSignal<Vec<Entry>>,
     grid: RwSignal<bool>,
+    sort: RwSignal<FileSort>,
+    sort_desc: RwSignal<bool>,
+    filter: RwSignal<FileFilter>,
     selected: RwSignal<std::collections::HashSet<String>>,
     move_drag: RwSignal<Option<Entry>>,
     context_menu: RwSignal<Option<(Entry, i32, i32)>>,
@@ -155,12 +183,18 @@ pub(crate) fn FileArea(
     on_toggle_select: Callback<String>,
     on_move_into: Callback<(Entry, String)>,
     on_decrypt: Callback<Entry>,
-    on_share: Callback<Entry>,
-    on_rename: Callback<Entry>,
-    on_delete: Callback<Entry>,
     on_unlock: Callback<()>,
 ) -> impl IntoView {
     let e2ee_master = master;
+    let visible =
+        Memo::new(move |_| view_entries(&entries.get(), filter.get(), sort.get(), sort_desc.get()));
+    let all_selected = Memo::new(move |_| {
+        let paths = visible.get();
+        !paths.is_empty()
+            && paths
+                .iter()
+                .all(|entry| selected.get().contains(&entry.path))
+    });
     view! {
         {move || {
             parent
@@ -233,62 +267,182 @@ pub(crate) fn FileArea(
                 }
                     .into_any();
             }
-            if grid.get() {
-                view! {
-                    <div class="grid">
-                        <For
-                            each=move || entries.get()
-                            key=|entry| entry.path.clone()
-                            children=move |entry| {
-                                view! {
-                                    <FileTile
-                                        entry=entry
-                                        selected=selected
-                                        move_drag=move_drag
-                                        context_menu=context_menu
-                                        lightbox=lightbox
-                                        on_open=on_open
-                                        on_toggle_select=on_toggle_select
-                                        on_move_into=on_move_into
-                                        on_decrypt=on_decrypt
-                                        on_share=on_share
-                                        on_rename=on_rename
-                                        on_delete=on_delete
-                                    />
-                                }
-                            }
-                        />
-                    </div>
+            if visible.get().is_empty() {
+                return view! {
+                    <EmptyState
+                        icon="search"
+                        title="No files match this filter"
+                        hint="Clear the filter to see everything in this folder."
+                        action_label="Clear filter"
+                        on_action=Callback::new(move |_| filter.set(FileFilter::All))
+                    />
                 }
-                    .into_any()
-            } else {
-                view! {
-                    <ul class="files">
-                        <For
-                            each=move || entries.get()
-                            key=|entry| entry.path.clone()
-                            children=move |entry| {
-                                view! {
-                                    <FileRow
-                                        entry=entry
-                                        selected=selected
-                                        move_drag=move_drag
-                                        context_menu=context_menu
-                                        on_open=on_open
-                                        on_toggle_select=on_toggle_select
-                                        on_move_into=on_move_into
-                                        on_decrypt=on_decrypt
-                                        on_share=on_share
-                                        on_rename=on_rename
-                                        on_delete=on_delete
-                                    />
-                                }
-                            }
-                        />
-                    </ul>
-                }
-                    .into_any()
+                    .into_any();
             }
+
+            let count_label = move || {
+                let shown = visible.get().len();
+                let total = entries.get().len();
+                if shown == total {
+                    plural(shown, "item", "items")
+                } else {
+                    format!("{shown} of {}", plural(total, "item", "items"))
+                }
+            };
+            view! {
+                <div class="file-toolbar">
+                    <span class="file-count">{count_label}</span>
+                    <div class="file-toolbar-controls">
+                        <select
+                            aria-label="Filter files"
+                            prop:value=move || match filter.get() {
+                                FileFilter::All => "all",
+                                FileFilter::Folders => "folders",
+                                FileFilter::Files => "files",
+                                FileFilter::Encrypted => "encrypted",
+                                FileFilter::Shared => "shared",
+                            }
+                            on:change=move |ev| {
+                                filter.set(match event_target_value(&ev).as_str() {
+                                    "folders" => FileFilter::Folders,
+                                    "files" => FileFilter::Files,
+                                    "encrypted" => FileFilter::Encrypted,
+                                    "shared" => FileFilter::Shared,
+                                    _ => FileFilter::All,
+                                });
+                                selected.set(std::collections::HashSet::new());
+                            }
+                        >
+                            <option value="all">"All items"</option>
+                            <option value="folders">"Folders"</option>
+                            <option value="files">"Files"</option>
+                            <option value="encrypted">"Encrypted"</option>
+                            <option value="shared">"Shared with me"</option>
+                        </select>
+                        <select
+                            aria-label="Sort files"
+                            prop:value=move || match sort.get() {
+                                FileSort::Name => "name",
+                                FileSort::Modified => "modified",
+                                FileSort::Size => "size",
+                                FileSort::Type => "type",
+                            }
+                            on:change=move |ev| {
+                                sort.set(match event_target_value(&ev).as_str() {
+                                    "modified" => FileSort::Modified,
+                                    "size" => FileSort::Size,
+                                    "type" => FileSort::Type,
+                                    _ => FileSort::Name,
+                                });
+                            }
+                        >
+                            <option value="name">"Name"</option>
+                            <option value="modified">"Modified"</option>
+                            <option value="size">"Size"</option>
+                            <option value="type">"Type"</option>
+                        </select>
+                        <button
+                            class="icon-btn"
+                            aria-label=move || {
+                                if sort_desc.get() {
+                                    "Sort ascending"
+                                } else {
+                                    "Sort descending"
+                                }
+                            }
+                            title=move || {
+                                if sort_desc.get() {
+                                    "Sort ascending"
+                                } else {
+                                    "Sort descending"
+                                }
+                            }
+                            on:click=move |_| sort_desc.update(|value| *value = !*value)
+                        >
+                            {move || if sort_desc.get() { "↓" } else { "↑" }}
+                        </button>
+                    </div>
+                </div>
+
+                {move || {
+                    if grid.get() {
+                        view! {
+                            <div class="grid">
+                                <For
+                                    each=move || visible.get()
+                                    key=|entry| entry.path.clone()
+                                    children=move |entry| {
+                                        view! {
+                                            <FileTile
+                                                entry=entry
+                                                selected=selected
+                                                move_drag=move_drag
+                                                context_menu=context_menu
+                                                lightbox=lightbox
+                                                on_open=on_open
+                                                on_toggle_select=on_toggle_select
+                                                on_move_into=on_move_into
+                                                on_decrypt=on_decrypt
+                                            />
+                                        }
+                                    }
+                                />
+                            </div>
+                        }
+                            .into_any()
+                    } else {
+                        view! {
+                            <div class="file-list-head">
+                                <input
+                                    type="checkbox"
+                                    class="file-check"
+                                    aria-label="Select all"
+                                    prop:checked=move || all_selected.get()
+                                    on:change=move |_| {
+                                        if all_selected.get_untracked() {
+                                            selected.set(std::collections::HashSet::new());
+                                        } else {
+                                            selected.set(
+                                                visible
+                                                    .get_untracked()
+                                                    .into_iter()
+                                                    .map(|entry| entry.path)
+                                                    .collect(),
+                                            );
+                                        }
+                                    }
+                                />
+                                <span>"Name"</span>
+                                <span class="col-size">"Size"</span>
+                                <span class="col-time">"Modified"</span>
+                                <span></span>
+                            </div>
+                            <ul class="files">
+                                <For
+                                    each=move || visible.get()
+                                    key=|entry| entry.path.clone()
+                                    children=move |entry| {
+                                        view! {
+                                            <FileRow
+                                                entry=entry
+                                                selected=selected
+                                                move_drag=move_drag
+                                                context_menu=context_menu
+                                                on_open=on_open
+                                                on_toggle_select=on_toggle_select
+                                                on_move_into=on_move_into
+                                                on_decrypt=on_decrypt
+                                            />
+                                        }
+                                    }
+                                />
+                            </ul>
+                        }
+                            .into_any()
+                    }
+                }}
+            }
+                .into_any()
         }}
     }
 }
@@ -341,9 +495,6 @@ fn FileTile(
     on_toggle_select: Callback<String>,
     on_move_into: Callback<(Entry, String)>,
     on_decrypt: Callback<Entry>,
-    on_share: Callback<Entry>,
-    on_rename: Callback<Entry>,
-    on_delete: Callback<Entry>,
 ) -> impl IntoView {
     let is_dir = entry.kind == "dir";
     let is_img = !is_dir && !entry.encrypted && is_image_name(&entry.name);
@@ -352,6 +503,9 @@ fn FileTile(
     let meta = file_meta(&entry);
     let preview = entry.path.clone();
     let selected_path = entry.path.clone();
+    let check_path = entry.path.clone();
+    let check_path_for_checked = entry.path.clone();
+    let select_label = format!("Select {name}");
     let open_entry = entry.clone();
     let drag_copy = entry.clone();
     let ctx_copy = entry.clone();
@@ -369,8 +523,8 @@ fn FileTile(
             }
             on:contextmenu=move |ev: ev::MouseEvent| {
                 ev.prevent_default();
-                context_menu
-                    .set(Some((ctx_copy.clone(), ev.client_x(), ev.client_y())));
+                let (x, y) = clamp_menu_position(ev.client_x(), ev.client_y());
+                context_menu.set(Some((ctx_copy.clone(), x, y)));
             }
             on:dragover=move |ev: ev::DragEvent| {
                 if is_dir {
@@ -387,6 +541,13 @@ fn FileTile(
                 }
             }
         >
+            <input
+                type="checkbox"
+                class="tile-check"
+                aria-label=select_label
+                prop:checked=move || selected.get().contains(&check_path_for_checked)
+                on:change=move |_| on_toggle_select.run(check_path.clone())
+            />
             <button
                 class="tile-open"
                 on:click=move |ev: ev::MouseEvent| {
@@ -426,10 +587,8 @@ fn FileTile(
             <div class="tile-actions">
                 <FileActions
                     entry=actions_entry
+                    context_menu=context_menu
                     on_decrypt=on_decrypt
-                    on_share=on_share
-                    on_rename=on_rename
-                    on_delete=on_delete
                 />
             </div>
         </div>
@@ -446,9 +605,6 @@ fn FileRow(
     on_toggle_select: Callback<String>,
     on_move_into: Callback<(Entry, String)>,
     on_decrypt: Callback<Entry>,
-    on_share: Callback<Entry>,
-    on_rename: Callback<Entry>,
-    on_delete: Callback<Entry>,
 ) -> impl IntoView {
     let is_dir = entry.kind == "dir";
     let is_img = !is_dir && !entry.encrypted && is_image_name(&entry.name);
@@ -458,8 +614,27 @@ fn FileRow(
     let name = entry.name.clone();
     let kind = entry.kind.clone();
     let meta = file_meta(&entry);
+    let size_label = if is_dir {
+        "—".to_string()
+    } else if entry.encrypted {
+        "Encrypted".to_string()
+    } else {
+        human_size(entry.size)
+    };
+    let time_label = {
+        let label = relative_time(entry.modified_at);
+        if label.is_empty() {
+            "—".to_string()
+        } else {
+            label
+        }
+    };
     let preview = entry.path.clone();
     let selected_path = entry.path.clone();
+    let check_path = entry.path.clone();
+    let check_path_for_checked = entry.path.clone();
+    let select_label = format!("Select {name}");
+    let shared_title = format!("shared by {owner} ({permission})");
     let open_entry = entry.clone();
     let drag_copy = entry.clone();
     let ctx_copy = entry.clone();
@@ -476,8 +651,8 @@ fn FileRow(
             }
             on:contextmenu=move |ev: ev::MouseEvent| {
                 ev.prevent_default();
-                context_menu
-                    .set(Some((ctx_copy.clone(), ev.client_x(), ev.client_y())));
+                let (x, y) = clamp_menu_position(ev.client_x(), ev.client_y());
+                context_menu.set(Some((ctx_copy.clone(), x, y)));
             }
             on:dragover=move |ev: ev::DragEvent| {
                 if is_dir {
@@ -494,6 +669,13 @@ fn FileRow(
                 }
             }
         >
+            <input
+                type="checkbox"
+                class="file-check"
+                aria-label=select_label
+                prop:checked=move || selected.get().contains(&check_path_for_checked)
+                on:change=move |_| on_toggle_select.run(check_path.clone())
+            />
             <button
                 class="file-open"
                 on:click=move |ev: ev::MouseEvent| {
@@ -531,26 +713,29 @@ fn FileRow(
                 </span>
                 <span class="file-body">
                     <span class="file-name">{name.clone()}</span>
-                    <span class="file-meta">
-                        {meta}
+                    <span class="file-badges">
+                        {entry
+                            .encrypted
+                            .then(|| view! { <span class="badge">"encrypted"</span> })}
                         {shared
                             .then(|| {
                                 view! {
-                                    <span class="badge">
-                                        {format!("shared by {owner} ({permission})")}
+                                    <span class="badge" title=shared_title.clone()>
+                                        "shared"
                                     </span>
                                 }
                             })}
                     </span>
+                    <span class="file-meta file-meta-mobile">{meta}</span>
                 </span>
             </button>
+            <span class="file-size">{size_label}</span>
+            <span class="file-time">{time_label}</span>
             <span class="file-actions">
                 <FileActions
                     entry=actions_entry
+                    context_menu=context_menu
                     on_decrypt=on_decrypt
-                    on_share=on_share
-                    on_rename=on_rename
-                    on_delete=on_delete
                 />
             </span>
         </li>
@@ -560,21 +745,14 @@ fn FileRow(
 #[component]
 fn FileActions(
     entry: Entry,
+    context_menu: RwSignal<Option<(Entry, i32, i32)>>,
     on_decrypt: Callback<Entry>,
-    on_share: Callback<Entry>,
-    on_rename: Callback<Entry>,
-    on_delete: Callback<Entry>,
 ) -> impl IntoView {
     let is_dir = entry.kind == "dir";
-    let shared = entry.shared;
-    // Rename/Delete need ownership or a "write" share; Share stays owner-only.
-    let can_edit = !shared || entry.permission.as_deref() == Some("write");
     let encrypted = entry.encrypted;
     let download = entry.path.clone();
     let decrypt_copy = entry.clone();
-    let share_copy = entry.clone();
-    let rename_copy = entry.clone();
-    let delete_copy = entry.clone();
+    let menu_entry = entry.clone();
     view! {
         {(!is_dir)
             .then(|| {
@@ -605,40 +783,26 @@ fn FileActions(
                         .into_any()
                 }
             })}
-        {can_edit
-            .then(|| {
-                view! {
-                    {(!shared)
-                        .then(|| {
-                            view! {
-                                <button
-                                    class="icon-btn"
-                                    title="Share"
-                                    aria-label="Share"
-                                    on:click=move |_| on_share.run(share_copy.clone())
-                                >
-                                    <Icon name="share"/>
-                                </button>
-                            }
-                        })}
-                    <button
-                        class="icon-btn"
-                        title="Rename"
-                        aria-label="Rename"
-                        on:click=move |_| on_rename.run(rename_copy.clone())
-                    >
-                        <Icon name="edit"/>
-                    </button>
-                    <button
-                        class="icon-btn"
-                        title="Delete"
-                        aria-label="Delete"
-                        on:click=move |_| on_delete.run(delete_copy.clone())
-                    >
-                        <Icon name="trash"/>
-                    </button>
-                }
-            })}
+        <button
+            class="icon-btn"
+            title="Actions"
+            aria-label="Actions"
+            on:click=move |ev: ev::MouseEvent| {
+                ev.stop_propagation();
+                let (x, y) = ev
+                    .current_target()
+                    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                    .map(|element| {
+                        let rect = element.get_bounding_client_rect();
+                        (rect.right() as i32, rect.bottom() as i32)
+                    })
+                    .unwrap_or_else(|| (ev.client_x(), ev.client_y()));
+                let (x, y) = clamp_menu_position(x, y);
+                context_menu.set(Some((menu_entry.clone(), x, y)));
+            }
+        >
+            <Icon name="dots"/>
+        </button>
     }
 }
 

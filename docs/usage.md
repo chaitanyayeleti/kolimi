@@ -44,7 +44,12 @@ encryption passphrase; see [operations.md](operations.md#account-recovery).
 ## Files and folders
 
 - Upload with the toolbar or by dropping files into the window.
-- Use **New folder**, the list/grid toggle, and search to navigate.
+- Use **New folder**, the list/grid toggle, and search to navigate. The
+  **Filter files** and **Sort files** controls keep folders first and let you
+  narrow the list to folders, files, encrypted items, or received shares.
+- Tick row checkboxes for multi-select, then use the bulk bar to download,
+  move, or trash the selection. Each row’s **Actions** menu has details,
+  sharing, rename, versions, and delete.
 - Right-click a file or folder (or use its action buttons) to rename,
   download, share, delete, or open its version history.
 - Deleted items go to **Trash** and can be restored or purged.

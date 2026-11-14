@@ -186,6 +186,7 @@ pub(crate) fn ContextMenu(
     on_rename: Callback<Entry>,
     on_delete: Callback<Entry>,
     on_versions: Callback<Entry>,
+    on_details: Callback<Entry>,
     on_toggle_encryption: Callback<Entry>,
 ) -> impl IntoView {
     let context_menu = menu;
@@ -207,6 +208,7 @@ pub(crate) fn ContextMenu(
                         let rename_e = entry.clone();
                         let delete_e = entry.clone();
                         let versions_e = entry.clone();
+                        let details_e = entry.clone();
                         let encrypt_e = entry.clone();
                         // Only top-level folders own their flag; nested
                         // folders inherit their parent's policy.
@@ -278,6 +280,16 @@ pub(crate) fn ContextMenu(
                                 >
                                     <Icon name="link"/>
                                     "Copy path"
+                                </button>
+                                <button
+                                    class="ctx-item"
+                                    on:click=move |_| {
+                                        context_menu.set(None);
+                                        on_details.run(details_e.clone());
+                                    }
+                                >
+                                    <Icon name="info"/>
+                                    "Details"
                                 </button>
                                 {ctx_edit
                                     .then(|| {

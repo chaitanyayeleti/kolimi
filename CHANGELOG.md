@@ -22,6 +22,11 @@ follow [Semantic Versioning](https://semver.org/).
   status and usage pills, quota bars, last-seen times, and expandable audit
   details. User details open in a right-side drawer. Invites show
   active/expiring/expired status, and group membership renders as chips.
+- The file browser now has a dense sortable/filterable list with column
+  headers, size and modified columns, visible selection checkboxes,
+  select-all, and a single per-row actions menu. Folders stay above files.
+  **Ctrl/Cmd+K** focuses search, and the context menu offers a file-details
+  drawer with quick actions.
 
 ## [0.4.8] - 2026-11-14
 

@@ -203,6 +203,56 @@ test("web empty folder offers upload and new folder actions", async ({
   await request.delete(`${BASE}/dav/empty-phase0`, { headers: AUTH });
 });
 
+test("web file list sorts, filters, selects, and shows details", async ({
+  page,
+  request,
+}) => {
+  await login(page);
+  await page.keyboard.press("Control+k");
+  await expect(
+    page.getByLabel("Search files", { exact: true }),
+  ).toBeFocused();
+
+  const folder = `phase1-${Date.now()}`;
+
+  page.once("dialog", (dialog) => dialog.accept(folder));
+  await page
+    .locator(".topbar")
+    .getByRole("button", { name: "New folder", exact: true })
+    .click();
+  await (await row(page, folder)).locator(".file-open").click();
+
+  await upload(page, "alpha.txt", "alpha");
+  await upload(page, "beta.txt", "beta");
+
+  const names = page.locator("main.content li.file .file-name");
+  await expect(names).toHaveText(["alpha.txt", "beta.txt"]);
+
+  await page.getByRole("button", { name: "Sort descending" }).click();
+  await expect(names).toHaveText(["beta.txt", "alpha.txt"]);
+
+  await page.getByLabel("Filter files").selectOption("folders");
+  await expect(page.getByText("No files match this filter")).toBeVisible();
+  await page.getByRole("button", { name: "Clear filter" }).click();
+  await expect(names).toHaveText(["beta.txt", "alpha.txt"]);
+
+  await page.locator("main.content li.file .file-check").nth(0).check();
+  await page.locator("main.content li.file .file-check").nth(1).check();
+  await expect(page.getByText("2 selected", { exact: true })).toBeVisible();
+
+  await (await row(page, "alpha.txt"))
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Details", exact: true }).click();
+  const details = page.getByRole("dialog", { name: /^Details/ });
+  await expect(details).toBeVisible();
+  await expect(details.getByText("alpha.txt", { exact: true })).toBeVisible();
+  await details.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(details).toHaveCount(0);
+
+  await request.delete(`${BASE}/dav/${folder}`, { headers: AUTH });
+});
+
 test("web admin page lists and inspects users", async ({ page }) => {
   await login(page);
   await page.getByRole("button", { name: "Admin", exact: true }).click();
@@ -467,12 +517,18 @@ test("web rename and delete", async ({ page }) => {
   const renamed = `browser-renamed-${Date.now()}.txt`;
   await upload(page, original);
 
+  await (await row(page, original))
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
   page.once("dialog", (dialog) => dialog.accept(renamed));
-  await (await row(page, original)).getByTitle("Rename").click();
+  await page.getByRole("button", { name: "Rename", exact: true }).click();
   await expect(page.getByText(renamed, { exact: true }).first()).toBeVisible();
 
+  await (await row(page, renamed))
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
   page.once("dialog", (dialog) => dialog.accept());
-  await (await row(page, renamed)).getByTitle("Delete").click();
+  await page.getByRole("button", { name: "Move to trash", exact: true }).click();
   await expect(page.getByText(renamed, { exact: true })).toHaveCount(0);
 });
 
@@ -481,7 +537,10 @@ test("web share and revoke", async ({ page }) => {
   const name = `browser-share-${Date.now()}.txt`;
   await upload(page, name);
 
-  await (await row(page, name)).getByTitle("Share").click();
+  await (await row(page, name))
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Share", exact: true }).click();
   const modal = page.locator(".modal");
   await expect(modal.getByRole("heading", { name: /^Share/ })).toBeVisible();
   await modal

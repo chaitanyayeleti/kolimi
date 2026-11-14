@@ -280,6 +280,7 @@ pub(crate) fn Topbar(
                         <form class="search" on:submit=move |ev| on_search_submit.run(ev)>
                             <Icon name="search"/>
                             <input
+                                id="file-search"
                                 type="search"
                                 aria-label="Search files"
                                 placeholder="Search files…"
