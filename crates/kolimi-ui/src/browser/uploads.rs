@@ -7,7 +7,7 @@ use wasm_bindgen::JsCast;
 
 use super::types::{UploadItem, UploadStatus};
 use crate::api;
-use crate::app::encode_path;
+use crate::app::{encode_path, plural};
 
 /// Signals and callbacks shared by the upload actions.
 #[derive(Clone, Copy)]
@@ -79,10 +79,7 @@ pub(super) fn start_upload(
                     .filter(|item| item.status.get_untracked() == UploadStatus::Failed)
                     .count();
                 if failed == 0 {
-                    notice.set(format!(
-                        "Uploaded {done} file{}",
-                        if done == 1 { "" } else { "s" }
-                    ));
+                    notice.set(format!("Uploaded {}", plural(done, "file", "files")));
                 } else {
                     error.set(format!("Uploaded {done}, {failed} failed"));
                 }

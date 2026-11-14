@@ -75,6 +75,11 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Formats a count with the matching singular or plural noun.
+pub(crate) fn plural(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
 /// The Kolimi brand mark: a gradient tile with a cloud. Matches the app/tray
 /// icons (`assets/branding/logo.svg`).
 fn logo_svg() -> String {

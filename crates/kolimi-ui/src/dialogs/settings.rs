@@ -7,6 +7,7 @@ use super::account::AccountPanel;
 use super::enrollment::EnrollmentPanel;
 use super::passkeys::PasskeysPanel;
 use crate::api;
+use crate::app::plural;
 use crate::components::{ErrorText, Icon, MlsDevicesPanel, Modal, Notice};
 
 /// Sections shown inside the Settings dialog.
@@ -75,9 +76,10 @@ pub(crate) fn SettingsDialog(
                 Ok(paths) if paths.is_empty() => {
                     notice.set("No encrypted folder shares needed migration.".to_string())
                 }
-                Ok(paths) => {
-                    notice.set(format!("Upgraded {} folder share(s) to MLS.", paths.len()))
-                }
+                Ok(paths) => notice.set(format!(
+                    "Upgraded {} to MLS.",
+                    plural(paths.len(), "folder share", "folder shares")
+                )),
                 Err(e) => error.set(e),
             }
             migrating.set(false);
@@ -251,7 +253,10 @@ pub(crate) fn SettingsDialog(
                     // The old paths are gone; reload so the list rebuilds
                     // from the renamed tree (the unlocked key survives in
                     // sessionStorage).
-                    notice.set(format!("Renamed {count} item(s) — reloading…"));
+                    notice.set(format!(
+                        "Renamed {} — reloading…",
+                        plural(count, "item", "items")
+                    ));
                     if let Some(window) = web_sys::window() {
                         let _ = window.location().reload();
                     }
@@ -312,9 +317,9 @@ pub(crate) fn SettingsDialog(
                 }
                 Ok(report) => {
                     notice.set(format!(
-                        "Removed {} MLS leaf/leaves from {} share(s): {}",
-                        report.leaves,
-                        report.groups.len(),
+                        "Removed {} from {}: {}",
+                        plural(report.leaves, "MLS leaf", "MLS leaves"),
+                        plural(report.groups.len(), "share", "shares"),
                         report.groups.join(", ")
                     ));
                 }
@@ -330,6 +335,7 @@ pub(crate) fn SettingsDialog(
             <div class="segmented settings-tabs" role="tablist">
                 <button
                     role="tab"
+                    aria-selected=move || tab.get() == SettingsTab::Account
                     class:active=move || tab.get() == SettingsTab::Account
                     on:click=move |_| tab.set(SettingsTab::Account)
                 >
@@ -337,6 +343,7 @@ pub(crate) fn SettingsDialog(
                 </button>
                 <button
                     role="tab"
+                    aria-selected=move || tab.get() == SettingsTab::Encryption
                     class:active=move || tab.get() == SettingsTab::Encryption
                     on:click=move |_| tab.set(SettingsTab::Encryption)
                 >
@@ -344,6 +351,7 @@ pub(crate) fn SettingsDialog(
                 </button>
                 <button
                     role="tab"
+                    aria-selected=move || tab.get() == SettingsTab::Sharing
                     class:active=move || tab.get() == SettingsTab::Sharing
                     on:click=move |_| tab.set(SettingsTab::Sharing)
                 >
@@ -351,6 +359,7 @@ pub(crate) fn SettingsDialog(
                 </button>
                 <button
                     role="tab"
+                    aria-selected=move || tab.get() == SettingsTab::Devices
                     class:active=move || tab.get() == SettingsTab::Devices
                     on:click=move |_| tab.set(SettingsTab::Devices)
                 >
@@ -358,6 +367,7 @@ pub(crate) fn SettingsDialog(
                 </button>
                 <button
                     role="tab"
+                    aria-selected=move || tab.get() == SettingsTab::Passkeys
                     class:active=move || tab.get() == SettingsTab::Passkeys
                     on:click=move |_| tab.set(SettingsTab::Passkeys)
                 >

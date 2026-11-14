@@ -3,6 +3,7 @@ use leptos::task::spawn_local;
 use serde_json::{Value, json};
 
 use crate::api;
+use crate::app::plural;
 use crate::components::{ErrorText, Icon, sanitize_svg};
 
 /// A credential change waiting for re-authentication.
@@ -327,7 +328,10 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                             .unwrap_or(0);
                         view! {
                             <p class="muted">
-                                {format!("Enabled — {remaining} recovery code(s) left.")}
+                                {format!(
+                                    "Enabled — {} left.",
+                                    plural(remaining.max(0) as usize, "recovery code", "recovery codes")
+                                )}
                             </p>
                             <div class="row-actions">
                                 <button on:click=totp_disable>"Disable two-factor"</button>

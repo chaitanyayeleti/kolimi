@@ -3,10 +3,23 @@
 use kolimi_crypto::MasterKey;
 use leptos::ev;
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use super::types::{Entry, SearchHit, TrashItem, file_icon, is_image_name};
 use crate::app::{encode, encode_path, human_size, relative_time};
 use crate::components::{EmptyState, Icon};
+
+/// Opens the topbar's file picker from an empty-state action.
+fn open_upload_picker() {
+    let Some(input) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id("topbar-upload"))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
+    else {
+        return;
+    };
+    input.click();
+}
 
 /// Search results with navigation, download and clear actions.
 #[component]
@@ -89,6 +102,7 @@ pub(crate) fn SearchResults(
                                                             <button
                                                                 class="icon-btn"
                                                                 title="Download & decrypt"
+                                                                aria-label="Download and decrypt"
                                                                 on:click=move |_| on_decrypt.run(dl.clone())
                                                             >
                                                                 <Icon name="download"/>
@@ -102,6 +116,7 @@ pub(crate) fn SearchResults(
                                                             <a
                                                                 class="icon-btn"
                                                                 title="Download"
+                                                                aria-label="Download"
                                                                 href=format!("/dav{}", encode_path(&download_path))
                                                                 download
                                                             >
@@ -133,7 +148,9 @@ pub(crate) fn FileArea(
     move_drag: RwSignal<Option<Entry>>,
     context_menu: RwSignal<Option<(Entry, i32, i32)>>,
     lightbox: RwSignal<Option<Entry>>,
+    can_write: Signal<bool>,
     on_load: Callback<String>,
+    on_mkdir: Callback<()>,
     on_open: Callback<Entry>,
     on_toggle_select: Callback<String>,
     on_move_into: Callback<(Entry, String)>,
@@ -193,11 +210,25 @@ pub(crate) fn FileArea(
                     .into_any();
             }
             if entries.get().is_empty() {
+                if can_write.get() {
+                    return view! {
+                        <EmptyState
+                            icon="folder"
+                            title="This folder is empty"
+                            hint="Upload a file or create a folder to get started."
+                            action_label="Upload"
+                            on_action=Callback::new(move |_| open_upload_picker())
+                            secondary_action_label="New folder"
+                            on_secondary_action=on_mkdir
+                        />
+                    }
+                        .into_any();
+                }
                 return view! {
                     <EmptyState
                         icon="folder"
                         title="This folder is empty"
-                        hint="Upload a file or create a folder to get started."
+                        hint="Files shared with you will appear here."
                     />
                 }
                     .into_any();
@@ -552,6 +583,7 @@ fn FileActions(
                         <button
                             class="icon-btn"
                             title="Download & decrypt"
+                            aria-label="Download and decrypt"
                             on:click=move |_| on_decrypt.run(decrypt_copy.clone())
                         >
                             <Icon name="download"/>
@@ -563,6 +595,7 @@ fn FileActions(
                         <a
                             class="icon-btn"
                             title="Download"
+                            aria-label="Download"
                             href=format!("/dav{}", encode_path(&download))
                             download
                         >
@@ -581,6 +614,7 @@ fn FileActions(
                                 <button
                                     class="icon-btn"
                                     title="Share"
+                                    aria-label="Share"
                                     on:click=move |_| on_share.run(share_copy.clone())
                                 >
                                     <Icon name="share"/>
@@ -590,6 +624,7 @@ fn FileActions(
                     <button
                         class="icon-btn"
                         title="Rename"
+                        aria-label="Rename"
                         on:click=move |_| on_rename.run(rename_copy.clone())
                     >
                         <Icon name="edit"/>
@@ -597,6 +632,7 @@ fn FileActions(
                     <button
                         class="icon-btn"
                         title="Delete"
+                        aria-label="Delete"
                         on:click=move |_| on_delete.run(delete_copy.clone())
                     >
                         <Icon name="trash"/>

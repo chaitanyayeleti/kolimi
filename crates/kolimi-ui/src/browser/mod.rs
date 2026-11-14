@@ -654,7 +654,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                             move_drag=move_drag
                             context_menu=context_menu
                             lightbox=lightbox
+                            can_write=can_write
                             on_load=file_load
+                            on_mkdir=top_mkdir
                             on_open=ctx_open
                             on_toggle_select=file_toggle_select
                             on_move_into=file_move_into

@@ -4,7 +4,7 @@ use leptos::task::spawn_local;
 use serde_json::{Value, json};
 
 use crate::api;
-use crate::app::{encode, relative_time};
+use crate::app::{encode, plural, relative_time};
 use crate::components::{ErrorText, Icon, Modal, Notice};
 
 fn fmt_bytes(n: u64) -> String {
@@ -90,12 +90,10 @@ enum AdminTab {
 pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
     let tab = RwSignal::new(AdminTab::Users);
     view! {
-        <div class="section-head">
-            <h2>"Admin"</h2>
-        </div>
         <div class="segmented settings-tabs" role="tablist">
             <button
                 role="tab"
+                aria-selected=move || tab.get() == AdminTab::Users
                 class:active=move || tab.get() == AdminTab::Users
                 on:click=move |_| tab.set(AdminTab::Users)
             >
@@ -103,6 +101,7 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
             </button>
             <button
                 role="tab"
+                aria-selected=move || tab.get() == AdminTab::Invites
                 class:active=move || tab.get() == AdminTab::Invites
                 on:click=move |_| tab.set(AdminTab::Invites)
             >
@@ -110,6 +109,7 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
             </button>
             <button
                 role="tab"
+                aria-selected=move || tab.get() == AdminTab::Groups
                 class:active=move || tab.get() == AdminTab::Groups
                 on:click=move |_| tab.set(AdminTab::Groups)
             >
@@ -117,6 +117,7 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
             </button>
             <button
                 role="tab"
+                aria-selected=move || tab.get() == AdminTab::Audit
                 class:active=move || tab.get() == AdminTab::Audit
                 on:click=move |_| tab.set(AdminTab::Audit)
             >
@@ -256,14 +257,17 @@ fn UsersPanel(current_username: RwSignal<String>) -> impl IntoView {
                 <option value="disabled">Disabled</option>
                 <option value="over_quota">Over quota</option>
             </select>
-            <button
-                on:click=move |_| {
-                    sort_usage.update(|value| *value = !*value);
+            <select
+                aria-label="Sort users"
+                prop:value=move || if sort_usage.get() { "usage" } else { "newest" }
+                on:change=move |ev| {
+                    sort_usage.set(event_target_value(&ev) == "usage");
                     load.run(true);
                 }
             >
-                {move || if sort_usage.get() { "By usage" } else { "Newest first" }}
-            </button>
+                <option value="newest">"Newest"</option>
+                <option value="usage">"Usage"</option>
+            </select>
             <button on:click=move |_| reload.run(()) disabled=move || loading.get()>
                 <Icon name="refresh"/>
                 "Refresh"
@@ -272,7 +276,7 @@ fn UsersPanel(current_username: RwSignal<String>) -> impl IntoView {
 
         <ErrorText message=error/>
         <Notice message=notice/>
-        <p class="muted">{move || format!("{} user(s) loaded", users.get().len())}</p>
+        <p class="muted">{move || plural(users.get().len(), "user", "users")}</p>
 
         <ul class="shares">
             <For
@@ -684,9 +688,11 @@ fn UserDetailDialog(
                                 );
                             }
                             PendingAction::Logout => {
+                                let sessions =
+                                    body["sessions_revoked"].as_u64().unwrap_or(0) as usize;
                                 notice.set(format!(
-                                    "{} session(s) signed out.",
-                                    body["sessions_revoked"].as_u64().unwrap_or(0)
+                                    "{} signed out.",
+                                    plural(sessions, "session", "sessions")
                                 ));
                             }
                             PendingAction::Patch {
@@ -828,8 +834,8 @@ fn UserDetailDialog(
                             let totp = value["totp_enabled"].as_bool().unwrap_or(false);
                             let password = value["password_login"].as_bool().unwrap_or(false);
                             format!(
-                                "{} passkey(s) · TOTP {} · password {}",
-                                passkeys,
+                                "{} · TOTP {} · password {}",
+                                plural(passkeys.max(0) as usize, "passkey", "passkeys"),
                                 if totp { "on" } else { "off" },
                                 if password { "on" } else { "off" },
                             )
@@ -851,13 +857,21 @@ fn UserDetailDialog(
                                 })
                                 .filter(|text| !text.is_empty())
                                 .unwrap_or_else(|| "none".to_string());
+                            let sessions =
+                                value["session_count"].as_i64().unwrap_or(0).max(0) as usize;
+                            let group_count =
+                                value["groups"].as_array().map(Vec::len).unwrap_or(0);
+                            let owned =
+                                value["owned_shares"].as_i64().unwrap_or(0).max(0) as usize;
+                            let received =
+                                value["received_shares"].as_i64().unwrap_or(0).max(0) as usize;
                             format!(
-                                "{} session(s) · {} group(s): {} · {} owned / {} received share(s)",
-                                value["session_count"].as_i64().unwrap_or(0),
-                                value["groups"].as_array().map(Vec::len).unwrap_or(0),
+                                "{} · {}: {} · {} / {}",
+                                plural(sessions, "session", "sessions"),
+                                plural(group_count, "group", "groups"),
                                 groups,
-                                value["owned_shares"].as_i64().unwrap_or(0),
-                                value["received_shares"].as_i64().unwrap_or(0),
+                                plural(owned, "owned share", "owned shares"),
+                                plural(received, "received share", "received shares"),
                             )
                         }}
                     </span>
@@ -1257,7 +1271,9 @@ fn InvitesPanel() -> impl IntoView {
             </div>
         </Show>
 
-        <p class="muted">{move || format!("{} pending invite(s)", invites.get().len())}</p>
+        <p class="muted">
+            {move || format!("{} pending", plural(invites.get().len(), "invite", "invites"))}
+        </p>
         <ul class="shares">
             <For
                 each=move || invites.get()
@@ -1502,7 +1518,7 @@ fn GroupsPanel() -> impl IntoView {
         <ErrorText message=error/>
         <Notice message=notice/>
         <p class="muted">
-            {move || format!("{} group(s)", groups.get().len())}
+            {move || plural(groups.get().len(), "group", "groups")}
         </p>
 
         <ul class="shares">
@@ -1529,7 +1545,7 @@ fn GroupsPanel() -> impl IntoView {
                                     <span class="file-name">
                                         {name}
                                         <span class="badge">
-                                            {format!("{count} member(s)")}
+                                            {plural(count, "member", "members")}
                                         </span>
                                     </span>
                                     <span class="file-meta">
@@ -2009,7 +2025,7 @@ fn AuditPanel() -> impl IntoView {
             </form>
         </div>
 
-        <p class="muted">{move || format!("{} entrie(s) loaded", entries.get().len())}</p>
+        <p class="muted">{move || plural(entries.get().len(), "entry", "entries")}</p>
 
         <ul class="shares">
             <For

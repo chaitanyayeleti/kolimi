@@ -2,7 +2,7 @@ use kolimi_crypto::MasterKey;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use crate::components::Icon;
+use crate::components::{Icon, Modal};
 
 #[component]
 pub(crate) fn VaultSetupDialog(
@@ -53,14 +53,7 @@ pub(crate) fn VaultSetupDialog(
     let close = move |_| on_close.run(());
 
     view! {
-        <div class="backdrop">
-            <div class="card modal">
-                <div class="modal-head">
-                    <h2>"Set up your Vault"</h2>
-                    <button class="icon-btn" aria-label="Close" on:click=close>
-                        <Icon name="x"/>
-                    </button>
-                </div>
+        <Modal title="Set up your Vault" on_close=on_close>
                 <Show when=move || phrase.get().is_none()>
                     <p class="muted">
                         "Your Vault is encrypted on this device. We can never read it — and if you lose both the passphrase and the recovery phrase, the files inside are gone for good."
@@ -121,7 +114,6 @@ pub(crate) fn VaultSetupDialog(
                     </div>
                 </Show>
                 <p class="error">{move || error.get()}</p>
-            </div>
-        </div>
+        </Modal>
     }
 }

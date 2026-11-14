@@ -525,6 +525,10 @@ textarea:focus {
   color: var(--fg);
 }
 
+.crumb-label {
+  margin-left: 0.05rem;
+}
+
 .sep {
   color: var(--faint);
 }
@@ -584,11 +588,18 @@ textarea:focus {
 
 .settings-tabs {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
   margin: var(--space-1) 0 var(--space-4);
 }
 
+.settings-tabs::-webkit-scrollbar {
+  display: none;
+}
+
 .settings-tabs button {
+  flex: 0 0 auto;
   font-weight: var(--weight-medium);
 }
 
@@ -654,6 +665,7 @@ textarea:focus {
   min-width: 0;
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 0.8rem;
   border: none;
   background: none;
@@ -802,6 +814,7 @@ textarea:focus {
 }
 
 .tile-name {
+  display: block;
   font-weight: 550;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -809,6 +822,8 @@ textarea:focus {
 }
 
 .tile-meta {
+  display: block;
+  margin-top: 0.1rem;
   color: var(--muted);
   font-size: 0.8rem;
 }
@@ -872,6 +887,14 @@ textarea:focus {
   width: 40px;
   height: 40px;
   color: var(--faint);
+}
+
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
 }
 
 .skeleton {
@@ -1161,8 +1184,14 @@ textarea:focus {
 
 .row-actions {
   display: flex;
+  align-items: center;
   gap: 0.35rem;
   flex-wrap: wrap;
+}
+
+.row-actions select {
+  width: auto;
+  min-width: 10rem;
 }
 
 .row-actions button,
@@ -1291,10 +1320,17 @@ textarea:focus {
     order: 3;
     width: 100%;
     flex-wrap: wrap;
+    row-gap: 0.4rem;
+  }
+
+  .crumbs {
+    min-width: 0;
+    flex: 1;
   }
 
   .search {
-    flex: 1;
+    flex: 1 1 100%;
+    min-width: 0;
   }
 
   .search input {
@@ -1347,6 +1383,10 @@ textarea:focus {
 @media (max-width: 640px) {
   .hide-sm {
     display: none;
+  }
+
+  .row-actions select {
+    width: 100%;
   }
 }
 

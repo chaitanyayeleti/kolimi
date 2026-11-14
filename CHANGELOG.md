@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Web UI polish: file names are left-aligned in list view, grid labels stack
+  correctly, the mobile toolbar wraps without clipping, empty folders offer
+  Upload and New folder actions, counts use proper singular/plural copy, and
+  icon-only actions have accessible labels.
+- Dialogs now expose `role="dialog"`/`aria-modal`, trap Tab focus, close on
+  Escape or a backdrop click, restore focus to the opener, and lock page
+  scroll while open. This applies to Settings, Admin dialogs, sharing,
+  versions and first-run Vault setup.
+
 ## [0.4.8] - 2026-11-14
 
 ### Added

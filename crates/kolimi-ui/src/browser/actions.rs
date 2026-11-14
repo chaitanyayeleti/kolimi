@@ -7,7 +7,7 @@ use wasm_bindgen::JsCast;
 
 use super::types::{Entry, TrashItem};
 use crate::api;
-use crate::app::encode_path;
+use crate::app::{encode_path, plural};
 
 /// Signals and callbacks shared by the file actions.
 #[derive(Clone, Copy)]
@@ -320,7 +320,7 @@ pub(super) fn actions(ctx: FilesContext) -> FileActions {
             }
             selected.set(std::collections::HashSet::new());
             if failed == 0 {
-                notice.set(format!("Moved {count} item(s) to trash"));
+                notice.set(format!("Moved {} to trash", plural(count, "item", "items")));
             }
             load.run(current);
             refresh_usage.run(());
@@ -379,7 +379,7 @@ pub(super) fn actions(ctx: FilesContext) -> FileActions {
             }
             selected.set(std::collections::HashSet::new());
             if failed == 0 {
-                notice.set(format!("Moved {count} item(s)"));
+                notice.set(format!("Moved {}", plural(count, "item", "items")));
             }
             load.run(path.get_untracked());
         });

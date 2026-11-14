@@ -5,8 +5,8 @@ use leptos::task::spawn_local;
 use serde_json::{Value, json};
 
 use crate::api;
-use crate::app::encode;
-use crate::components::{Icon, sanitize_svg};
+use crate::app::{encode, plural};
+use crate::components::{Icon, Modal, sanitize_svg};
 
 #[component]
 pub(crate) fn ShareDialog(
@@ -182,8 +182,8 @@ pub(crate) fn ShareDialog(
                                             }
                                             if !skipped.is_empty() {
                                                 error.set(format!(
-                                                    "Shared read-only, but {e}; {} recipient(s) have no MLS key package ({}).",
-                                                    skipped.len(),
+                                                    "Shared read-only, but {e}; {} have no MLS key package ({}).",
+                                                    plural(skipped.len(), "recipient", "recipients"),
                                                     skipped.join(", ")
                                                 ));
                                             } else {
@@ -256,17 +256,8 @@ pub(crate) fn ShareDialog(
         });
     });
 
-    let close = move |_| on_close.run(());
-
     view! {
-        <div class="backdrop">
-            <div class="card modal">
-                <div class="modal-head">
-                    <h2>{format!("Share “{name}”")}</h2>
-                    <button class="icon-btn" aria-label="Close" on:click=close>
-                        <Icon name="x"/>
-                    </button>
-                </div>
+        <Modal title=format!("Share “{name}”") on_close=on_close>
                 <p class="muted">"Share with a user or group, or create a public link."</p>
 
                 <ul class="shares">
@@ -400,8 +391,7 @@ pub(crate) fn ShareDialog(
                         })
                 }}
                 <p class="error">{move || error.get()}</p>
-            </div>
-        </div>
+        </Modal>
     }
 }
 

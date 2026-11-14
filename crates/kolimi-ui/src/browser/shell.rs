@@ -213,6 +213,7 @@ pub(crate) fn Topbar(
                                 view! {
                                     <button
                                         class="crumb"
+                                        aria-label="Home"
                                         on:click=move |_| on_load.run("/".to_string())
                                         on:dragover=move |ev: ev::DragEvent| ev.prevent_default()
                                         on:drop=move |ev: ev::DragEvent| {
@@ -224,6 +225,7 @@ pub(crate) fn Topbar(
                                         }
                                     >
                                         <Icon name="cloud"/>
+                                        <span class="crumb-label hide-sm">"Home"</span>
                                     </button>
                                 }
                                     .into_any(),
@@ -269,6 +271,7 @@ pub(crate) fn Topbar(
                             <Icon name="search"/>
                             <input
                                 type="search"
+                                aria-label="Search files"
                                 placeholder="Search files…"
                                 prop:value=move || query.get()
                                 on:input=move |ev| query.set(event_target_value(&ev))
@@ -278,9 +281,19 @@ pub(crate) fn Topbar(
                             <label class="button primary" title="Upload files">
                                 <Icon name="upload"/>
                                 <span>{move || upload_label.get()}</span>
-                                <input type="file" class="hidden" multiple on:change=move |ev| on_upload.run(ev)/>
+                                <input
+                                    id="topbar-upload"
+                                    type="file"
+                                    class="hidden"
+                                    multiple
+                                    on:change=move |ev| on_upload.run(ev)
+                                />
                             </label>
-                            <button on:click=move |_| on_mkdir.run(()) title="New folder">
+                            <button
+                                on:click=move |_| on_mkdir.run(())
+                                title="New folder"
+                                aria-label="New folder"
+                            >
                                 <Icon name="folder-plus"/>
                                 <span class="hide-sm">"New folder"</span>
                             </button>

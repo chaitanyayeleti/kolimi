@@ -119,6 +119,81 @@ test("web settings tabs and the passkeys panel", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("web phase 0 polish: dialog keyboard and mobile toolbar", async ({
+  page,
+}) => {
+  await login(page);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  await expect(dialog).toBeVisible();
+
+  for (let i = 0; i < 8; i += 1) {
+    await page.keyboard.press("Tab");
+  }
+  expect(
+    await dialog.evaluate((element) => element.contains(document.activeElement)),
+  ).toBe(true);
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Settings", exact: true }),
+  ).toBeFocused();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const search = page.getByLabel("Search files", { exact: true });
+  await expect(search).toBeVisible();
+  const searchBox = await search.boundingBox();
+  expect(searchBox).not.toBeNull();
+  if (searchBox) {
+    expect(searchBox.x).toBeGreaterThanOrEqual(0);
+    expect(searchBox.x + searchBox.width).toBeLessThanOrEqual(390);
+  }
+
+  const upload = page.locator("label.button.primary");
+  await expect(upload).toBeVisible();
+  const uploadBox = await upload.boundingBox();
+  expect(uploadBox).not.toBeNull();
+  if (uploadBox) {
+    expect(uploadBox.x).toBeGreaterThanOrEqual(0);
+    expect(uploadBox.x + uploadBox.width).toBeLessThanOrEqual(390);
+  }
+});
+
+test("web empty folder offers upload and new folder actions", async ({
+  page,
+  request,
+}) => {
+  await login(page);
+
+  page.once("dialog", (dialog) => dialog.accept("empty-phase0"));
+  await page
+    .locator(".topbar")
+    .getByRole("button", { name: "New folder", exact: true })
+    .click();
+  await expect(page.getByText("empty-phase0", { exact: true })).toBeVisible();
+
+  await (await row(page, "empty-phase0")).locator(".file-open").click();
+  await expect(
+    page.getByText("This folder is empty", { exact: true }),
+  ).toBeVisible();
+
+  const empty = page.locator(".empty");
+  await expect(
+    empty.getByRole("button", { name: "Upload", exact: true }),
+  ).toBeVisible();
+  await expect(
+    empty.getByRole("button", { name: "New folder", exact: true }),
+  ).toBeVisible();
+
+  const chooser = page.waitForEvent("filechooser");
+  await empty.getByRole("button", { name: "Upload", exact: true }).click();
+  await chooser;
+
+  await request.delete(`${BASE}/dav/empty-phase0`, { headers: AUTH });
+});
+
 test("web admin page lists and inspects users", async ({ page }) => {
   await login(page);
   await page.getByRole("button", { name: "Admin", exact: true }).click();

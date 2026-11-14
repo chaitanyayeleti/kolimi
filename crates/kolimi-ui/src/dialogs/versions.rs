@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::api;
 use crate::app::{encode, human_size, relative_time};
-use crate::components::Icon;
+use crate::components::{Icon, Modal};
 
 #[component]
 pub(crate) fn VersionsDialog(
@@ -65,17 +65,8 @@ pub(crate) fn VersionsDialog(
         })
     };
 
-    let close = move |_| on_close.run(());
-
     view! {
-        <div class="backdrop">
-            <div class="card modal">
-                <div class="modal-head">
-                    <h2>{format!("Versions of “{name}”")}</h2>
-                    <button class="icon-btn" aria-label="Close" on:click=close>
-                        <Icon name="x"/>
-                    </button>
-                </div>
+        <Modal title=format!("Versions of “{name}”") on_close=on_close>
                 <p class="muted">"Restoring a version makes it current; the replaced content is kept as a version too."</p>
                 <ul class="shares">
                     <For
@@ -111,7 +102,6 @@ pub(crate) fn VersionsDialog(
                     </Show>
                 </ul>
                 <p class="error">{move || error.get()}</p>
-            </div>
-        </div>
+        </Modal>
     }
 }

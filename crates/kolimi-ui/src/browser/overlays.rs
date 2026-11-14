@@ -22,7 +22,7 @@ pub(crate) fn Toasts(
     view! {
             <div class="toasts">
                 <Show when=move || !error.get().is_empty()>
-                    <div class="toast error">
+                    <div class="toast error" role="alert" aria-atomic="true">
                         <span class="toast-msg">{move || error.get()}</span>
                         <button
                             class="icon-btn"
@@ -34,7 +34,7 @@ pub(crate) fn Toasts(
                     </div>
                 </Show>
                 <Show when=move || !notice.get().is_empty()>
-                    <div class="toast ok">
+                    <div class="toast ok" role="status" aria-atomic="true">
                         <span class="toast-msg">{move || notice.get()}</span>
                         <button
                             class="icon-btn"
@@ -46,7 +46,7 @@ pub(crate) fn Toasts(
                     </div>
                 </Show>
                 <Show when=move || quota_warn.get().is_some()>
-                    <div class="toast error">
+                    <div class="toast error" role="alert" aria-atomic="true">
                         <span class="toast-msg">
                             {move || {
                                 quota_warn
@@ -69,7 +69,7 @@ pub(crate) fn Toasts(
                     </div>
                 </Show>
                 <Show when=move || undo.get().is_some()>
-                    <div class="toast ok">
+                    <div class="toast ok" role="status" aria-atomic="true">
                         <span class="toast-msg">
                             {move || {
                                 undo
@@ -149,6 +149,7 @@ pub(crate) fn UploadTray(
                                                         <button
                                                             class="icon-btn"
                                                             title="Retry"
+                                                            aria-label="Retry upload"
                                                             on:click=move |_| {
                                                                 on_retry.run((
                                                                     file.clone(),

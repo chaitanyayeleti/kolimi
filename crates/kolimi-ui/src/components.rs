@@ -3,16 +3,22 @@
 //! These are presentational: they own no network state and only render the
 //! props and signals passed by the dialogs in `app.rs`.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use base64::{Engine, engine::general_purpose::STANDARD};
+use leptos::ev;
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::app::relative_time;
 use crate::mls::MlsDevice;
 
+static MODAL_SEQ: AtomicU32 = AtomicU32::new(0);
+
 /// A single inline SVG icon.
 #[component]
 pub fn Icon(name: &'static str) -> impl IntoView {
-    view! { <span class="icon" inner_html=icon_svg(name)></span> }
+    view! { <span class="icon" aria-hidden="true" inner_html=icon_svg(name)></span> }
 }
 
 /// Inline SVG path data for the icon set.
@@ -85,18 +91,160 @@ fn icon_svg(name: &str) -> String {
     )
 }
 
+fn modal_focusables(modal_id: &str) -> Vec<web_sys::HtmlElement> {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return Vec::new();
+    };
+    let Some(modal) = document.get_element_by_id(modal_id) else {
+        return Vec::new();
+    };
+    let Ok(nodes) = modal.query_selector_all(
+        "button:not([disabled]), a[href], input:not([type='hidden']):not([disabled]), \
+         select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+    ) else {
+        return Vec::new();
+    };
+    (0..nodes.length())
+        .filter_map(|index| nodes.item(index))
+        .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+        .filter(|element| !element.has_attribute("hidden"))
+        .collect()
+}
+
+fn focus_first_in(modal_id: &str) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(modal) = document.get_element_by_id(modal_id) else {
+        return;
+    };
+    let target = modal
+        .query_selector("[autofocus]")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            modal
+                .query_selector("input:not([type='hidden']), select, textarea")
+                .ok()
+                .flatten()
+        })
+        .or_else(|| {
+            modal
+                .query_selector("button:not([disabled]), a[href]")
+                .ok()
+                .flatten()
+        });
+    if let Some(element) =
+        target.and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = element.focus();
+    }
+}
+
 /// A modal card with a title, close button and scrollable body.
+///
+/// The dialog traps Tab focus, closes on Escape, and restores focus to the
+/// element that opened it. Body scroll is locked while it is open. Backdrop
+/// clicks do not close it, so a stray click cannot discard a form.
 #[component]
 pub fn Modal(
     #[prop(into)] title: String,
     on_close: Callback<()>,
     children: Children,
 ) -> impl IntoView {
+    let sequence = MODAL_SEQ.fetch_add(1, Ordering::Relaxed);
+    let title_id = format!("modal-title-{sequence}");
+    let modal_id = format!("modal-{sequence}");
+    let document = web_sys::window().and_then(|window| window.document());
+    let previous_focus = document
+        .as_ref()
+        .and_then(|document| document.active_element());
+    let previous_overflow = document
+        .as_ref()
+        .and_then(|document| document.body())
+        .map(|body| {
+            body.style()
+                .get_property_value("overflow")
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    if let Some(body) = document.as_ref().and_then(|document| document.body()) {
+        let _ = body.style().set_property("overflow", "hidden");
+    }
+
+    let key_modal_id = modal_id.clone();
+    let listener = window_event_listener(ev::keydown, move |event: web_sys::KeyboardEvent| {
+        if event.key() == "Escape" {
+            event.prevent_default();
+            on_close.run(());
+            return;
+        }
+        if event.key() != "Tab" {
+            return;
+        }
+        let focusables = modal_focusables(&key_modal_id);
+        let Some(first) = focusables.first() else {
+            return;
+        };
+        let Some(last) = focusables.last() else {
+            return;
+        };
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let active = document.active_element();
+        let active_is_first = active.as_ref().is_some_and(|active| {
+            web_sys::Node::is_same_node(
+                active.unchecked_ref::<web_sys::Node>(),
+                Some(first.unchecked_ref::<web_sys::Node>()),
+            )
+        });
+        let active_is_last = active.as_ref().is_some_and(|active| {
+            web_sys::Node::is_same_node(
+                active.unchecked_ref::<web_sys::Node>(),
+                Some(last.unchecked_ref::<web_sys::Node>()),
+            )
+        });
+        if event.shift_key() && active_is_first {
+            event.prevent_default();
+            let _ = last.focus();
+        } else if !event.shift_key() && active_is_last {
+            event.prevent_default();
+            let _ = first.focus();
+        }
+    });
+
+    let cleanup_document = document.clone();
+    on_cleanup(move || {
+        listener.remove();
+        if let Some(document) = &cleanup_document {
+            if let Some(body) = document.body() {
+                let _ = body.style().set_property("overflow", &previous_overflow);
+            }
+            if let Some(previous) = previous_focus
+                .as_ref()
+                .and_then(|element| element.dyn_ref::<web_sys::HtmlElement>())
+            {
+                let _ = previous.focus();
+            }
+        }
+    });
+
+    let focus_modal_id = modal_id.clone();
+    Effect::new(move |_| focus_first_in(&focus_modal_id));
+
     view! {
         <div class="backdrop">
-            <div class="card modal">
+            <div
+                class="card modal"
+                id=modal_id
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby=title_id.clone()
+                tabindex="-1"
+            >
                 <div class="modal-head">
-                    <h2>{title}</h2>
+                    <h2 id=title_id.clone()>{title}</h2>
                     <button class="icon-btn" aria-label="Close" on:click=move |_| on_close.run(())>
                         <Icon name="x"/>
                     </button>
@@ -127,7 +275,7 @@ pub fn ErrorText(#[prop(into)] message: Signal<String>) -> impl IntoView {
     }
 }
 
-/// A centered empty state with an optional primary action.
+/// A centered empty state with optional primary and secondary actions.
 #[component]
 pub fn EmptyState(
     icon: &'static str,
@@ -135,20 +283,34 @@ pub fn EmptyState(
     hint: &'static str,
     #[prop(optional)] action_label: Option<&'static str>,
     #[prop(optional)] on_action: Option<Callback<()>>,
+    #[prop(optional)] secondary_action_label: Option<&'static str>,
+    #[prop(optional)] on_secondary_action: Option<Callback<()>>,
 ) -> impl IntoView {
     view! {
         <div class="empty">
             <Icon name=icon/>
             <p>{title}</p>
             <small class="muted">{hint}</small>
-            {on_action
-                .map(|on_action| {
-                    view! {
-                        <button class="primary" on:click=move |_| on_action.run(())>
-                            {action_label.unwrap_or("Continue")}
-                        </button>
-                    }
-                })}
+            <Show when=move || on_action.is_some() || on_secondary_action.is_some()>
+                <div class="empty-actions">
+                    {on_action
+                        .map(|on_action| {
+                            view! {
+                                <button class="primary" on:click=move |_| on_action.run(())>
+                                    {action_label.unwrap_or("Continue")}
+                                </button>
+                            }
+                        })}
+                    {on_secondary_action
+                        .map(|on_secondary_action| {
+                            view! {
+                                <button on:click=move |_| on_secondary_action.run(())>
+                                    {secondary_action_label.unwrap_or("Cancel")}
+                                </button>
+                            }
+                        })}
+                </div>
+            </Show>
         </div>
     }
 }
