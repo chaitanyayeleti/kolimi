@@ -2,7 +2,7 @@
 
 Status: partially implemented (0.4.5: web Vault setup and
 encrypt-by-default folder; passkey-PRF browser unlock pending) ·
-Last verified: 0.4.5 · Depends on: RFC 0007 (E2EE), RFC 0008 (device
+Last verified: 0.4.7 · Depends on: RFC 0007 (E2EE), RFC 0008 (device
 enrollment), RFC 0006 (sync client)
 
 > **Implementation note (0.3.0):** web first-login Vault setup and the

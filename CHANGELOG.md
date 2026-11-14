@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-14
+
 ### Security
 - Hardened the internal red-team findings: stored XSS through shared
   HTML/SVG, E2EE folder downgrade, MLS keyring/roster scoping, CLI encrypted
