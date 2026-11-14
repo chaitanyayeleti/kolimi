@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-11-14
+
 ### Added
 - **Self-service account security**: the web UI now has **Settings → Account**
   with a login-password change and active-session management. New endpoints:
@@ -44,6 +46,7 @@ follow [Semantic Versioning](https://semver.org/).
   `DELETE /api/invites/{id}`, `POST /api/invites/lookup`,
   `POST /api/invites/accept`, and `PATCH /api/me` for optional display
   name/email profile fields (migration 0028).
+### Changed
 - **User-management hardening**: `PATCH` and `DELETE /api/users/{username}`
   now require a fresh `X-Reauth-Token`, matching recovery and force
   sign-out. This is a deliberate compatibility change for scripts. Password
@@ -52,6 +55,7 @@ follow [Semantic Versioning](https://semver.org/).
   `Cache-Control: no-store`. Sessions can carry an optional user-edited
   label (migration 0029) via `PATCH /api/me/sessions/{id}`; labels appear in
   Settings → Account.
+- This is a server/web release; the desktop app remains at 0.4.7.
 
 ## [0.4.7] - 2026-11-14
 
