@@ -10,7 +10,7 @@ use axum::{
     Extension, Json,
     body::{Body, to_bytes},
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -31,13 +31,23 @@ pub struct KeyQuery {
     path: String,
 }
 
+/// Query for keyring replacement: the epoch the client last read.
+#[derive(Deserialize)]
+pub struct KeyringQuery {
+    #[serde(default)]
+    if_epoch: Option<u64>,
+}
+
 /// `GET /api/e2ee/keyring` — the caller's keyring.
 pub async fn get_keyring(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
     match state.db.keyring(user.user_id).await {
-        Ok(Some(keyring)) => Json(json!({ "keyring": keyring })).into_response(),
+        Ok(Some(keyring)) => {
+            let epoch = state.db.keyring_epoch(user.user_id).await.ok().flatten();
+            Json(json!({ "keyring": keyring, "epoch": epoch })).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "no keyring configured" })),
@@ -51,6 +61,8 @@ pub async fn get_keyring(
 pub async fn put_keyring(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
+    Query(query): Query<KeyringQuery>,
     body: Body,
 ) -> Response {
     let bytes = match read_body(body, MAX_KEYRING_BODY).await {
@@ -60,10 +72,30 @@ pub async fn put_keyring(
     let Ok(keyring) = String::from_utf8(bytes) else {
         return api::bad_request("keyring must be UTF-8 JSON");
     };
-    if serde_json::from_str::<serde_json::Value>(&keyring).is_err() {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&keyring) else {
         return api::bad_request("keyring must be valid JSON");
+    };
+    let epoch = value
+        .get("epoch")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let current = match state.db.keyring_epoch(user.user_id).await {
+        Ok(current) => current,
+        Err(_) => return api::internal_error(),
+    };
+    // Replacing an existing keyring is a credential-management action. A
+    // stolen session alone must not be able to swap it for one the attacker
+    // controls (unlock denial of service) or clear its wraps.
+    if current.is_some()
+        && let Err(response) = crate::reauth::require(&state, user.user_id, &headers)
+    {
+        return response;
     }
-    match state.db.set_keyring(user.user_id, &keyring).await {
+    match state
+        .db
+        .set_keyring_checked(user.user_id, &keyring, epoch, query.if_epoch)
+        .await
+    {
         Ok(()) => {
             audit(
                 &state,
@@ -71,10 +103,13 @@ pub async fn put_keyring(
                 Some(&user.username),
                 "e2ee.keyring_set",
                 &user.username,
-                json!({ "bytes": keyring.len() }),
+                json!({ "bytes": keyring.len(), "epoch": epoch }),
             )
             .await;
             StatusCode::NO_CONTENT.into_response()
+        }
+        Err(kolimi_db::DbError::Conflict(message)) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
         }
         Err(_) => api::internal_error(),
     }

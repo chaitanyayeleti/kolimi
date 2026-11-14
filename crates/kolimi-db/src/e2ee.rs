@@ -12,13 +12,16 @@ pub const MAX_KEYRING_BYTES: usize = 16 * 1024;
 pub const MAX_WRAPPED_KEY_BYTES: usize = 1024;
 
 impl Db {
-    /// Stores (or replaces) a user's keyring.
+    /// Stores (or replaces) a user's keyring without concurrency checks.
+    ///
+    /// Used by tests and internal seeding; HTTP callers use
+    /// [`Db::set_keyring_checked`].
     pub async fn set_keyring(&self, user_id: i64, keyring: &str) -> Result<(), DbError> {
         if keyring.is_empty() || keyring.len() > MAX_KEYRING_BYTES {
             return Err(DbError::Conflict("keyring size".to_string()));
         }
         sqlx::query(
-            "INSERT INTO e2ee_keyrings (user_id, keyring, updated_at) VALUES (?, ?, ?)
+            "INSERT INTO e2ee_keyrings (user_id, keyring, updated_at, epoch) VALUES (?, ?, ?, 0)
              ON CONFLICT(user_id) DO UPDATE SET keyring = excluded.keyring,
                  updated_at = excluded.updated_at",
         )
@@ -28,6 +31,96 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Stores a keyring, enforcing create-or-replace concurrency.
+    ///
+    /// `if_epoch = None` means "create only": it fails if a keyring already
+    /// exists, which closes the race between two first-time setups. Otherwise
+    /// it must equal the current epoch (optimistic concurrency), and the new
+    /// epoch must not move backwards, so replaying an old keyring cannot
+    /// resurrect a rotated-away secret.
+    pub async fn set_keyring_checked(
+        &self,
+        user_id: i64,
+        keyring: &str,
+        epoch: u64,
+        if_epoch: Option<u64>,
+    ) -> Result<(), DbError> {
+        if keyring.is_empty() || keyring.len() > MAX_KEYRING_BYTES {
+            return Err(DbError::Conflict("keyring size".to_string()));
+        }
+        let mut tx = self.pool.begin().await?;
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT epoch FROM e2ee_keyrings WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        match current {
+            None => {
+                if if_epoch.is_some() {
+                    return Err(DbError::Conflict(
+                        "keyring does not exist; reload before saving".to_string(),
+                    ));
+                }
+                sqlx::query(
+                    "INSERT INTO e2ee_keyrings (user_id, keyring, updated_at, epoch)
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(user_id)
+                .bind(keyring)
+                .bind(now_millis())
+                .bind(i64::try_from(epoch).unwrap_or(i64::MAX))
+                .execute(&mut *tx)
+                .await?;
+            }
+            Some(current) => {
+                let current = u64::try_from(current).unwrap_or(0);
+                let Some(expected) = if_epoch else {
+                    return Err(DbError::Conflict(
+                        "keyring already exists; reload before saving".to_string(),
+                    ));
+                };
+                if expected != current {
+                    return Err(DbError::Conflict(
+                        "keyring changed since it was loaded; reload before saving".to_string(),
+                    ));
+                }
+                if epoch < current {
+                    return Err(DbError::Conflict(
+                        "stale keyring epoch; refusing to roll back".to_string(),
+                    ));
+                }
+                let result = sqlx::query(
+                    "UPDATE e2ee_keyrings SET keyring = ?, updated_at = ?, epoch = ?
+                     WHERE user_id = ? AND epoch = ?",
+                )
+                .bind(keyring)
+                .bind(now_millis())
+                .bind(i64::try_from(epoch).unwrap_or(i64::MAX))
+                .bind(user_id)
+                .bind(i64::try_from(current).unwrap_or(i64::MAX))
+                .execute(&mut *tx)
+                .await?;
+                if result.rows_affected() == 0 {
+                    return Err(DbError::Conflict(
+                        "keyring changed while saving; reload before saving".to_string(),
+                    ));
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The stored keyring epoch, if a keyring exists.
+    pub async fn keyring_epoch(&self, user_id: i64) -> Result<Option<u64>, DbError> {
+        let epoch: Option<i64> =
+            sqlx::query_scalar("SELECT epoch FROM e2ee_keyrings WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(epoch.and_then(|value| u64::try_from(value).ok()))
     }
 
     /// Returns a user's keyring, if one exists.

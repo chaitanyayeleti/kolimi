@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use kolimi_auth::password::hash_password;
-use kolimi_crypto::Argon2Params;
+use kolimi_crypto::{Argon2Params, Keyring};
 use kolimi_server::{AppState, build_app};
 use kolimi_sync::{
     E2eeOptions, SyncConfig, create_keyring_with_params, known_recipient_keys, publish_identity,
@@ -93,10 +93,40 @@ async fn fetch_keyring(server: &str, username: &str) -> String {
     body["keyring"].as_str().unwrap().to_string()
 }
 
-async fn put_keyring(server: &str, username: &str, keyring: &str) {
-    let status = reqwest::Client::new()
-        .put(format!("{server}/api/e2ee/keyring"))
+async fn keyring_epoch(server: &str, username: &str) -> u64 {
+    let response = reqwest::Client::new()
+        .get(format!("{server}/api/e2ee/keyring"))
         .basic_auth(username, Some(PASS))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    response["epoch"].as_u64().unwrap_or(0)
+}
+
+async fn reauth_token(server: &str, username: &str) -> String {
+    let body = reqwest::Client::new()
+        .post(format!("{server}/api/reauth"))
+        .basic_auth(username, Some(PASS))
+        .json(&serde_json::json!({ "password": PASS }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    body["token"].as_str().unwrap().to_string()
+}
+
+async fn put_keyring(server: &str, username: &str, keyring: &str) {
+    let epoch = keyring_epoch(server, username).await;
+    let token = reauth_token(server, username).await;
+    let status = reqwest::Client::new()
+        .put(format!("{server}/api/e2ee/keyring?if_epoch={epoch}"))
+        .basic_auth(username, Some(PASS))
+        .header("x-reauth-token", token)
         .body(keyring.to_string())
         .send()
         .await
@@ -120,6 +150,99 @@ async fn setup_keyring_creates_a_usable_keyring() {
     assert!(kolimi_sync::keyring_exists(&alice).await.unwrap());
     // The passphrase unlocks the fresh keyring and the identity is published.
     kolimi_sync::verify_unlock(&alice).await.unwrap();
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn keyring_replacement_requires_reauth_and_rejects_rollback() {
+    let server = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("alice");
+    std::fs::create_dir_all(&local).unwrap();
+    setup_keyring(&server.url, "alice", &local).await;
+    let alice = config(&server.url, "alice", &local);
+
+    let original = fetch_keyring(&server.url, "alice").await;
+    let epoch = keyring_epoch(&server.url, "alice").await;
+    assert!(epoch >= 1);
+
+    // A stolen session cannot replace the keyring on its own.
+    let status = reqwest::Client::new()
+        .put(format!("{}/api/e2ee/keyring?if_epoch={epoch}", server.url))
+        .basic_auth("alice", Some(PASS))
+        .body(original.clone())
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 403);
+
+    // A stale optimistic-concurrency value is rejected even with a token.
+    let token = reauth_token(&server.url, "alice").await;
+    let status = reqwest::Client::new()
+        .put(format!(
+            "{}/api/e2ee/keyring?if_epoch={}",
+            server.url,
+            epoch + 1
+        ))
+        .basic_auth("alice", Some(PASS))
+        .header("x-reauth-token", token)
+        .body(original.clone())
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 409);
+
+    // Omitting `if_epoch` means "create only"; it cannot overwrite the
+    // existing keyring even with a valid proof.
+    let token = reauth_token(&server.url, "alice").await;
+    let status = reqwest::Client::new()
+        .put(format!("{}/api/e2ee/keyring", server.url))
+        .basic_auth("alice", Some(PASS))
+        .header("x-reauth-token", token)
+        .body(original.clone())
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 409);
+
+    // Rotate to a higher epoch through the sync client's re-auth path.
+    let mut rotated = Keyring::from_json(&original).unwrap();
+    let master = rotated.unlock_with_passphrase(E2EE_PASS).unwrap();
+    rotated
+        .add_passphrase(&master, "new passphrase 123", &fast_params())
+        .unwrap();
+    upload_keyring(&alice, &rotated).await.unwrap();
+    assert_eq!(keyring_epoch(&server.url, "alice").await, epoch + 1);
+
+    // Replaying the old blob at the current epoch is a rollback and fails.
+    let token = reauth_token(&server.url, "alice").await;
+    let status = reqwest::Client::new()
+        .put(format!(
+            "{}/api/e2ee/keyring?if_epoch={}",
+            server.url,
+            epoch + 1
+        ))
+        .basic_auth("alice", Some(PASS))
+        .header("x-reauth-token", token)
+        .body(original)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 409);
+    let current = Keyring::from_json(&fetch_keyring(&server.url, "alice").await).unwrap();
+    assert!(
+        current.unlock_with_passphrase(E2EE_PASS).is_err(),
+        "the rotated-away passphrase must not open the stored keyring"
+    );
 
     server.handle.abort();
 }

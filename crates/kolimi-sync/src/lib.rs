@@ -1775,18 +1775,77 @@ pub async fn publish_identity(config: &SyncConfig) -> Result<(), SyncError> {
     Ok(())
 }
 
-/// Uploads a keyring to the server (setup side).
+/// Uploads a keyring to the server (setup and rotation).
+///
+/// Replacing an existing keyring requires a fresh re-authentication proof;
+/// the password from the sync config is exchanged for a single-use token.
+/// The current epoch is sent as `if_epoch` so a concurrent rotation cannot
+/// be silently overwritten.
 pub async fn upload_keyring(config: &SyncConfig, keyring: &Keyring) -> Result<(), SyncError> {
     let http = Http::new(config)?;
     let path = "/api/e2ee/keyring";
-    let status = http.put_bytes(path, keyring.to_json()?.as_bytes()).await?;
+    let (status, body) = http.get_json(path).await?;
+    let current = match status {
+        200 => body["epoch"].as_u64().unwrap_or(0),
+        404 => 0,
+        status => {
+            return Err(SyncError::Server {
+                status,
+                path: path.to_string(),
+            });
+        }
+    };
+    let mut headers: Vec<(&str, &str)> = Vec::new();
+    let token = if status == 200 {
+        Some(reauthenticate(&http, config).await?)
+    } else {
+        None
+    };
+    if let Some(token) = token.as_deref() {
+        headers.push(("x-reauth-token", token));
+    }
+    // Omit `if_epoch` on create: the server treats that as "create only",
+    // so a concurrent setup cannot silently replace the winner's keyring.
+    let path = if status == 200 {
+        format!("{path}?if_epoch={current}")
+    } else {
+        path.to_string()
+    };
+    let status = http
+        .put_bytes_with_headers(&path, keyring.to_json()?.as_bytes(), &headers)
+        .await?;
     if status != 204 {
-        return Err(SyncError::Server {
-            status,
-            path: path.to_string(),
-        });
+        return Err(SyncError::Server { status, path });
     }
     Ok(())
+}
+
+/// Exchanges the configured password for a short-lived re-authentication
+/// token. Token-only configs cannot rotate a keyring without a password.
+async fn reauthenticate(http: &Http, config: &SyncConfig) -> Result<String, SyncError> {
+    if config.password.is_empty() {
+        return Err(SyncError::E2ee(
+            "changing the keyring requires password re-authentication; \
+             a token-only sync config cannot rotate it"
+                .to_string(),
+        ));
+    }
+    let (status, body) = http
+        .post_json(
+            "/api/reauth",
+            &serde_json::json!({ "password": config.password }),
+        )
+        .await?;
+    if status != 200 {
+        return Err(SyncError::Server {
+            status,
+            path: "/api/reauth".to_string(),
+        });
+    }
+    body["token"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| SyncError::E2ee("reauth response has no token".to_string()))
 }
 
 /// Whether the account has a keyring on the server yet (E2EE set up).
@@ -2378,11 +2437,20 @@ impl Http {
     }
 
     async fn put_bytes(&self, path: &str, body: &[u8]) -> Result<u16, SyncError> {
-        let response = self
-            .auth(self.client.put(self.url(path)))
-            .body(body.to_vec())
-            .send()
-            .await?;
+        self.put_bytes_with_headers(path, body, &[]).await
+    }
+
+    async fn put_bytes_with_headers(
+        &self,
+        path: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<u16, SyncError> {
+        let mut request = self.auth(self.client.put(self.url(path)));
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = request.body(body.to_vec()).send().await?;
         Ok(response.status().as_u16())
     }
 

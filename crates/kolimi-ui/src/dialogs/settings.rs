@@ -60,6 +60,7 @@ pub(crate) fn SettingsDialog(
     let change_open = RwSignal::new(false);
     let new_pass = RwSignal::new(String::new());
     let new_confirm = RwSignal::new(String::new());
+    let account_pass = RwSignal::new(String::new());
     let recovery = RwSignal::new(Option::<String>::None);
     let migrate_mls = move |_| {
         let Some(master) = master.get_untracked() else {
@@ -206,15 +207,21 @@ pub(crate) fn SettingsDialog(
             error.set("Passphrases do not match".to_string());
             return;
         }
+        let account_password = account_pass.get_untracked();
+        if account_password.is_empty() {
+            error.set("Confirm your account password".to_string());
+            return;
+        }
         busy.set(true);
         spawn_local(async move {
-            match crate::e2ee::change_passphrase(&unlocked, &pass).await {
+            match crate::e2ee::change_passphrase(&unlocked, &pass, &account_password).await {
                 Ok(()) => {
                     error.set(String::new());
                     notice.set("Passphrase changed — use the new one next time".to_string());
                     change_open.set(false);
                     new_pass.set(String::new());
                     new_confirm.set(String::new());
+                    account_pass.set(String::new());
                 }
                 Err(e) => error.set(e),
             }
@@ -502,6 +509,15 @@ pub(crate) fn SettingsDialog(
                             on:input=move |ev| new_confirm.set(event_target_value(&ev))
                         />
                     </label>
+                    <label>
+                        "Account password (confirm the change)"
+                        <input
+                            type="password"
+                            autocomplete="current-password"
+                            prop:value=move || account_pass.get()
+                            on:input=move |ev| account_pass.set(event_target_value(&ev))
+                        />
+                    </label>
                     <div class="row-actions">
                         <button class="primary" disabled=move || busy.get() on:click=change_pass>
                             {move || if busy.get() { "Saving…" } else { "Save new passphrase" }}
@@ -512,6 +528,7 @@ pub(crate) fn SettingsDialog(
                                 change_open.set(false);
                                 new_pass.set(String::new());
                                 new_confirm.set(String::new());
+                                account_pass.set(String::new());
                                 error.set(String::new());
                             }
                         >

@@ -245,7 +245,7 @@ pub async fn setup(passphrase: &str) -> Result<String, String> {
     let kek = derive_kek(passphrase, &salt, &params).await?;
     let keyring = Keyring::create_with_kek(&master, &kek, &salt, &params, &recovery)
         .map_err(|_| "could not create the keyring".to_string())?;
-    upload_keyring(&keyring).await?;
+    upload_keyring(&keyring, None).await?;
     let identity = kolimi_crypto::Identity::generate()
         .map_err(|_| "could not generate the identity".to_string())?;
     let wrapped = master
@@ -269,18 +269,42 @@ pub async fn setup(passphrase: &str) -> Result<String, String> {
     Ok(kolimi_crypto::recovery_code_display(&recovery))
 }
 
-/// Stores an updated keyring on the server.
-async fn upload_keyring(keyring: &Keyring) -> Result<(), String> {
+/// The keyring epoch currently on the server (`None` = no keyring yet).
+async fn current_keyring_epoch() -> Result<Option<u64>, String> {
+    let response = api::get("/api/e2ee/keyring").await?;
+    match response.status {
+        200 => Ok(Some(response.body["epoch"].as_u64().unwrap_or(0))),
+        404 => Ok(None),
+        _ => Err(response
+            .error()
+            .unwrap_or("could not read the keyring epoch")
+            .to_string()),
+    }
+}
+
+/// Stores a new or updated keyring on the server.
+///
+/// A replacement needs a re-authentication token; the first setup does not,
+/// because there is nothing to overwrite yet.
+async fn upload_keyring(keyring: &Keyring, reauth_token: Option<&str>) -> Result<(), String> {
+    let current = current_keyring_epoch().await?;
+    if current.is_some() && reauth_token.is_none() {
+        return Err("Confirm your account password before changing encryption".to_string());
+    }
     let json = keyring
         .to_json()
         .map_err(|_| "could not serialize the keyring".to_string())?;
-    let response = api::dav(
-        "PUT",
-        "/api/e2ee/keyring",
-        Some(json.into_bytes()),
-        &[("Content-Type", "application/json")],
-    )
-    .await?;
+    let mut headers = vec![("Content-Type", "application/json")];
+    if let Some(token) = reauth_token {
+        headers.push(("x-reauth-token", token));
+    }
+    // No `if_epoch` on create: the server rejects a create over an existing
+    // keyring, so two first-time setups cannot overwrite each other.
+    let url = match current {
+        Some(epoch) => format!("/api/e2ee/keyring?if_epoch={epoch}"),
+        None => "/api/e2ee/keyring".to_string(),
+    };
+    let response = api::dav("PUT", &url, Some(json.into_bytes()), &headers).await?;
     if response.status != 204 {
         return Err(format!(
             "could not upload the keyring (HTTP {})",
@@ -298,10 +322,15 @@ async fn upload_keyring(keyring: &Keyring) -> Result<(), String> {
 /// and other devices keep working. We verify the keyring's integrity tag
 /// against the unlocked key first, so a server cannot feed us a spliced
 /// keyring to re-wrap.
-pub async fn change_passphrase(master: &MasterKey, new_passphrase: &str) -> Result<(), String> {
+pub async fn change_passphrase(
+    master: &MasterKey,
+    new_passphrase: &str,
+    account_password: &str,
+) -> Result<(), String> {
     if new_passphrase.is_empty() {
         return Err("Enter a new passphrase".to_string());
     }
+    let reauth_token = api::reauth(account_password, "").await?;
     let mut keyring = load_keyring().await?;
     keyring
         .verify(master)
@@ -312,7 +341,7 @@ pub async fn change_passphrase(master: &MasterKey, new_passphrase: &str) -> Resu
     keyring
         .add_passphrase_with_kek(master, &kek, &salt, &params)
         .map_err(|_| "could not wrap the key with the new passphrase".to_string())?;
-    upload_keyring(&keyring).await
+    upload_keyring(&keyring, Some(&reauth_token)).await
 }
 
 /// A plaintext file that still needs encrypting before its folder can be
