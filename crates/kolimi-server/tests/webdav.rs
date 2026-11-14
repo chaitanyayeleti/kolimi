@@ -2208,6 +2208,47 @@ async fn passkey_login_begin_hides_unknown_users() {
 }
 
 #[tokio::test]
+async fn passkey_only_account_cannot_remove_its_last_passkey() {
+    let server = setup().await;
+    let user = server.state.db.find_user(USER).await.unwrap().unwrap();
+    server
+        .state
+        .db
+        .add_passkey(user.id, "only-key", "{}", 0)
+        .await
+        .unwrap();
+
+    // Create a session while the password still exists, then make the
+    // account passkey-only.
+    let body = json!({ "username": USER, "password": PASS }).to_string();
+    let (status, headers, _) = send(
+        &server.app,
+        json_request("POST", "/api/session", None, &body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session = cookie_pair(&headers, "kolimi_session").unwrap();
+    let csrf_pair = cookie_pair(&headers, "kolimi_csrf").unwrap();
+    let csrf = csrf_pair.split_once('=').unwrap().1;
+    server.state.db.clear_password(USER).await.unwrap();
+
+    let passkey_id = server.state.db.list_passkeys(user.id).await.unwrap()[0].id;
+    let proof = server.state.reauth.issue(user.id).unwrap();
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/passkeys/{passkey_id}"))
+        .header(header::COOKIE, format!("{session}; {csrf_pair}"))
+        .header("x-csrf-token", csrf)
+        .header("x-reauth-token", proof)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(&server.app, request).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body:?}");
+    assert!(String::from_utf8_lossy(&body).contains("last passkey"));
+    assert_eq!(server.state.db.count_passkeys(user.id).await.unwrap(), 1);
+}
+
+#[tokio::test]
 async fn passkey_full_register_and_login_flow() {
     let server = setup().await;
     let auth = basic(USER, PASS);

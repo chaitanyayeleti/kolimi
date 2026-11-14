@@ -194,6 +194,26 @@ pub async fn delete(
     if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
         return response;
     }
+    // A passkey-only account that removes its last credential locks itself
+    // out (recovery then needs an administrator). Refuse the self-lockout.
+    let passwordless = state
+        .db
+        .get_user(user.user_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|account| account.password_hash.is_empty());
+    if passwordless
+        && matches!(state.db.count_passkeys(user.user_id).await, Ok(count) if count <= 1)
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "cannot remove the last passkey on a passwordless account"
+            })),
+        )
+            .into_response();
+    }
     match state.db.delete_passkey(user.user_id, passkey_id).await {
         Ok(()) => {
             audit(
