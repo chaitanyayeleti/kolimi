@@ -111,6 +111,63 @@ test("web settings tabs and the passkeys panel", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("web admin page lists and inspects users", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Admin — users", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Create user", exact: true }),
+  ).toBeVisible();
+
+  const bob = page.locator("main.content li.row", { hasText: "bob" }).first();
+  await bob.getByRole("button", { name: "Manage", exact: true }).click();
+  const modal = page.locator(".modal");
+  await expect(
+    modal.getByRole("heading", { name: "User — bob", exact: true }),
+  ).toBeVisible();
+  await expect(
+    modal.getByText("Sign-in factors", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    modal.getByText("Storage quota", { exact: true }),
+  ).toBeVisible();
+  await modal.getByRole("button", { name: "Close", exact: true }).click();
+
+  await page.getByRole("button", { name: "Create user", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Create user", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
+test("web admin creates and deletes a user", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+
+  const username = `e2e-user-${Date.now()}`;
+  await page.getByRole("button", { name: "Create user", exact: true }).click();
+  const create = page.locator(".modal");
+  await create.getByLabel("Username", { exact: true }).fill(username);
+  await create.getByLabel("Initial password", { exact: true }).fill("e2e-password-123");
+  await create.getByLabel("Confirm password", { exact: true }).fill("e2e-password-123");
+  await create.getByRole("button", { name: "Create user", exact: true }).click();
+
+  const row = page.locator("main.content li.row", { hasText: username }).first();
+  await expect(row).toBeVisible();
+  await row.getByRole("button", { name: "Manage", exact: true }).click();
+
+  const detail = page.locator(".modal");
+  await expect(
+    detail.getByRole("heading", { name: `User — ${username}`, exact: true }),
+  ).toBeVisible();
+  await detail.getByLabel("Username", { exact: true }).fill(username);
+  await detail.getByRole("button", { name: "Delete user", exact: true }).click();
+  await expect(page.getByText(username, { exact: true })).toHaveCount(0);
+});
+
 test("web passkey add requires re-authentication", async ({ page }) => {
   await login(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();

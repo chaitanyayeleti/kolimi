@@ -1,6 +1,6 @@
 # User management — plan
 
-Status: **in progress** · Date: 2026-11-14 · Phase 1 landed on `main`
+Status: **in progress** · Date: 2026-11-14 · Phases 1–2 landed on `main`
 Builds on: [operations.md](../operations.md), [reference.md](../reference.md),
 [red-team report](../audit/redteam-2026-11-14.md)
 
@@ -88,12 +88,12 @@ Password change must use `POST /api/reauth` rather than reimplementing
 password/TOTP verification. Passkey-only accounts do not get a password form;
 they use the existing passkey management panel.
 
-### Phase 2 — admin essentials (P0)
+### Phase 2 — admin essentials (P0) — landed (Users page)
 
-Replace the Admin modal with a page containing **Users / Groups / Audit**
-tabs.
+The Admin modal is now a page. This phase shipped the **Users** view; the
+**Groups** and **Audit** tabs land in Phase 3.
 
-Users tab:
+Users view:
 
 - search, filters, sort, and real pagination;
 - create a user with a generated temporary password or an admin-supplied one;
@@ -127,10 +127,13 @@ The recover payload is:
 ```
 
 When `password` is omitted, generate a random password and return it once with
-`Cache-Control: no-store`. Recover, delete, force sign-out, and
-grant/revoke-admin require re-authentication.
+`Cache-Control: no-store`. Recovery and force sign-out require
+re-authentication. Extending that requirement to the existing `PATCH` and
+`DELETE /api/users/{username}` routes is a follow-up hardening item.
 
 ### Phase 3 — groups and audit (P1)
+
+Add the remaining Admin tabs.
 
 Groups tab:
 
@@ -262,9 +265,9 @@ password with the encryption passphrase.
 
 ## 10. Rollout and docs
 
-- New API routes are additive. Existing response shapes stay stable; the
-  destructive user routes gain a required re-auth header, which must be
-  documented as a deliberate compatibility change.
+- New API routes are additive. Existing response shapes stay stable.
+  Recovery and force sign-out require re-authentication; extending that to
+  the existing `PATCH`/`DELETE` routes is a separate compatibility change.
 - Refactor `admin::recover_user` to accept an actor so CLI recovery still
   records `cli` and HTTP recovery records the admin.
 - Update [operations.md](../operations.md) and [reference.md](../reference.md)

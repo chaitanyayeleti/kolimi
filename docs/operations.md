@@ -35,6 +35,14 @@ Users manage their own login password and active sessions under
 two-factor proof and revokes every other session; the current session stays
 signed in.
 
+Administrators use the **Admin** sidebar entry, which opens a user page with
+search, filters, and cursor paging. From there an admin can create a user,
+open a detail view, edit a quota, grant/revoke admin, disable/enable an
+account, force sign-out, or reset a password. Password recovery generates a
+new password once (or accepts one) and by default drops sessions, clears TOTP
+and removes passkeys. Recovery and force sign-out require the admin's own
+password or a two-factor code.
+
 Passkeys are registered in the web UI (**Settings → Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is rejected
 (and audited). Adding or removing a passkey asks for the account password

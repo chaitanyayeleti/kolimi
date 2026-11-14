@@ -260,10 +260,9 @@ pub(crate) async fn start_session(
     {
         return internal_error();
     }
-    let _ = state
-        .db
-        .delete_expired_sessions(kolimi_db::now_millis())
-        .await;
+    let now = kolimi_db::now_millis();
+    let _ = state.db.set_last_login(user.id, now).await;
+    let _ = state.db.delete_expired_sessions(now).await;
 
     let mut response = Json(json!({
         "username": user.username,
@@ -667,6 +666,12 @@ pub async fn search(
 pub struct NewUserRequest {
     username: String,
     password: String,
+    /// Grant administrator rights at creation time.
+    #[serde(default)]
+    admin: bool,
+    /// Optional per-user quota in bytes (`0` = unlimited).
+    #[serde(default)]
+    quota_bytes: Option<i64>,
 }
 
 /// `POST /api/users` — admin-only user creation.
@@ -678,6 +683,9 @@ pub async fn create_user(
     if !user.is_admin {
         return StatusCode::FORBIDDEN.into_response();
     }
+    if req.quota_bytes.is_some_and(|quota| quota < 0) {
+        return bad_request("quota_bytes must be >= 0");
+    }
     let candidate = req.password.clone();
     let hash = match tokio::task::spawn_blocking(move || password::hash_password(&candidate)).await
     {
@@ -687,24 +695,29 @@ pub async fn create_user(
     };
     match state.db.create_user(&req.username, &hash).await {
         Ok(created) => {
+            if req.admin
+                && let Err(error) = state.db.set_admin(created.id, true).await
+            {
+                return db_error(error);
+            }
+            if let Some(quota) = req.quota_bytes
+                && let Err(error) = state.db.set_quota_bytes(created.id, Some(quota)).await
+            {
+                return db_error(error);
+            }
             audit(
                 &state,
                 Some(user.user_id),
                 Some(&user.username),
                 "user.add",
                 &created.username,
-                json!({ "by": "api" }),
+                json!({ "by": "api", "admin": req.admin, "quota_bytes": req.quota_bytes }),
             )
             .await;
-            (
-                StatusCode::CREATED,
-                Json(json!({
-                    "id": created.id,
-                    "username": created.username,
-                    "is_admin": created.is_admin,
-                })),
-            )
-                .into_response()
+            match state.db.get_user(created.id).await {
+                Ok(Some(updated)) => (StatusCode::CREATED, Json(json!(updated))).into_response(),
+                _ => internal_error(),
+            }
         }
         Err(DbError::Conflict(_)) => (
             StatusCode::CONFLICT,
@@ -733,6 +746,9 @@ pub struct UsersQuery {
     /// Filter: `over_quota`, `disabled`, or `admin`.
     #[serde(default)]
     filter: Option<String>,
+    /// Case-insensitive username substring search.
+    #[serde(default)]
+    q: Option<String>,
 }
 
 /// `GET /api/users?cursor=&limit=&sort=&order=&filter=` — admin-only list.
@@ -752,7 +768,6 @@ pub async fn list_users(
         return StatusCode::FORBIDDEN.into_response();
     }
     let limit = query.limit.unwrap_or(100).clamp(1, 1000);
-    let after = query.cursor.unwrap_or(0).max(0);
     let sort = match query.sort.as_deref() {
         None | Some("id") => UserSort::Id,
         Some("username") => UserSort::Username,
@@ -770,6 +785,13 @@ pub async fn list_users(
         Some("desc") => SortOrder::Desc,
         Some(other) => return bad_request(&format!("unknown order: {other}")),
     };
+    // Descending id pages use `id < cursor`; the first page therefore starts
+    // at the top of the range, not at zero.
+    let after = match query.cursor {
+        Some(cursor) => cursor.max(0),
+        None if order == SortOrder::Desc => i64::MAX,
+        None => 0,
+    };
     let filter = match query.filter.as_deref() {
         None => UserFilter::None,
         Some("over_quota") => UserFilter::OverQuota,
@@ -777,10 +799,22 @@ pub async fn list_users(
         Some("admin") => UserFilter::Admin,
         Some(other) => return bad_request(&format!("unknown filter: {other}")),
     };
+    let search = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+    if search.is_some_and(|q| q.chars().count() > 64) {
+        return bad_request("search query must be at most 64 characters");
+    }
     let default_quota = state.vfs.store().default_quota();
     match state
         .db
-        .users_page_sorted(after, limit + 1, sort, order, filter, default_quota)
+        .users_page_sorted(kolimi_db::UserPageQuery {
+            after_id: after,
+            limit: limit + 1,
+            sort,
+            order,
+            filter,
+            default_quota,
+            search,
+        })
         .await
     {
         Ok(mut users) => {
@@ -809,9 +843,211 @@ pub async fn user_detail(
     if !user.is_admin {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match state.db.find_user(&username).await {
-        Ok(Some(account)) => Json(json!(account)).into_response(),
-        Ok(None) => not_found(),
+    let Some(account) = state.db.find_user(&username).await.ok().flatten() else {
+        return not_found();
+    };
+    let passkeys = match state.db.count_passkeys(account.id).await {
+        Ok(count) => count,
+        Err(_) => return internal_error(),
+    };
+    let totp = match state.db.totp_secret(account.id).await {
+        Ok(secret) => secret.is_some(),
+        Err(_) => return internal_error(),
+    };
+    let sessions = match state.db.list_user_sessions(account.id).await {
+        Ok(sessions) => sessions.len(),
+        Err(_) => return internal_error(),
+    };
+    let groups = match state.db.user_groups(account.id).await {
+        Ok(groups) => groups
+            .into_iter()
+            .map(|group| group.name)
+            .collect::<Vec<_>>(),
+        Err(_) => return internal_error(),
+    };
+    let owned_shares = match state.db.shares_owned(account.id).await {
+        Ok(shares) => shares.len(),
+        Err(_) => return internal_error(),
+    };
+    let received_shares = match state.db.received_shares(account.id).await {
+        Ok(shares) => shares.len(),
+        Err(_) => return internal_error(),
+    };
+    let e2ee_keyring = match state.db.keyring(account.id).await {
+        Ok(keyring) => keyring.is_some(),
+        Err(_) => return internal_error(),
+    };
+    Json(json!({
+        "id": account.id,
+        "username": account.username,
+        "is_admin": account.is_admin,
+        "disabled": account.disabled,
+        "created_at": account.created_at,
+        "last_login_at": account.last_login_at,
+        "quota_bytes": account.quota_bytes,
+        "used_bytes": account.used_bytes,
+        "usage_updated_at": account.usage_updated_at,
+        "password_login": !account.password_hash.is_empty(),
+        "passkey_count": passkeys,
+        "totp_enabled": totp,
+        "session_count": sessions,
+        "groups": groups,
+        "owned_shares": owned_shares,
+        "received_shares": received_shares,
+        "e2ee_keyring": e2ee_keyring,
+    }))
+    .into_response()
+}
+
+/// Payload for admin account recovery.
+#[derive(Deserialize, Default)]
+pub struct RecoverUserRequest {
+    /// Optional new password. When omitted, a generated password is returned
+    /// once in the response.
+    #[serde(default)]
+    password: Option<String>,
+    /// Keep the current TOTP secret.
+    #[serde(default)]
+    keep_totp: bool,
+    /// Keep registered passkeys.
+    #[serde(default)]
+    keep_passkeys: bool,
+}
+
+/// `POST /api/users/{username}/recover` — admin account recovery.
+///
+/// Requires a fresh re-authentication token. By default this drops every
+/// session, clears TOTP, and removes every passkey.
+pub async fn recover_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+    Json(req): Json<RecoverUserRequest>,
+) -> Response {
+    if !user.is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
+        return not_found();
+    };
+    if req
+        .password
+        .as_deref()
+        .filter(|password| !password.is_empty())
+        .is_some_and(|password| password.chars().count() < password::MIN_PASSWORD_LEN)
+    {
+        return bad_request(&format!(
+            "password must be at least {} characters",
+            password::MIN_PASSWORD_LEN
+        ));
+    }
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
+    }
+    let generated = req
+        .password
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .is_none();
+    let password = match req.password.filter(|value| !value.is_empty()) {
+        Some(password) => password,
+        None => match token::new_session_token() {
+            Ok(password) => password,
+            Err(_) => return internal_error(),
+        },
+    };
+    let candidate = password.clone();
+    let hash = match tokio::task::spawn_blocking(move || password::hash_password(&candidate)).await
+    {
+        Ok(Ok(hash)) => hash,
+        Ok(Err(error)) => return bad_request(&error.to_string()),
+        Err(_) => return internal_error(),
+    };
+    let report = match crate::admin::recover_user_by(
+        &state.db,
+        &target.username,
+        &hash,
+        req.keep_totp,
+        !req.keep_passkeys,
+        Some(user.user_id),
+        Some(&user.username),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(DbError::NotFound(_)) => return not_found(),
+        Err(_) => return internal_error(),
+    };
+    let mut response = Json(json!({
+        "username": target.username,
+        "password": generated.then_some(password),
+        "sessions_dropped": report.sessions_dropped,
+        "passkeys_removed": report.passkeys_removed,
+        "totp_disabled": report.totp_disabled,
+    }))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// `POST /api/users/{username}/logout` — revoke every session of a user.
+pub async fn admin_logout_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+) -> Response {
+    if !user.is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
+    }
+    let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
+        return not_found();
+    };
+    let revoked = match state.db.delete_user_sessions(target.id).await {
+        Ok(count) => count,
+        Err(_) => return internal_error(),
+    };
+    audit(
+        &state,
+        Some(user.user_id),
+        Some(&user.username),
+        "session.revoke_all",
+        &target.username,
+        json!({ "revoked": revoked, "by": "admin" }),
+    )
+    .await;
+    Json(json!({ "sessions_revoked": revoked })).into_response()
+}
+
+/// `GET /api/users/{username}/sessions` — admin-only session metadata.
+pub async fn admin_user_sessions(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(username): Path<String>,
+) -> Response {
+    if !user.is_admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
+        return not_found();
+    };
+    match state.db.list_user_sessions(target.id).await {
+        Ok(sessions) => {
+            let current = (target.id == user.user_id)
+                .then_some(user.session_hash.as_ref())
+                .flatten();
+            let sessions: Vec<Value> = sessions
+                .iter()
+                .map(|session| session_json(session, current))
+                .collect();
+            Json(json!({ "sessions": sessions })).into_response()
+        }
         Err(_) => internal_error(),
     }
 }

@@ -213,6 +213,12 @@ pub fn build_app(state: AppState) -> Router {
                 .delete(api::delete_user),
         )
         .route("/api/users/{username}/usage", get(api::user_usage))
+        .route("/api/users/{username}/recover", post(api::recover_user))
+        .route("/api/users/{username}/logout", post(api::admin_logout_user))
+        .route(
+            "/api/users/{username}/sessions",
+            get(api::admin_user_sessions),
+        )
         .route("/api/passkeys", get(api_passkey::list))
         .route("/api/passkeys/{id}", delete(api_passkey::delete))
         .route(

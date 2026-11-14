@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/).
   changes require a re-authentication token and revoke every other session.
 - Session rows now record the client IP and `User-Agent` (migration 0026), so
   the account page can show where each session came from.
+- **Admin users page**: the sidebar Admin entry now opens a full page with
+  search, filters, cursor paging, user creation, a detail view, quota editing,
+  role/disable controls, password recovery, and force sign-out. Recovery and
+  force sign-out require a fresh admin re-authentication token. Usernames
+  record their last successful login (migration 0027). New admin endpoints:
+  `POST /api/users/{username}/recover`,
+  `POST /api/users/{username}/logout`, and
+  `GET /api/users/{username}/sessions`; `GET /api/users` accepts `q=`.
+- `POST /api/users` now accepts optional `admin` and `quota_bytes` fields.
 
 ## [0.4.7] - 2026-11-14
 

@@ -28,9 +28,23 @@ async fn request(
     auth: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    request_with_reauth(app, method, uri, auth, None, body).await
+}
+
+async fn request_with_reauth(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    auth: Option<&str>,
+    reauth: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(value) = auth {
         builder = builder.header(header::AUTHORIZATION, value);
+    }
+    if let Some(value) = reauth {
+        builder = builder.header("X-Reauth-Token", value);
     }
     let body = match body {
         Some(value) => {
@@ -69,6 +83,10 @@ async fn status_with_cookie(app: &Router, uri: &str, cookie: &str) -> StatusCode
 
 /// Logs in and returns the `kolimi_session=…` cookie pair.
 async fn login(app: &Router, user: &str) -> String {
+    login_with_password(app, user, PASS).await
+}
+
+async fn login_with_password(app: &Router, user: &str, password: &str) -> String {
     let response = app
         .clone()
         .oneshot(
@@ -77,7 +95,7 @@ async fn login(app: &Router, user: &str) -> String {
                 .uri("/api/session")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    json!({ "username": user, "password": PASS }).to_string(),
+                    json!({ "username": user, "password": password }).to_string(),
                 ))
                 .unwrap(),
         )
@@ -92,6 +110,19 @@ async fn login(app: &Router, user: &str) -> String {
         .find(|cookie| cookie.starts_with("kolimi_session="))
         .map(|cookie| cookie.split(';').next().unwrap().to_string())
         .expect("session cookie")
+}
+
+async fn reauth_token(app: &Router, user: &str, password: &str) -> String {
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/reauth",
+        Some(&basic(user, password)),
+        Some(json!({ "password": password })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["token"].as_str().unwrap().to_string()
 }
 
 async fn setup() -> (tempfile::TempDir, AppState, Router) {
@@ -485,4 +516,173 @@ async fn delete_removes_the_user_and_cascades() {
     let entries = state.db.audit_list(50, None).await.unwrap();
     let actions: Vec<&str> = entries.iter().map(|entry| entry.action.as_str()).collect();
     assert!(actions.contains(&"user.delete"), "{actions:?}");
+}
+
+#[tokio::test]
+async fn admin_search_create_and_detail() {
+    let (_dir, _state, app) = setup().await;
+
+    // A descending first page must not use zero as the keyset boundary.
+    let (status, body) = request(
+        &app,
+        "GET",
+        "/api/users?sort=id&order=desc",
+        Some(&basic("alice", PASS)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<&str> = body["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|user| user["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["bob", "alice"], "{body}");
+
+    let (status, body) = request(
+        &app,
+        "GET",
+        "/api/users?q=bo",
+        Some(&basic("alice", PASS)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<&str> = body["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|user| user["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["bob"], "{body}");
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/users",
+        Some(&basic("alice", PASS)),
+        Some(json!({
+            "username": "carol",
+            "password": "pw123456",
+            "admin": true,
+            "quota_bytes": 4096,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["is_admin"], true);
+    assert_eq!(body["quota_bytes"], 4096);
+
+    // A successful login stamps the account's last-login time.
+    login(&app, "bob").await;
+    let (status, bob_detail) = request(
+        &app,
+        "GET",
+        "/api/users/bob",
+        Some(&basic("alice", PASS)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{bob_detail}");
+    assert!(bob_detail["last_login_at"].as_i64().unwrap_or(0) > 0);
+
+    let (status, body) = request(
+        &app,
+        "GET",
+        "/api/users/carol",
+        Some(&basic("alice", PASS)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["password_login"], true);
+    assert_eq!(body["passkey_count"], 0);
+    assert_eq!(body["totp_enabled"], false);
+    assert_eq!(body["session_count"], 0);
+    assert_eq!(body["owned_shares"], 0);
+    assert_eq!(body["received_shares"], 0);
+    assert_eq!(body["e2ee_keyring"], false);
+    assert_eq!(body["groups"].as_array().unwrap().len(), 0);
+    assert!(body["last_login_at"].is_null());
+}
+
+#[tokio::test]
+async fn recovery_and_force_logout_require_reauth_and_audit_the_admin() {
+    let (_dir, state, app) = setup().await;
+    let alice = state.db.find_user("alice").await.unwrap().unwrap();
+    let bob_session = login(&app, "bob").await;
+
+    // No re-auth token: refused.
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/users/bob/recover",
+        Some(&basic("alice", PASS)),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let token = reauth_token(&app, "alice", PASS).await;
+    let (status, body) = request_with_reauth(
+        &app,
+        "POST",
+        "/api/users/bob/recover",
+        Some(&basic("alice", PASS)),
+        Some(&token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let new_password = body["password"].as_str().unwrap().to_string();
+    assert!(!new_password.is_empty());
+    assert!(body["sessions_dropped"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        status_with_cookie(&app, "/api/me", &bob_session).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // The old password is gone; the generated one works.
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/session",
+        None,
+        Some(json!({ "username": "bob", "password": PASS })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let bob_session = login_with_password(&app, "bob", &new_password).await;
+
+    let token = reauth_token(&app, "alice", PASS).await;
+    let (status, body) = request_with_reauth(
+        &app,
+        "POST",
+        "/api/users/bob/logout",
+        Some(&basic("alice", PASS)),
+        Some(&token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["sessions_revoked"], 1);
+    assert_eq!(
+        status_with_cookie(&app, "/api/me", &bob_session).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Recovery is attributed to the admin, not to the target or "cli".
+    let entries = state.db.audit_list(100, None).await.unwrap();
+    let recovery = entries
+        .iter()
+        .find(|entry| entry.action == "user.recover")
+        .expect("recovery audit entry");
+    assert_eq!(recovery.actor_id, Some(alice.id));
+    assert_eq!(recovery.actor.as_deref(), Some("alice"));
+    let revoked = entries
+        .iter()
+        .find(|entry| entry.action == "session.revoke_all" && entry.subject == "bob")
+        .expect("force logout audit entry");
+    assert_eq!(revoked.actor_id, Some(alice.id));
 }

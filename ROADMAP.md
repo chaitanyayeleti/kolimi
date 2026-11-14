@@ -123,10 +123,10 @@ entries. Do not describe MLS as audited before this completes.
 
 Self-service password/session control and admin create/recover/session
 management are the next usability gap: see
-[docs/plans/user-management.md](docs/plans/user-management.md). Phase 1
-(`Settings → Account`, `POST /api/me/password`, session listing/revocation)
-landed on `main`; admin create/recover, the Users page, groups and audit
-remain.
+[docs/plans/user-management.md](docs/plans/user-management.md). Phases 1–2
+landed on `main`: **Settings → Account** (password change, session
+revocation) and the **Admin → Users** page (create, search, detail, quota,
+recovery, force sign-out). Groups and audit remain.
 
 ## Deferred / non-goals
 

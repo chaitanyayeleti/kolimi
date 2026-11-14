@@ -36,6 +36,28 @@ pub async fn recover_user(
     keep_totp: bool,
     remove_passkeys: bool,
 ) -> Result<Recovery, kolimi_db::DbError> {
+    recover_user_by(
+        db,
+        username,
+        password_hash,
+        keep_totp,
+        remove_passkeys,
+        None,
+        Some("cli"),
+    )
+    .await
+}
+
+/// Like [`recover_user`], but records the real actor (for HTTP recovery).
+pub async fn recover_user_by(
+    db: &Db,
+    username: &str,
+    password_hash: &str,
+    keep_totp: bool,
+    remove_passkeys: bool,
+    actor_id: Option<i64>,
+    actor: Option<&str>,
+) -> Result<Recovery, kolimi_db::DbError> {
     let user = db
         .find_user(username)
         .await?
@@ -59,8 +81,8 @@ pub async fn recover_user(
     let sessions_dropped = db.delete_user_sessions(user.id).await?;
 
     db.audit_append(
-        Some(user.id),
-        Some("cli"),
+        actor_id,
+        actor,
         "user.recover",
         username,
         &serde_json::json!({

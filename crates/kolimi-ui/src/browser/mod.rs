@@ -22,7 +22,7 @@ use self::uploads::UploadContext;
 use crate::api;
 use crate::app::{View as AppView, encode, encode_path, mark_session_expired, toggle_theme};
 use crate::components::Icon;
-use crate::dialogs::SettingsTab;
+use crate::dialogs::{AdminPage, SettingsTab};
 
 mod actions;
 mod dialogs;
@@ -51,7 +51,6 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let results = RwSignal::new(Vec::<SearchHit>::new());
     let search_active = RwSignal::new(false);
     let settings_tab = RwSignal::new(SettingsTab::Encryption);
-    let admin_open = RwSignal::new(false);
     let is_admin = RwSignal::new(false);
     let username = RwSignal::new(String::new());
     let nav_open = RwSignal::new(false);
@@ -546,7 +545,11 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let nav_settings = Callback::new(move |_: ()| {
         open_settings.run(SettingsTab::Encryption);
     });
-    let nav_admin = Callback::new(move |_: ()| admin_open.set(true));
+    let nav_admin = Callback::new(move |_: ()| {
+        search_active.set(false);
+        tab.set(Tab::Admin);
+        nav_open.set(false);
+    });
     let nav_theme = Callback::new(move |_: ()| toggle_theme());
     let nav_sign_out = Callback::new(move |_: ()| sign_out(()));
     let top_menu = Callback::new(move |_: ()| nav_open.set(!nav_open.get_untracked()));
@@ -674,6 +677,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                     }
                         .into_any()
                 }
+                Tab::Admin => {
+                    view! { <AdminPage current_username=username/> }.into_any()
+                }
             }
         }}
                 </main>
@@ -710,7 +716,6 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 vault_setup=vault_setup
                 share_target=share_target
                 versions_for=versions_for
-                admin_open=admin_open
                 e2ee_open=e2ee_open
                 master_signal=e2ee_master
                 settings_tab=settings_tab

@@ -86,6 +86,8 @@ pub struct User {
     pub disabled: bool,
     /// Creation time in Unix milliseconds.
     pub created_at: i64,
+    /// Most recent successful login in Unix milliseconds.
+    pub last_login_at: Option<i64>,
     /// Per-user storage quota in bytes (`None` = server default, `0` = unlimited).
     pub quota_bytes: Option<i64>,
     /// Used storage bytes, maintained incrementally and reconciled by the janitor.
@@ -130,6 +132,25 @@ pub enum UserFilter {
     Disabled,
     /// Only administrators.
     Admin,
+}
+
+/// Parameters for an admin user-list page.
+#[derive(Debug, Clone, Copy)]
+pub struct UserPageQuery<'a> {
+    /// Keyset cursor for the default `Id` order.
+    pub after_id: i64,
+    /// Maximum rows to return.
+    pub limit: i64,
+    /// Sort key.
+    pub sort: UserSort,
+    /// Sort direction.
+    pub order: SortOrder,
+    /// Optional filter.
+    pub filter: UserFilter,
+    /// Server-wide quota used by the over-quota filter (`0` = unlimited).
+    pub default_quota: u64,
+    /// Case-insensitive username substring.
+    pub search: Option<&'a str>,
 }
 
 /// A login session.
@@ -562,15 +583,16 @@ impl Db {
     /// offset-based pagination. `default_quota` is the server-wide quota in
     /// bytes (`0` = unlimited), used to decide which users are over quota
     /// when they have no per-user override.
-    pub async fn users_page_sorted(
-        &self,
-        after_id: i64,
-        limit: i64,
-        sort: UserSort,
-        order: SortOrder,
-        filter: UserFilter,
-        default_quota: u64,
-    ) -> Result<Vec<User>, DbError> {
+    pub async fn users_page_sorted(&self, query: UserPageQuery<'_>) -> Result<Vec<User>, DbError> {
+        let UserPageQuery {
+            after_id,
+            limit,
+            sort,
+            order,
+            filter,
+            default_quota,
+            search,
+        } = query;
         let column = match sort {
             UserSort::Id => "id",
             UserSort::Username => "username",
@@ -606,6 +628,11 @@ impl Db {
             UserFilter::Admin => clauses.push("is_admin = 1".to_string()),
             UserFilter::None => {}
         }
+        if search.is_some() {
+            // Usernames are ASCII, so `lower` is sufficient for the
+            // case-insensitive admin search and avoids LIKE wildcards.
+            clauses.push("instr(lower(username), lower(?)) > 0".to_string());
+        }
         let mut sql = String::from("SELECT * FROM users");
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
@@ -616,6 +643,9 @@ impl Db {
         let mut query = sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(sql));
         if sort == UserSort::Id {
             query = query.bind(after_id);
+        }
+        if let Some(search) = search {
+            query = query.bind(search);
         }
         query
             .bind(limit)
@@ -829,6 +859,16 @@ impl Db {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// Records a successful login time for the admin user list.
+    pub async fn set_last_login(&self, user_id: i64, at: i64) -> Result<(), DbError> {
+        sqlx::query("UPDATE users SET last_login_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Creates a login session.

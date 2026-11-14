@@ -395,6 +395,7 @@ mod tests {
             is_admin: false,
             disabled: false,
             created_at: 0,
+            last_login_at: None,
             quota_bytes: quota,
             used_bytes: used,
             usage_updated_at: None,

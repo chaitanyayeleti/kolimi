@@ -59,6 +59,7 @@ pub(crate) fn Sidebar(
                                 view! {
                                     <button
                                         class="nav-item"
+                                        class:active=move || tab.get() == Tab::Admin
                                         on:click=move |_| on_admin.run(())
                                     >
                                         <Icon name="users"/>
@@ -186,6 +187,12 @@ pub(crate) fn Topbar(
                                         .into_any(),
                                 ];
                             }
+                            if tab.get() == Tab::Admin {
+                                return vec![
+                                    view! { <span class="crumb current">"Admin"</span> }
+                                        .into_any(),
+                                ];
+                            }
                             let current = path.get();
                             let segments: Vec<&str> = current
                                 .split('/')
@@ -256,6 +263,7 @@ pub(crate) fn Topbar(
                         }}
                     </div>
                     <div class="topbar-spacer"></div>
+                    <Show when=move || tab.get() == Tab::Files>
                     <div class="topbar-actions">
                         <form class="search" on:submit=move |ev| on_search_submit.run(ev)>
                             <Icon name="search"/>
@@ -296,6 +304,7 @@ pub(crate) fn Topbar(
                             </button>
                         </div>
                     </div>
+                    </Show>
                 </header>
     }
 }
