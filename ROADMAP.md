@@ -119,6 +119,14 @@ entries. Do not describe MLS as audited before this completes.
 - Add a docs review to the release checklist so install commands and
   audit status cannot drift again.
 
+### 5. User management
+
+Self-service password/session control and admin create/recover/session
+management are the next usability gap: see
+[docs/plans/user-management.md](docs/plans/user-management.md). The backend
+already has most primitives; the first slice adds `POST /api/me/password`,
+session listing/revocation, admin recovery, and a real Users page.
+
 ## Deferred / non-goals
 
 - **Plugin host.** The old wasmtime/WIT host was removed in 0.1.26; do not

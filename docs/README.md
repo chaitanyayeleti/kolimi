@@ -56,6 +56,7 @@ the source of truth for what has and has not been reviewed.
 | [../ROADMAP.md](../ROADMAP.md) | Current state, next work, deferred items, non-goals |
 | [plans/clients.md](plans/clients.md) | Desktop → mobile client roadmap |
 | [plans/android.md](plans/android.md) | Android/F-Droid client plan |
+| [plans/user-management.md](plans/user-management.md) | Admin and self-service account management plan |
 | [plans/releases.md](plans/releases.md) | Release channels, tag pipeline, version-bump checklist |
 | [../CHANGELOG.md](../CHANGELOG.md) | What shipped in each release |
 
