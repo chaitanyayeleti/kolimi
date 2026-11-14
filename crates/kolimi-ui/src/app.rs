@@ -8,13 +8,45 @@ use serde_json::json;
 
 use crate::api;
 use crate::browser::Browser;
-use crate::components::Icon;
+use crate::components::{ErrorText, Icon};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum View {
     Loading,
     Login,
+    PasswordChange,
+    Invite,
     Browser,
+}
+
+/// Whether the current location is the invite-acceptance shell.
+fn on_invite_route() -> bool {
+    web_sys::window()
+        .and_then(|window| window.location().pathname().ok())
+        .is_some_and(|path| path.trim_end_matches('/') == "/invite")
+}
+
+/// Reads the invite token from the URL fragment, which never reaches the
+/// server or a proxy log.
+fn invite_token() -> Option<String> {
+    let hash = web_sys::window().and_then(|window| window.location().hash().ok())?;
+    let token = hash.strip_prefix("#token=")?.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+fn view_for_me(body: &serde_json::Value) -> View {
+    if body["must_change_password"].as_bool() == Some(true) {
+        View::PasswordChange
+    } else {
+        View::Browser
+    }
+}
+
+async fn signed_in_view() -> View {
+    match api::get("/api/me").await {
+        Ok(response) if response.status == 200 => view_for_me(&response.body),
+        _ => View::Login,
+    }
 }
 
 pub fn encode(value: &str) -> String {
@@ -127,13 +159,12 @@ pub(crate) fn relative_time(ms: i64) -> String {
 pub fn App() -> impl IntoView {
     let view = RwSignal::new(View::Loading);
     Effect::new(move |_| {
+        if on_invite_route() {
+            view.set(View::Invite);
+            return;
+        }
         spawn_local(async move {
-            let signed_in = matches!(api::get("/api/me").await, Ok(r) if r.status == 200);
-            view.set(if signed_in {
-                View::Browser
-            } else {
-                View::Login
-            });
+            view.set(signed_in_view().await);
         });
     });
 
@@ -146,6 +177,8 @@ pub fn App() -> impl IntoView {
             }
                 .into_any(),
             View::Login => view! { <Login view=view/> }.into_any(),
+            View::PasswordChange => view! { <PasswordChange view=view/> }.into_any(),
+            View::Invite => view! { <InvitePage/> }.into_any(),
             View::Browser => view! { <Browser view=view/> }.into_any(),
         }}
     }
@@ -193,7 +226,7 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
             let result = api::send_json("POST", "/api/session", &payload).await;
             busy.set(false);
             match result {
-                Ok(r) if r.status == 200 => view.set(View::Browser),
+                Ok(r) if r.status == 200 => view.set(signed_in_view().await),
                 Ok(r) if r.body["totp_required"].as_bool() == Some(true) => {
                     needs_code.set(true);
                     error.set("Enter your two-factor code".to_string());
@@ -230,7 +263,7 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
             let result = crate::passkey::login(&user).await;
             busy.set(false);
             match result {
-                Ok(()) => view.set(View::Browser),
+                Ok(()) => view.set(signed_in_view().await),
                 Err(e) => error.set(e),
             }
         });
@@ -299,6 +332,269 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
                 <p class="error">{move || error.get()}</p>
             </Show>
         </form>
+        </div>
+    }
+}
+
+/// Forced password rotation, shown when the server marks the session as
+/// needing a password change. The API refuses everything else until this
+/// succeeds.
+#[component]
+fn PasswordChange(view: RwSignal<View>) -> impl IntoView {
+    let current_password = RwSignal::new(String::new());
+    let code = RwSignal::new(String::new());
+    let new_password = RwSignal::new(String::new());
+    let confirm_password = RwSignal::new(String::new());
+    let error = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+
+    let submit = move |ev: ev::SubmitEvent| {
+        ev.prevent_default();
+        let new = new_password.get_untracked();
+        if new.chars().count() < 8 {
+            error.set("Use at least 8 characters for the new password".to_string());
+            return;
+        }
+        if new != confirm_password.get_untracked() {
+            error.set("The new password and confirmation do not match".to_string());
+            return;
+        }
+        let password_value = current_password.get_untracked();
+        let code_value = code.get_untracked();
+        if password_value.is_empty() && code_value.is_empty() {
+            error.set("Confirm your current password or a two-factor code".to_string());
+            return;
+        }
+        busy.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            let result = async {
+                let token = api::reauth(&password_value, &code_value).await?;
+                let response = api::send_json_with(
+                    "POST",
+                    "/api/me/password",
+                    &json!({ "new_password": new }),
+                    Some(("x-reauth-token", token.as_str())),
+                )
+                .await?;
+                if response.status == 204 {
+                    Ok(())
+                } else {
+                    Err(response
+                        .error()
+                        .unwrap_or("Could not change the password")
+                        .to_string())
+                }
+            }
+            .await;
+            match result {
+                Ok(()) => view.set(View::Browser),
+                Err(message) => error.set(message),
+            }
+            busy.set(false);
+        });
+    };
+
+    let sign_out = move |_| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().assign("/logout");
+        }
+    };
+
+    view! {
+        <div class="login-wrap">
+            <form class="card login" on:submit=submit>
+                <div class="hero">
+                    <Logo/>
+                    <h2>"Change your password"</h2>
+                    <p class="muted">
+                        "An administrator requires you to choose a new password before using Kolimi."
+                    </p>
+                </div>
+                <label>
+                    "Current password"
+                    <input
+                        type="password"
+                        autocomplete="current-password"
+                        prop:value=move || current_password.get()
+                        on:input=move |ev| current_password.set(event_target_value(&ev))
+                    />
+                </label>
+                <label>
+                    "Two-factor / recovery code"
+                    <input
+                        type="text"
+                        autocomplete="one-time-code"
+                        prop:value=move || code.get()
+                        on:input=move |ev| code.set(event_target_value(&ev))
+                    />
+                </label>
+                <label>
+                    "New password"
+                    <input
+                        type="password"
+                        autocomplete="new-password"
+                        prop:value=move || new_password.get()
+                        on:input=move |ev| new_password.set(event_target_value(&ev))
+                    />
+                </label>
+                <label>
+                    "Confirm new password"
+                    <input
+                        type="password"
+                        autocomplete="new-password"
+                        prop:value=move || confirm_password.get()
+                        on:input=move |ev| confirm_password.set(event_target_value(&ev))
+                    />
+                </label>
+                <button class="primary" type="submit" disabled=move || busy.get()>
+                    {move || if busy.get() { "Changing…" } else { "Change password" }}
+                </button>
+                <button class="ghost" type="button" on:click=sign_out>
+                    <Icon name="logout"/>
+                    "Sign out"
+                </button>
+                <ErrorText message=error/>
+            </form>
+        </div>
+    }
+}
+
+/// Invite acceptance: chooses the first password and creates the account.
+#[component]
+fn InvitePage() -> impl IntoView {
+    let token = invite_token();
+    let meta = RwSignal::new(Option::<serde_json::Value>::None);
+    let username = RwSignal::new(String::new());
+    let password = RwSignal::new(String::new());
+    let confirm = RwSignal::new(String::new());
+    let created = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+
+    let load_token = token.clone();
+    Effect::new(move |_| {
+        let Some(token) = load_token.clone() else {
+            error.set("This invite link is missing its token.".to_string());
+            return;
+        };
+        spawn_local(async move {
+            match api::send_json("POST", "/api/invites/lookup", &json!({ "token": token })).await {
+                Ok(response) if response.status == 200 => {
+                    username.set(
+                        response.body["username"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    meta.set(Some(response.body));
+                }
+                Ok(_) => error.set(
+                    "This invite is invalid, expired, or already used. Ask an administrator for a new link."
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+        });
+    });
+
+    let submit = move |ev: ev::SubmitEvent| {
+        ev.prevent_default();
+        let Some(token) = token.clone() else {
+            error.set("This invite link is missing its token.".to_string());
+            return;
+        };
+        if password.get_untracked().chars().count() < 8 {
+            error.set("Use at least 8 characters for the password".to_string());
+            return;
+        }
+        if password.get_untracked() != confirm.get_untracked() {
+            error.set("The password and confirmation do not match".to_string());
+            return;
+        }
+        busy.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            let body = json!({
+                "token": token,
+                "password": password.get_untracked(),
+            });
+            match api::send_json("POST", "/api/invites/accept", &body).await {
+                Ok(response) if response.status == 201 => created.set(true),
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not create the account")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            busy.set(false);
+        });
+    };
+
+    let go_to_app = move |_| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().assign("/app/");
+        }
+    };
+
+    view! {
+        <div class="login-wrap">
+            <form class="card login" on:submit=submit>
+                <div class="hero">
+                    <Logo/>
+                    <h2>{move || if created.get() { "Account ready" } else { "Join Kolimi" }}</h2>
+                    <p class="muted">
+                        {move || {
+                            if created.get() {
+                                format!("You can now sign in as {}.", username.get())
+                            } else {
+                                "Choose a password for your new account.".to_string()
+                            }
+                        }}
+                    </p>
+                </div>
+                <Show when=move || !created.get() && !username.get().is_empty()>
+                    <p class="muted">
+                        "Creating account " <strong>{move || username.get()}</strong>
+                    </p>
+                </Show>
+                <Show when=move || !created.get()>
+                    <label>
+                        "Password"
+                        <input
+                            type="password"
+                            autocomplete="new-password"
+                            prop:value=move || password.get()
+                            on:input=move |ev| password.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <label>
+                        "Confirm password"
+                        <input
+                            type="password"
+                            autocomplete="new-password"
+                            prop:value=move || confirm.get()
+                            on:input=move |ev| confirm.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <button class="primary" type="submit" disabled=move || busy.get()>
+                        {move || if busy.get() { "Creating…" } else { "Create account" }}
+                    </button>
+                </Show>
+                <Show when=move || created.get()>
+                    <button class="primary" type="button" on:click=go_to_app>
+                        "Go to sign in"
+                    </button>
+                </Show>
+                <Show when=move || created.get()>
+                    <p class="muted">
+                        "Your account password is separate from the encryption passphrase you will choose later."
+                    </p>
+                </Show>
+                <ErrorText message=error/>
+            </form>
         </div>
     }
 }

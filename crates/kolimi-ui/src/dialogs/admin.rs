@@ -80,6 +80,7 @@ fn random_password() -> String {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AdminTab {
     Users,
+    Invites,
     Groups,
     Audit,
 }
@@ -102,6 +103,13 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
             </button>
             <button
                 role="tab"
+                class:active=move || tab.get() == AdminTab::Invites
+                on:click=move |_| tab.set(AdminTab::Invites)
+            >
+                "Invites"
+            </button>
+            <button
+                role="tab"
                 class:active=move || tab.get() == AdminTab::Groups
                 on:click=move |_| tab.set(AdminTab::Groups)
             >
@@ -118,6 +126,9 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
 
         <Show when=move || tab.get() == AdminTab::Users>
             <UsersPanel current_username=current_username/>
+        </Show>
+        <Show when=move || tab.get() == AdminTab::Invites>
+            <InvitesPanel/>
         </Show>
         <Show when=move || tab.get() == AdminTab::Groups>
             <GroupsPanel/>
@@ -365,7 +376,10 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
     let username = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
     let confirm = RwSignal::new(String::new());
+    let display_name = RwSignal::new(String::new());
+    let email = RwSignal::new(String::new());
     let admin = RwSignal::new(false);
+    let must_change_password = RwSignal::new(true);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
 
@@ -400,6 +414,9 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
                     "username": user,
                     "password": pass,
                     "admin": admin.get_untracked(),
+                    "display_name": display_name.get_untracked(),
+                    "email": email.get_untracked(),
+                    "must_change_password": must_change_password.get_untracked(),
                 }),
             )
             .await
@@ -455,6 +472,24 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
                     "Generate password"
                 </button>
             </div>
+            <label>
+                "Display name"
+                <input
+                    type="text"
+                    autocomplete="off"
+                    prop:value=move || display_name.get()
+                    on:input=move |ev| display_name.set(event_target_value(&ev))
+                />
+            </label>
+            <label>
+                "Email"
+                <input
+                    type="email"
+                    autocomplete="off"
+                    prop:value=move || email.get()
+                    on:input=move |ev| email.set(event_target_value(&ev))
+                />
+            </label>
             <label class="row">
                 <input
                     type="checkbox"
@@ -462,6 +497,16 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
                     on:change=move |ev| admin.set(event_target_checked(&ev))
                 />
                 "Make administrator"
+            </label>
+            <label class="row">
+                <input
+                    type="checkbox"
+                    prop:checked=move || must_change_password.get()
+                    on:change=move |ev| {
+                        must_change_password.set(event_target_checked(&ev))
+                    }
+                />
+                "Require password change at next sign-in"
             </label>
             <ErrorText message=error/>
             <div class="row-actions">
@@ -695,6 +740,37 @@ fn UserDetailDialog(
                                 "disabled".to_string()
                             } else {
                                 "active".to_string()
+                            }
+                        }}
+                    </span>
+                </li>
+                <li class="row">
+                    <span class="name">"Display name"</span>
+                    <span class="muted">
+                        {move || {
+                            detail.get()["display_name"]
+                                .as_str()
+                                .unwrap_or("—")
+                                .to_string()
+                        }}
+                    </span>
+                </li>
+                <li class="row">
+                    <span class="name">"Email"</span>
+                    <span class="muted">
+                        {move || {
+                            detail.get()["email"].as_str().unwrap_or("—").to_string()
+                        }}
+                    </span>
+                </li>
+                <li class="row">
+                    <span class="name">"Password rotation"</span>
+                    <span class="badge">
+                        {move || {
+                            if detail.get()["must_change_password"].as_bool() == Some(true) {
+                                "change required".to_string()
+                            } else {
+                                "normal".to_string()
                             }
                         }}
                     </span>
@@ -981,6 +1057,331 @@ fn detail_rows(details: &Value) -> Vec<(String, String)> {
             .map(|(key, value)| (key.clone(), detail_text(value)))
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+fn time_until(ms: i64) -> String {
+    let seconds = ((ms - js_sys::Date::now() as i64) / 1000).max(0);
+    match seconds {
+        0 => "expired".to_string(),
+        s if s < 3600 => format!("in {}m", (s / 60).max(1)),
+        s if s < 86_400 => format!("in {}h", s / 3600),
+        s => format!("in {}d", s / 86_400),
+    }
+}
+
+fn absolute_url(path: &str) -> String {
+    let origin = web_sys::window()
+        .and_then(|window| window.location().origin().ok())
+        .unwrap_or_default();
+    format!("{origin}{path}")
+}
+
+/// Invites tab: one-time onboarding links.
+#[component]
+fn InvitesPanel() -> impl IntoView {
+    let invites = RwSignal::new(Vec::<Value>::new());
+    let loading = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    let notice = RwSignal::new(String::new());
+    let create_open = RwSignal::new(false);
+    let created_link = RwSignal::new(Option::<String>::None);
+    let created_user = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+
+    let load = Callback::new(move |_: ()| {
+        loading.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            match api::get("/api/invites").await {
+                Ok(response) if response.status == 200 => {
+                    invites.set(
+                        response.body["invites"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not load invites")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            loading.set(false);
+        });
+    });
+    Effect::new(move |_| load.run(()));
+
+    let close_create = Callback::new(move |_: ()| create_open.set(false));
+    let created = Callback::new(move |(url, username): (String, String)| {
+        created_link.set(Some(url));
+        created_user.set(username);
+        load.run(());
+    });
+
+    let revoke = Callback::new(move |id: i64| {
+        busy.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            match api::delete(&format!("/api/invites/{id}")).await {
+                Ok(response) if response.status == 204 => {
+                    notice.set("Invite revoked.".to_string());
+                    load.run(());
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not revoke the invite")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            busy.set(false);
+        });
+    });
+
+    view! {
+        <div class="section-head">
+            <h2>"Invites"</h2>
+            <button class="primary" on:click=move |_| create_open.set(true)>
+                <Icon name="link"/>
+                "Create invite"
+            </button>
+        </div>
+        <p class="muted">
+            "Invite links create an account when accepted. They are single-use, expire, and the token is shown only once."
+        </p>
+        <ErrorText message=error/>
+        <Notice message=notice/>
+
+        <Show when=move || created_link.get().is_some()>
+            <div class="created">
+                <p class="muted">
+                    {move || {
+                        format!(
+                            "Invite link for {}. Shown once — share it securely.",
+                            created_user.get(),
+                        )
+                    }}
+                </p>
+                <code>
+                    {move || {
+                        created_link
+                            .get()
+                            .map(|path| absolute_url(&path))
+                            .unwrap_or_default()
+                    }}
+                </code>
+                <div class="row-actions">
+                    <button on:click=move |_| {
+                        let link = created_link
+                            .get_untracked()
+                            .map(|path| absolute_url(&path))
+                            .unwrap_or_default();
+                        spawn_local(async move {
+                            api::copy_to_clipboard(&link).await;
+                        });
+                    }>"Copy link"</button>
+                    <button
+                        class="ghost"
+                        on:click=move |_| {
+                            created_link.set(None);
+                            created_user.set(String::new());
+                        }
+                    >
+                        "Dismiss"
+                    </button>
+                </div>
+            </div>
+        </Show>
+
+        <p class="muted">{move || format!("{} pending invite(s)", invites.get().len())}</p>
+        <ul class="shares">
+            <For
+                each=move || invites.get()
+                key=|invite| invite["id"].as_i64().unwrap_or(0)
+                children=move |invite| {
+                    let id = invite["id"].as_i64().unwrap_or(0);
+                    let username = invite["username"].as_str().unwrap_or_default().to_string();
+                    let display = invite["display_name"].as_str().unwrap_or_default().to_string();
+                    let email = invite["email"].as_str().unwrap_or_default().to_string();
+                    let expired = invite["expired"].as_bool().unwrap_or(false);
+                    let expires_at = invite["expires_at"].as_i64().unwrap_or(0);
+                    let profile = [display, email]
+                        .into_iter()
+                        .filter(|value| !value.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    view! {
+                        <li class="row">
+                            <span class="name">
+                                <span class="lead-icon">
+                                    <Icon name="link"/>
+                                </span>
+                                <span class="file-body">
+                                    <span class="file-name">
+                                        {username}
+                                        {expired
+                                            .then(|| view! { <span class="badge">"expired"</span> })}
+                                    </span>
+                                    <span class="file-meta">
+                                        {if profile.is_empty() {
+                                            "no profile fields".to_string()
+                                        } else {
+                                            profile
+                                        }}
+                                    </span>
+                                    <span class="file-meta">
+                                        {format!("expires {}", time_until(expires_at))}
+                                    </span>
+                                </span>
+                            </span>
+                            <span class="row-actions">
+                                <button
+                                    class="danger"
+                                    on:click=move |_| revoke.run(id)
+                                    disabled=move || busy.get()
+                                >
+                                    "Revoke"
+                                </button>
+                            </span>
+                        </li>
+                    }
+                }
+            />
+            <Show when=move || !loading.get() && invites.get().is_empty()>
+                <li class="row muted">"No pending invites."</li>
+            </Show>
+        </ul>
+
+        {move || {
+            create_open
+                .get()
+                .then(|| {
+                    view! {
+                        <CreateInviteDialog
+                            on_close=close_create
+                            on_created=created
+                        />
+                    }
+                })
+        }}
+    }
+}
+
+/// Create-invite modal.
+#[component]
+fn CreateInviteDialog(
+    on_close: Callback<()>,
+    on_created: Callback<(String, String)>,
+) -> impl IntoView {
+    let username = RwSignal::new(String::new());
+    let display_name = RwSignal::new(String::new());
+    let email = RwSignal::new(String::new());
+    let expires = RwSignal::new("604800".to_string());
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+
+    let submit = move |_| {
+        let user = username.get_untracked().trim().to_string();
+        if user.is_empty() {
+            error.set("Username is required".to_string());
+            return;
+        }
+        busy.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            let body = json!({
+                "username": user,
+                "display_name": display_name.get_untracked(),
+                "email": email.get_untracked(),
+                "expires_in_secs": expires
+                    .get_untracked()
+                    .parse::<i64>()
+                    .unwrap_or(604_800),
+            });
+            match api::send_json("POST", "/api/invites", &body).await {
+                Ok(response) if response.status == 201 => {
+                    let url = response.body["url"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let username = response.body["username"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    on_created.run((url, username));
+                    on_close.run(());
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not create the invite")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            busy.set(false);
+        });
+    };
+
+    view! {
+        <Modal title="Create invite" on_close=on_close>
+            <label>
+                "Username"
+                <input
+                    type="text"
+                    autocomplete="off"
+                    prop:value=move || username.get()
+                    on:input=move |ev| username.set(event_target_value(&ev))
+                />
+            </label>
+            <label>
+                "Display name"
+                <input
+                    type="text"
+                    autocomplete="off"
+                    prop:value=move || display_name.get()
+                    on:input=move |ev| display_name.set(event_target_value(&ev))
+                />
+            </label>
+            <label>
+                "Email"
+                <input
+                    type="email"
+                    autocomplete="off"
+                    prop:value=move || email.get()
+                    on:input=move |ev| email.set(event_target_value(&ev))
+                />
+            </label>
+            <label>
+                "Expires in"
+                <select
+                    prop:value=move || expires.get()
+                    on:change=move |ev| expires.set(event_target_value(&ev))
+                >
+                    <option value="3600">"1 hour"</option>
+                    <option value="86400">"1 day"</option>
+                    <option value="604800">"7 days"</option>
+                    <option value="2592000">"30 days"</option>
+                </select>
+            </label>
+            <p class="muted">
+                "The link is shown once after creation. The account does not exist until the link is accepted."
+            </p>
+            <ErrorText message=error/>
+            <div class="row-actions">
+                <button class="primary" on:click=submit disabled=move || busy.get()>
+                    {move || if busy.get() { "Creating…" } else { "Create invite" }}
+                </button>
+                <button class="ghost" on:click=move |_| on_close.run(())>
+                    "Cancel"
+                </button>
+            </div>
+        </Modal>
     }
 }
 

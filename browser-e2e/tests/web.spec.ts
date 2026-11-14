@@ -29,10 +29,14 @@ test.beforeAll(async ({ request }) => {
   throw new Error("browser-e2e fixture did not create the legacy share");
 });
 
-async function login(page: Page, username = "alice") {
+async function login(
+  page: Page,
+  username = "alice",
+  password = PASS,
+) {
   await page.goto(`${BASE}/app/`);
   await page.getByLabel("Username", { exact: true }).fill(username);
-  await page.getByLabel("Password", { exact: true }).fill(PASS);
+  await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   // The first-login Vault suggestion is independent of the keyring state;
   // dismiss it and let the Settings flow decide whether encryption exists.
@@ -166,6 +170,90 @@ test("web admin creates and deletes a user", async ({ page }) => {
   await detail.getByLabel("Username", { exact: true }).fill(username);
   await detail.getByRole("button", { name: "Delete user", exact: true }).click();
   await expect(page.getByText(username, { exact: true })).toHaveCount(0);
+});
+
+test("web invite onboarding creates an account", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+  await page.getByRole("tab", { name: "Invites", exact: true }).click();
+
+  const username = `e2e-invite-${Date.now()}`;
+  const password = "invite-e2e-pass-123";
+  await page.getByRole("button", { name: "Create invite", exact: true }).click();
+  const create = page.locator(".modal");
+  await create.getByLabel("Username", { exact: true }).fill(username);
+  await create.getByLabel("Display name", { exact: true }).fill("Invite Person");
+  await create.getByLabel("Email", { exact: true }).fill("invite@example.test");
+  await create.getByRole("button", { name: "Create invite", exact: true }).click();
+
+  await expect(
+    page.getByText(`Invite link for ${username}. Shown once`, { exact: false }),
+  ).toBeVisible();
+  const link = await page.locator(".created code").textContent();
+  expect(link).toContain("/invite#token=");
+
+  // Accept the invite as a new visitor, not as the signed-in administrator.
+  await page.context().clearCookies();
+  await page.goto(link!);
+  await expect(
+    page.getByRole("heading", { name: "Join Kolimi", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(username, { exact: true })).toBeVisible();
+  await page.getByLabel("Password", { exact: true }).fill(password);
+  await page.getByLabel("Confirm password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Account ready", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Go to sign in", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Sign in to Kolimi", exact: true }),
+  ).toBeVisible();
+
+  await login(page, username, password);
+  await expect(
+    page.getByRole("button", { name: "Files", exact: true }),
+  ).toBeVisible();
+});
+
+test("web forces a temporary password change", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+
+  const username = `e2e-rotate-${Date.now()}`;
+  const temporary = "temporary-e2e-pass-123";
+  const replacement = "replacement-e2e-pass-123";
+  await page.getByRole("button", { name: "Create user", exact: true }).click();
+  const create = page.locator(".modal");
+  await create.getByLabel("Username", { exact: true }).fill(username);
+  await create.getByLabel("Initial password", { exact: true }).fill(temporary);
+  await create.getByLabel("Confirm password", { exact: true }).fill(temporary);
+  await create
+    .getByLabel("Require password change at next sign-in", { exact: true })
+    .check();
+  await create.getByRole("button", { name: "Create user", exact: true }).click();
+  await expect(
+    page.locator("main.content li.row", { hasText: username }).first(),
+  ).toBeVisible();
+
+  // A fresh browser context mimics a new sign-in with the temporary password.
+  await page.context().clearCookies();
+  await page.goto(`${BASE}/app/`);
+  await page.getByLabel("Username", { exact: true }).fill(username);
+  await page.getByLabel("Password", { exact: true }).fill(temporary);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Change your password", exact: true }),
+  ).toBeVisible();
+  await page.getByLabel("Current password", { exact: true }).fill(temporary);
+  await page.getByLabel("New password", { exact: true }).fill(replacement);
+  await page.getByLabel("Confirm new password", { exact: true }).fill(replacement);
+  await page.getByRole("button", { name: "Change password", exact: true }).click();
+
+  await expect(
+    page.getByRole("button", { name: "Files", exact: true }),
+  ).toBeVisible();
 });
 
 test("web admin manages groups and members", async ({ page }) => {

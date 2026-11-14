@@ -179,6 +179,16 @@ Notes:
   last-seen, IP and `User-Agent` metadata. `DELETE /api/me/sessions/{id}`
   revokes one; `DELETE /api/me/sessions` revokes all, or all others with
   `?keep_current=true`. Session tokens are never returned.
+- `PATCH /api/me` updates the optional `display_name` and `email` profile
+  fields. Email is informational only; Kolimi sends no mail.
+- Accounts marked `must_change_password` may only call `GET /api/me`,
+  `POST /api/reauth`, `POST /api/me/password`, and `DELETE /api/session`.
+  Every other API, WebDAV, and sync request returns `403`.
+- Invite links use `/invite#token=…`; the fragment never reaches the server.
+  `POST /api/invites/lookup` and `POST /api/invites/accept` take the token in
+  JSON, and acceptance creates the account. Admin routes are
+  `GET|POST /api/invites` and `DELETE /api/invites/{id}`; responses never
+  include stored hashes or a previously generated token.
 - Admin `GET /api/users` accepts `q=` for a case-insensitive username search.
   `POST /api/users/{username}/recover` and `.../logout` require
   `X-Reauth-Token`; recovery returns a generated password once with
@@ -196,7 +206,8 @@ Notes:
 
 | Area | Endpoints |
 | --- | --- |
-| Session / account | `POST /api/session`, `DELETE /api/session`, `GET /api/me`, `GET /api/me/usage`, `POST /api/me/password`, `GET|DELETE /api/me/sessions`, `DELETE /api/me/sessions/{id}`, `GET /api/users`, `/api/users/{name}`, `/api/users/{name}/usage`, `/api/users/{name}/recover`, `/api/users/{name}/logout`, `/api/users/{name}/sessions` |
+| Session / account | `POST /api/session`, `DELETE /api/session`, `GET|PATCH /api/me`, `GET /api/me/usage`, `POST /api/me/password`, `GET|DELETE /api/me/sessions`, `DELETE /api/me/sessions/{id}`, `GET /api/users`, `/api/users/{name}`, `/api/users/{name}/usage`, `/api/users/{name}/recover`, `/api/users/{name}/logout`, `/api/users/{name}/sessions` |
+| Invites | `GET|POST /api/invites`, `DELETE /api/invites/{id}`, `POST /api/invites/lookup`, `POST /api/invites/accept` |
 | Passkeys / TOTP | `/api/passkeys*`, `/api/passkeys/login/*`, `/api/totp*` |
 | Browse / files | `GET /api/browse`, `GET /api/files/info`, `POST /api/files/move`, `POST /api/files/encrypt`, `GET /api/search`, `GET /api/preview` |
 | Trash / versions | `/api/trash*`, `/api/versions*` |

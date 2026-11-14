@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 
 use axum::{
+    Json,
     extract::{ConnectInfo, Request},
     http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
@@ -49,6 +50,21 @@ pub async fn require_auth(
             return Err(response);
         }
     };
+
+    // A forced password rotation blocks every surface except the probe and
+    // the two calls needed to replace the password. This includes WebDAV,
+    // Basic-auth scripts, and the sync client: a temporary password cannot
+    // be used to move data.
+    if user.must_change_password && !forced_password_change_allowed(&method, &path) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "password change required",
+                "must_change_password": true,
+            })),
+        )
+            .into_response());
+    }
 
     // Cookie-authenticated state-changing requests must carry the
     // double-submit CSRF token on every surface (API, WebDAV, plugins), not
@@ -130,6 +146,14 @@ fn extract_credentials(headers: &HeaderMap, path: &str) -> Option<Credentials> {
 /// cached credentials skip the login form entirely and survive sign-out.
 fn basic_allowed(path: &str) -> bool {
     path != "/api/me"
+}
+
+/// Endpoints a user with `must_change_password` may still call: enough to
+/// discover the state, re-authenticate, replace the password, and sign out.
+fn forced_password_change_allowed(method: &Method, path: &str) -> bool {
+    (method == Method::GET && path == "/api/me")
+        || (method == Method::POST && matches!(path, "/api/me/password" | "/api/reauth"))
+        || (method == Method::DELETE && path == "/api/session")
 }
 
 async fn authenticate(
@@ -223,6 +247,7 @@ async fn authenticate_basic(
                     user_id: user.id,
                     username: user.username,
                     is_admin: user.is_admin,
+                    must_change_password: user.must_change_password,
                     session_hash: None,
                 }),
                 Err(_) => Err(unauthorized()),
@@ -255,6 +280,7 @@ async fn authenticate_token(state: &AppState, raw_token: &str) -> Result<Current
         user_id: user.id,
         username: user.username,
         is_admin: user.is_admin,
+        must_change_password: user.must_change_password,
         session_hash: Some(hash),
     })
 }

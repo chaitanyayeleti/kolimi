@@ -1,6 +1,6 @@
 # User management — plan
 
-Status: **in progress** · Date: 2026-11-14 · Phases 1–3 landed on `main`
+Status: **complete** · Date: 2026-11-14 · Phases 1–4 landed on `main`
 Builds on: [operations.md](../operations.md), [reference.md](../reference.md),
 [red-team report](../audit/redteam-2026-11-14.md)
 
@@ -43,10 +43,9 @@ web UI without weakening the current invariants:
 | Group management | Yes | Yes | Yes |
 | Audit log | Yes | `audit list` / `verify` | Yes, filters + verify |
 
-Phases 1–3 are implemented. The Admin page has **Users**, **Groups**, and
-**Audit** tabs; self-service password and session controls live under
-**Settings → Account**. The remaining Phase 4 work is invite-based
-onboarding and server-enforced password rotation.
+Phases 1–4 are implemented. The Admin page has **Users**, **Invites**,
+**Groups**, and **Audit** tabs; self-service password, profile, and session
+controls live under **Settings → Account**.
 
 ## 4. Principles
 
@@ -157,7 +156,7 @@ API:
 All of these are admin-only. Audit details are already JSON; the UI should
 render them as structured key/value rows rather than a raw string.
 
-### Phase 4 — onboarding (P2)
+### Phase 4 — onboarding (P2) — landed
 
 - One-time invite links with an expiry, so an admin does not have to share a
   temporary password out of band.
@@ -165,6 +164,23 @@ render them as structured key/value rows rather than a raw string.
 - Optional display name and email fields.
 - A read-only auditor role only if there is a concrete need; do not add RBAC
   pre-emptively.
+
+Implementation notes:
+
+- The Admin **Invites** tab creates links valid for 1 hour to 30 days. A
+  link is shown once. The token is BLAKE3-hashed at rest and placed in the
+  URL fragment; lookup/acceptance POST the token in a JSON body so it never
+  appears in request lines or proxy logs.
+- Acceptance creates the user and consumes the invite in one database
+  transaction. Expired invites are cleaned up when the next invite is
+  created, so a username can be invited again.
+- Admin-created accounts can set `must_change_password`. The auth middleware
+  blocks every API/WebDAV/sync path except the `/api/me` probe,
+  `/api/reauth`, `/api/me/password`, and sign-out until the password is
+  replaced.
+- `display_name` and `email` are optional, visible in account/admin views,
+  and editable via `PATCH /api/me`; email is not used for authentication or
+  delivery.
 
 ## 6. Data model changes
 
@@ -185,24 +201,31 @@ Do not expose token hashes.
 Add:
 
 - `last_login_at INTEGER` — updated on successful login for the admin list;
-- `must_change_password INTEGER NOT NULL DEFAULT 0` (phase 4).
+- `display_name TEXT` and `email TEXT` — optional profile fields;
+- `must_change_password INTEGER NOT NULL DEFAULT 0`.
 
 ### Invites (phase 4)
 
 ```text
 invites(
   id INTEGER PRIMARY KEY,
-  username TEXT NOT NULL,
+  username TEXT NOT NULL COLLATE NOCASE,
   token_hash BLOB NOT NULL UNIQUE,
-  created_by INTEGER REFERENCES users(id),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
+  display_name TEXT,
+  email TEXT,
   used_at INTEGER
 )
 ```
 
 The invite token is hashed at rest, single-use, and consumed when the user sets
-their password. This needs its own threat-model pass before implementation.
+their password. A partial unique index allows one pending invite per username;
+expired rows are cleared when the next invite is created. The threat-model
+result: use a 256-bit token, store only BLAKE3, put the plaintext in the URL
+fragment, POST it in JSON bodies, return it exactly once, and rate-limit
+lookup/acceptance.
 
 No role-table migration is needed. Keep `is_admin`.
 
@@ -210,7 +233,7 @@ No role-table migration is needed. Keep `is_admin`.
 
 ### Admin page
 
-- Tabs: **Users**, **Groups**, **Audit**.
+- Tabs: **Users**, **Invites**, **Groups**, **Audit**.
 - Users table columns: user, status, role, auth, storage, last seen, actions.
 - Row opens a detail panel; destructive actions use a modal, never
   `window.prompt`.
@@ -254,8 +277,11 @@ password with the encryption passphrase.
   - password change keeps the current session and revokes others;
   - recovery drops sessions and audits the real admin actor;
   - session listing never exposes token hashes;
-  - group changes are audited.
-- DB tests for `last_login_at`, session metadata, and the last-admin race.
+  - group changes are audited;
+  - invite creation/acceptance/revocation, expiry, and single-use behavior;
+  - forced password rotation blocks the API until the password is replaced.
+- DB tests for `last_login_at`, session metadata, invites, and the
+  last-admin race.
 - Browser E2E: create user, recover password, revoke a session, disable/delete,
   search/pagination.
 - Migration test: existing sessions and users survive the new nullable
@@ -283,11 +309,13 @@ password with the encryption passphrase.
 This is the smallest slice that removes the CLI-only workflows and gives users
 control over their own credentials.
 
-## 12. Open questions
+## 12. Resolved questions
 
-1. For admin-created accounts, use a generated temporary password first, or
-   build invite links immediately?
-2. Should IP and user-agent be retained for every session, or only the most
-   recent login? Privacy and support value trade off here.
-3. Is a read-only auditor account needed, or is the admin page sufficient?
-4. Should `must_change_password` gate every API route, or only the file UI?
+1. Invite links are the primary onboarding path; temporary passwords remain
+   available for compatibility and can require rotation.
+2. Session IP/user-agent metadata is retained per session for self-service
+   revocation.
+3. No read-only auditor role was added. The admin page plus the audit API
+   cover the current need; revisit only for delegated, non-admin auditing.
+4. `must_change_password` gates every API, WebDAV, and sync route except the
+   probe, re-authentication, password change, and sign-out.

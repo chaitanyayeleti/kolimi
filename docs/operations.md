@@ -33,7 +33,8 @@ working) and is the reversible alternative.
 Users manage their own login password and active sessions under
 **Settings → Account**. A password change asks for a fresh password or
 two-factor proof and revokes every other session; the current session stays
-signed in.
+signed in. The same panel edits the optional display name and email; email
+is informational only and is never used to sign in or send mail.
 
 Administrators use the **Admin** sidebar entry, which opens a user page with
 search, filters, and cursor paging. From there an admin can create a user,
@@ -49,6 +50,16 @@ after adding or removing a member, re-share the affected encrypted folders
 from a client so the keyring advances. The **Audit** tab shows newest-first
 entries with structured details, filters by exact action or subject,
 keyset paging, and a **Verify chain** button.
+
+The **Invites** tab creates single-use onboarding links with an expiry of
+1 hour to 30 days. The generated link is shown once; the token is stored only
+as a hash, lives in the URL fragment, and is sent to the API in POST bodies.
+Accepting the link creates the account and sets its first password. If an
+invite expires or is compromised, revoke it from the same tab. Invite
+creation, revocation, and acceptance are audited. Admins can also create a
+user with a temporary password and the **Require password change at next
+sign-in** option; the server blocks every other API/WebDAV/sync surface until
+that password is replaced.
 
 Passkeys are registered in the web UI (**Settings → Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is rejected
@@ -195,10 +206,11 @@ Administrators can read the same log over HTTP: `GET /api/audit` accepts
 `limit`, `before`, `action`, and `subject`, and `GET /api/audit/verify`
 recomputes the chain. Both are admin-only and never expose chain hashes.
 
-Events cover logins and failures, logouts, passkeys, TOTP, file
-mutations (via the change feed), shares, link unlocks/downloads, E2EE and
-MLS key operations, preview-worker failures, and CLI changes. Content and
-file bytes are never logged.
+Events cover logins and failures, logouts, passkeys, TOTP, password changes,
+profile edits, invite creation/revocation/acceptance, user administration,
+file mutations (via the change feed), shares, link unlocks/downloads, E2EE
+and MLS key operations, preview-worker failures, and CLI changes. Content,
+tokens, and file bytes are never logged.
 
 ## Metrics
 

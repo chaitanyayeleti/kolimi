@@ -7,6 +7,9 @@ pub struct CurrentUser {
     pub username: String,
     /// Whether the user is an administrator.
     pub is_admin: bool,
+    /// Whether the account must change its password before using the rest
+    /// of the API.
+    pub must_change_password: bool,
     /// Hash of the session token, when the request was authenticated
     /// with a session (bearer token or cookie) rather than Basic auth.
     pub session_hash: Option<[u8; 32]>,

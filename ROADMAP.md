@@ -123,12 +123,12 @@ entries. Do not describe MLS as audited before this completes.
 
 Self-service password/session control and admin create/recover/session
 management are the next usability gap: see
-[docs/plans/user-management.md](docs/plans/user-management.md). Phases 1–3
-landed on `main`: **Settings → Account** (password change, session
-revocation), the **Admin → Users** page (create, search, detail, quota,
-recovery, force sign-out), and **Admin → Groups/Audit** (membership
-management, filtered audit log, chain verification). Invites and forced
-password rotation remain in Phase 4.
+[docs/plans/user-management.md](docs/plans/user-management.md). All four
+phases landed on `main`: **Settings → Account** (password change, profile,
+session revocation), **Admin → Users** (create, search, detail, quota,
+recovery, force sign-out), **Admin → Groups/Audit** (membership management,
+filtered audit log, chain verification), and **Admin → Invites** (one-time
+onboarding links, expiry/revocation, server-enforced password rotation).
 
 ## Deferred / non-goals
 

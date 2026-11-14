@@ -9,6 +9,7 @@ pub mod api_2fa;
 pub mod api_admin;
 pub mod api_browse;
 pub mod api_e2ee;
+pub mod api_invites;
 pub mod api_mls;
 pub mod api_passkey;
 pub mod api_shares;
@@ -197,7 +198,7 @@ impl AppState {
 pub fn build_app(state: AppState) -> Router {
     let protected = Router::new()
         .merge(kolimi_webdav::routes())
-        .route("/api/me", get(api::me))
+        .route("/api/me", get(api::me).patch(api::update_me))
         .route("/api/me/usage", get(api::self_usage))
         .route("/api/me/password", post(api::change_password))
         .route(
@@ -359,6 +360,11 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/audit", get(api_admin::list_audit))
         .route("/api/audit/verify", get(api_admin::verify_audit))
+        .route(
+            "/api/invites",
+            get(api_invites::list_invites).post(api_invites::create_invite),
+        )
+        .route("/api/invites/{id}", delete(api_invites::revoke_invite))
         // Admin-only; the handler checks is_admin (401 when anonymous).
         .route("/metrics", get(metrics::handler))
         // Requires authentication so the exact version is not public.
@@ -376,8 +382,11 @@ pub fn build_app(state: AppState) -> Router {
         .route("/app", get(ui::index))
         .route("/app/", get(ui::index))
         .route("/app/{*path}", get(ui::asset))
+        .route("/invite", get(ui::invite_page))
         .route("/s/{token}", get(ui::public_page))
         .route("/api/session", post(api::login))
+        .route("/api/invites/lookup", post(api_invites::lookup_invite))
+        .route("/api/invites/accept", post(api_invites::accept_invite))
         // Navigation logout: works without JS state and always clears the
         // cookies, so a refresh cannot land back in the app.
         .route("/logout", any(api::logout_navigate))

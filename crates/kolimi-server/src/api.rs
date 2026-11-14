@@ -267,6 +267,9 @@ pub(crate) async fn start_session(
     let mut response = Json(json!({
         "username": user.username,
         "is_admin": user.is_admin,
+        "display_name": user.display_name,
+        "email": user.email,
+        "must_change_password": user.must_change_password,
         "expires_at": expires_at,
     }))
     .into_response();
@@ -403,14 +406,79 @@ pub async fn me(
     match state.db.get_user(user.user_id).await {
         Ok(Some(account)) => Json(json!({
             "username": account.username,
+            "display_name": account.display_name,
+            "email": account.email,
             "is_admin": account.is_admin,
             "created_at": account.created_at,
             "password_login": !account.password_hash.is_empty(),
+            "must_change_password": account.must_change_password,
         }))
         .into_response(),
         Ok(None) => unauthorized("invalid credentials"),
         Err(_) => internal_error(),
     }
+}
+
+/// Profile fields the caller may edit about themselves. An omitted field
+/// keeps its current value; `null` or an empty string clears it.
+#[derive(Deserialize, Default)]
+pub struct UpdateMeRequest {
+    #[serde(default)]
+    display_name: Option<Option<String>>,
+    #[serde(default)]
+    email: Option<Option<String>>,
+}
+
+/// `PATCH /api/me` — update the caller's optional profile fields.
+///
+/// Email is informational only; Kolimi does not send mail.
+pub async fn update_me(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(req): Json<UpdateMeRequest>,
+) -> Response {
+    let Some(account) = state.db.get_user(user.user_id).await.ok().flatten() else {
+        return unauthorized("invalid credentials");
+    };
+    let display_name = match req.display_name {
+        None => account.display_name,
+        Some(value) => match crate::api_invites::clean_profile(value.as_deref(), None) {
+            Ok((display_name, _)) => display_name,
+            Err(message) => return bad_request(&message),
+        },
+    };
+    let email = match req.email {
+        None => account.email,
+        Some(value) => match crate::api_invites::clean_profile(None, value.as_deref()) {
+            Ok((_, email)) => email,
+            Err(message) => return bad_request(&message),
+        },
+    };
+    if state
+        .db
+        .set_profile(user.user_id, display_name.as_deref(), email.as_deref())
+        .await
+        .is_err()
+    {
+        return internal_error();
+    }
+    audit(
+        &state,
+        Some(user.user_id),
+        Some(&user.username),
+        "user.profile_update",
+        &user.username,
+        json!({
+            "display_name": display_name.is_some(),
+            "email": email.is_some(),
+        }),
+    )
+    .await;
+    Json(json!({
+        "display_name": display_name,
+        "email": email,
+    }))
+    .into_response()
 }
 
 /// `GET /api/me/sessions` — the caller's live sessions.
@@ -672,6 +740,15 @@ pub struct NewUserRequest {
     /// Optional per-user quota in bytes (`0` = unlimited).
     #[serde(default)]
     quota_bytes: Option<i64>,
+    /// Optional human-readable name.
+    #[serde(default)]
+    display_name: Option<String>,
+    /// Optional contact address (informational).
+    #[serde(default)]
+    email: Option<String>,
+    /// Require the user to replace the initial password at next sign-in.
+    #[serde(default)]
+    must_change_password: bool,
 }
 
 /// `POST /api/users` — admin-only user creation.
@@ -686,6 +763,13 @@ pub async fn create_user(
     if req.quota_bytes.is_some_and(|quota| quota < 0) {
         return bad_request("quota_bytes must be >= 0");
     }
+    let (display_name, email) = match crate::api_invites::clean_profile(
+        req.display_name.as_deref(),
+        req.email.as_deref(),
+    ) {
+        Ok(profile) => profile,
+        Err(message) => return bad_request(&message),
+    };
     let candidate = req.password.clone();
     let hash = match tokio::task::spawn_blocking(move || password::hash_password(&candidate)).await
     {
@@ -705,13 +789,31 @@ pub async fn create_user(
             {
                 return db_error(error);
             }
+            if (display_name.is_some() || email.is_some())
+                && let Err(error) = state
+                    .db
+                    .set_profile(created.id, display_name.as_deref(), email.as_deref())
+                    .await
+            {
+                return db_error(error);
+            }
+            if req.must_change_password
+                && let Err(error) = state.db.set_must_change_password(created.id, true).await
+            {
+                return db_error(error);
+            }
             audit(
                 &state,
                 Some(user.user_id),
                 Some(&user.username),
                 "user.add",
                 &created.username,
-                json!({ "by": "api", "admin": req.admin, "quota_bytes": req.quota_bytes }),
+                json!({
+                    "by": "api",
+                    "admin": req.admin,
+                    "quota_bytes": req.quota_bytes,
+                    "must_change_password": req.must_change_password,
+                }),
             )
             .await;
             match state.db.get_user(created.id).await {
@@ -880,8 +982,11 @@ pub async fn user_detail(
     Json(json!({
         "id": account.id,
         "username": account.username,
+        "display_name": account.display_name,
+        "email": account.email,
         "is_admin": account.is_admin,
         "disabled": account.disabled,
+        "must_change_password": account.must_change_password,
         "created_at": account.created_at,
         "last_login_at": account.last_login_at,
         "quota_bytes": account.quota_bytes,

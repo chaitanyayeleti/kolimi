@@ -32,6 +32,18 @@ follow [Semantic Versioning](https://semver.org/).
   `GET|POST /api/groups`, `DELETE /api/groups/{name}`,
   `POST|DELETE /api/groups/{name}/members/{username}`,
   `GET /api/audit`, and `GET /api/audit/verify`.
+- **Invite onboarding and forced rotation**: administrators can create
+  single-use, expiring invite links from the new Admin → Invites tab. The
+  token is stored only as a BLAKE3 hash; the link puts it in the URL
+  fragment, and the acceptance page sends it in POST bodies so it never
+  reaches server or proxy logs. Accepting an invite creates the account and
+  sets its first password. Admin-created users can be marked
+  `must_change_password`; the server then blocks every API, WebDAV, and sync
+  surface except the `/api/me` probe, re-authentication, password change,
+  and sign-out. New endpoints: `GET|POST /api/invites`,
+  `DELETE /api/invites/{id}`, `POST /api/invites/lookup`,
+  `POST /api/invites/accept`, and `PATCH /api/me` for optional display
+  name/email profile fields (migration 0028).
 
 ## [0.4.7] - 2026-11-14
 

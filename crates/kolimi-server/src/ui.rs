@@ -67,6 +67,18 @@ pub async fn public_page() -> Response {
     shell()
 }
 
+/// `GET /invite` — the invite-acceptance page.
+///
+/// The token lives in the URL fragment, so the server only ever sees this
+/// bare path. Keep the shell out of caches.
+pub async fn invite_page() -> Response {
+    let mut response = shell();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 /// The application shell: the built `index.html`, or the committed
 /// placeholder when the UI has not been staged yet.
 fn shell() -> Response {

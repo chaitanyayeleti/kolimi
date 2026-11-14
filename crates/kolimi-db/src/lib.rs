@@ -9,7 +9,7 @@ use std::{
 
 use serde::Serialize;
 use sqlx::{
-    FromRow, SqlitePool,
+    FromRow, SqliteConnection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
@@ -17,6 +17,7 @@ mod audit;
 mod dav;
 mod devices;
 mod e2ee;
+mod invites;
 mod mls;
 mod search_state;
 mod sharing;
@@ -25,6 +26,7 @@ pub use audit::{AuditEntry, AuditPageQuery, AuditVerify};
 pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
 pub use devices::{Device, Enrollment, MAX_DEVICE_KEY_BYTES};
 pub use e2ee::{MAX_KEYRING_BYTES, MAX_WRAPPED_KEY_BYTES};
+pub use invites::{Invite, NewInvite};
 pub use mls::{MlsGroup, MlsKeyPackage, MlsKeyring, MlsMessage};
 pub use sharing::{Group, LinkSession, ReceivedShare, ShareRow};
 
@@ -88,6 +90,13 @@ pub struct User {
     pub created_at: i64,
     /// Most recent successful login in Unix milliseconds.
     pub last_login_at: Option<i64>,
+    /// Optional human-readable name.
+    pub display_name: Option<String>,
+    /// Optional contact address. Informational only; no mail is sent.
+    pub email: Option<String>,
+    /// Whether the next sign-in must change the password before using the
+    /// rest of the API.
+    pub must_change_password: bool,
     /// Per-user storage quota in bytes (`None` = server default, `0` = unlimited).
     pub quota_bytes: Option<i64>,
     /// Used storage bytes, maintained incrementally and reconciled by the janitor.
@@ -315,6 +324,62 @@ fn map_sqlx(e: sqlx::Error, what: &str) -> DbError {
     DbError::Sqlx(e)
 }
 
+/// Creates the account and its default folders on an existing connection.
+/// The caller owns the transaction (invite acceptance uses this to create
+/// the user and consume the invite atomically).
+async fn create_user_on(
+    conn: &mut SqliteConnection,
+    username: &str,
+    password_hash: &str,
+) -> Result<User, DbError> {
+    validate_username(username)?;
+    let now = now_millis();
+    // The first user becomes admin. The election runs *inside* the INSERT
+    // (with the table's write lock held), so two concurrent calls can't
+    // both observe an empty table and both become admin.
+    let user = sqlx::query_as::<_, User>(
+        "INSERT INTO users (username, password_hash, is_admin, created_at)
+         VALUES (?, ?, (SELECT COUNT(*) FROM users) = 0, ?)
+         RETURNING *",
+    )
+    .bind(username)
+    .bind(password_hash)
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| map_sqlx(e, "username already exists"))?;
+    sqlx::query(
+        "INSERT INTO nodes (user_id, parent_id, name, kind, size, created_at, modified_at)
+         VALUES (?, NULL, '', 'dir', 0, ?, ?)",
+    )
+    .bind(user.id)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    // Every account starts with a familiar shape: media folders for
+    // normal (readable, fast-preview) content, and a Vault whose
+    // contents are always client-side encrypted. Declaring Vault
+    // encrypted up front is what lets any client — browser, desktop,
+    // phone — know it must encrypt before uploading, even while empty.
+    for (name, encrypted) in DEFAULT_FOLDERS {
+        sqlx::query(
+            "INSERT INTO nodes
+                 (user_id, parent_id, name, kind, size, created_at, modified_at, encrypted)
+             VALUES (?, (SELECT id FROM nodes WHERE user_id = ? AND parent_id IS NULL), ?, 'dir', 0, ?, ?, ?)",
+        )
+        .bind(user.id)
+        .bind(user.id)
+        .bind(name)
+        .bind(now)
+        .bind(now)
+        .bind(i64::from(encrypted))
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(user)
+}
+
 /// Validates a username: 1-64 chars of `[A-Za-z0-9._-]`.
 pub fn validate_username(username: &str) -> Result<(), DbError> {
     if username.is_empty() || username.len() > 64 {
@@ -504,52 +569,8 @@ impl Db {
 
     /// Creates a user plus their root directory. The first user becomes admin.
     pub async fn create_user(&self, username: &str, password_hash: &str) -> Result<User, DbError> {
-        validate_username(username)?;
-        let now = now_millis();
         let mut tx = self.pool.begin().await?;
-        // The first user becomes admin. The election runs *inside* the INSERT
-        // (with the table's write lock held), so two concurrent calls can't
-        // both observe an empty table and both become admin.
-        let user = sqlx::query_as::<_, User>(
-            "INSERT INTO users (username, password_hash, is_admin, created_at)
-             VALUES (?, ?, (SELECT COUNT(*) FROM users) = 0, ?)
-             RETURNING *",
-        )
-        .bind(username)
-        .bind(password_hash)
-        .bind(now)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| map_sqlx(e, "username already exists"))?;
-        sqlx::query(
-            "INSERT INTO nodes (user_id, parent_id, name, kind, size, created_at, modified_at)
-             VALUES (?, NULL, '', 'dir', 0, ?, ?)",
-        )
-        .bind(user.id)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-        // Every account starts with a familiar shape: media folders for
-        // normal (readable, fast-preview) content, and a Vault whose
-        // contents are always client-side encrypted. Declaring Vault
-        // encrypted up front is what lets any client — browser, desktop,
-        // phone — know it must encrypt before uploading, even while empty.
-        for (name, encrypted) in DEFAULT_FOLDERS {
-            sqlx::query(
-                "INSERT INTO nodes
-                     (user_id, parent_id, name, kind, size, created_at, modified_at, encrypted)
-                 VALUES (?, (SELECT id FROM nodes WHERE user_id = ? AND parent_id IS NULL), ?, 'dir', 0, ?, ?, ?)",
-            )
-            .bind(user.id)
-            .bind(user.id)
-            .bind(name)
-            .bind(now)
-            .bind(now)
-            .bind(i64::from(encrypted))
-            .execute(&mut *tx)
-            .await?;
-        }
+        let user = create_user_on(&mut tx, username, password_hash).await?;
         tx.commit().await?;
         Ok(user)
     }
@@ -681,10 +702,13 @@ impl Db {
         Ok(())
     }
 
-    /// Replaces a user's password hash.
+    /// Replaces a user's password hash. A successful change also clears the
+    /// forced-rotation flag.
     pub async fn set_password(&self, username: &str, password_hash: &str) -> Result<(), DbError> {
         let result = sqlx::query(
-            "UPDATE users SET password_hash = ?, credentials_version = credentials_version + 1
+            "UPDATE users
+             SET password_hash = ?, credentials_version = credentials_version + 1,
+                 must_change_password = 0
              WHERE username = ?",
         )
         .bind(password_hash)
@@ -693,6 +717,42 @@ impl Db {
         .await?;
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("user {username}")));
+        }
+        Ok(())
+    }
+
+    /// Replaces optional profile fields. Empty strings are stored as `NULL`.
+    pub async fn set_profile(
+        &self,
+        user_id: i64,
+        display_name: Option<&str>,
+        email: Option<&str>,
+    ) -> Result<(), DbError> {
+        let result = sqlx::query("UPDATE users SET display_name = ?, email = ? WHERE id = ?")
+            .bind(display_name)
+            .bind(email)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("user {user_id}")));
+        }
+        Ok(())
+    }
+
+    /// Sets or clears the forced password-rotation flag.
+    pub async fn set_must_change_password(
+        &self,
+        user_id: i64,
+        required: bool,
+    ) -> Result<(), DbError> {
+        let result = sqlx::query("UPDATE users SET must_change_password = ? WHERE id = ?")
+            .bind(i64::from(required))
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("user {user_id}")));
         }
         Ok(())
     }
@@ -1833,6 +1893,9 @@ mod tests {
         let bob = db.create_user("bob", "hash-b").await.unwrap();
         assert!(alice.is_admin);
         assert!(!bob.is_admin);
+        assert!(alice.display_name.is_none());
+        assert!(alice.email.is_none());
+        assert!(!alice.must_change_password);
 
         let root = db.root_node(alice.id).await.unwrap();
         assert_eq!(root.kind, "dir");

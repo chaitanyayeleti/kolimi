@@ -60,12 +60,27 @@ pub(crate) fn AccountPanel() -> impl IntoView {
     let code = RwSignal::new(String::new());
     let new_password = RwSignal::new(String::new());
     let confirm_password = RwSignal::new(String::new());
+    let display_name = RwSignal::new(String::new());
+    let email = RwSignal::new(String::new());
+    let profile_busy = RwSignal::new(false);
 
     let load = Callback::new(move |_: ()| {
         spawn_local(async move {
             if let Ok(response) = api::get("/api/me").await
                 && response.status == 200
             {
+                display_name.set(
+                    response.body["display_name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                email.set(
+                    response.body["email"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
                 me.set(response.body);
             }
             match api::get("/api/me/sessions").await {
@@ -142,6 +157,32 @@ pub(crate) fn AccountPanel() -> impl IntoView {
                 Err(message) => error.set(message),
             }
             busy.set(false);
+        });
+    };
+
+    let save_profile = move |_| {
+        profile_busy.set(true);
+        error.set(String::new());
+        notice.set(String::new());
+        spawn_local(async move {
+            let body = json!({
+                "display_name": display_name.get_untracked(),
+                "email": email.get_untracked(),
+            });
+            match api::send_json("PATCH", "/api/me", &body).await {
+                Ok(response) if response.status == 200 => {
+                    notice.set("Profile updated.".to_string());
+                    load.run(());
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not update the profile")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            profile_busy.set(false);
         });
     };
 
@@ -242,6 +283,34 @@ pub(crate) fn AccountPanel() -> impl IntoView {
                 </span>
             </li>
         </ul>
+
+        <h3>"Profile"</h3>
+        <p class="muted">
+            "Optional. Email is informational only — Kolimi does not send mail or use it to sign in."
+        </p>
+        <div class="share-form">
+            <label>
+                "Display name"
+                <input
+                    type="text"
+                    autocomplete="name"
+                    prop:value=move || display_name.get()
+                    on:input=move |ev| display_name.set(event_target_value(&ev))
+                />
+            </label>
+            <label>
+                "Email"
+                <input
+                    type="email"
+                    autocomplete="email"
+                    prop:value=move || email.get()
+                    on:input=move |ev| email.set(event_target_value(&ev))
+                />
+            </label>
+            <button on:click=save_profile disabled=move || profile_busy.get()>
+                {move || if profile_busy.get() { "Saving…" } else { "Save profile" }}
+            </button>
+        </div>
 
         <Show when=move || me.get()["password_login"].as_bool() == Some(false)>
             <p class="muted">
