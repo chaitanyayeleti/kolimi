@@ -35,6 +35,8 @@ passkey-only account signs in through WebAuthn; password login is rejected
 (and audited). Adding or removing a passkey asks for the account password
 (or a current TOTP/recovery code); changing the E2EE passphrase and
 replacing the keyring use the same short-lived re-authentication proof.
+Removing the last passkey on a passwordless account is refused to prevent
+self-lockout.
 
 ## Account recovery
 
