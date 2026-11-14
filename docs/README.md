@@ -34,6 +34,7 @@ Last full verification: **0.4.5** (2026-11-05).
 | [known-advisories.md](known-advisories.md) | Accepted RustSec warnings with reasons and revisit conditions |
 | [audit/README.md](audit/README.md) | External crypto audit package: scope, artifacts, reproduction, review asks |
 | [audit/mls-delta.md](audit/mls-delta.md) | MLS delta for the reviewer: invariants, server rules, tests, open questions |
+| [audit/redteam-2026-11-14.md](audit/redteam-2026-11-14.md) | Internal red-team report: server, host boundary, E2EE/MLS findings and fixes |
 
 MLS is implemented but **not externally audited**. The audit package is
 the source of truth for what has and has not been reviewed.

@@ -4,6 +4,11 @@ Status: prepared for **0.4.3**. **External review has not been performed.**
 This directory is written so a reviewer can start from one commit and
 reproduce every claim.
 
+An internal red-team pass over the server, the web→host boundary and the
+E2EE/MLS surfaces is recorded in
+[redteam-2026-11-14.md](redteam-2026-11-14.md). It is internal-only and
+does not replace this external review.
+
 There are two E2EE surfaces:
 
 1. **v1/v2 per-file E2EE** — covered by this package.
