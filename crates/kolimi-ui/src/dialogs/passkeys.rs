@@ -5,6 +5,35 @@ use serde_json::{Value, json};
 use crate::api;
 use crate::components::{ErrorText, Icon, sanitize_svg};
 
+/// A credential change waiting for re-authentication.
+#[derive(Clone)]
+enum PendingAction {
+    Add(String),
+    Remove(i64),
+}
+
+/// Applies a pending change with a fresh re-authentication token.
+async fn apply_action(action: PendingAction, token: &str) -> Result<(), String> {
+    match action {
+        PendingAction::Add(name) => crate::passkey::register(&name, token).await,
+        PendingAction::Remove(id) => {
+            match api::delete_with(
+                &format!("/api/passkeys/{id}"),
+                Some(("x-reauth-token", token)),
+            )
+            .await
+            {
+                Ok(response) if response.status == 204 => Ok(()),
+                Ok(response) => Err(response
+                    .error()
+                    .unwrap_or("Could not remove passkey")
+                    .to_string()),
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
 /// Passkeys and TOTP, rendered as a Settings section.
 #[component]
 pub(crate) fn PasskeysPanel() -> impl IntoView {
@@ -15,6 +44,9 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
     let enroll = RwSignal::new(Option::<Value>::None);
     let totp_code = RwSignal::new(String::new());
     let recovery = RwSignal::new(Vec::<String>::new());
+    let pending = RwSignal::new(Option::<PendingAction>::None);
+    let reauth_password = RwSignal::new(String::new());
+    let reauth_code = RwSignal::new(String::new());
 
     let load = Callback::new(move |_: ()| {
         spawn_local(async move {
@@ -109,28 +141,74 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
         if name.is_empty() {
             return;
         }
+        error.set(String::new());
+        pending.set(Some(PendingAction::Add(name)));
+    };
+
+    let remove = move |id: i64| {
+        error.set(String::new());
+        pending.set(Some(PendingAction::Remove(id)));
+    };
+
+    let confirm = move |_| {
+        let Some(action) = pending.get_untracked() else {
+            return;
+        };
+        let password = reauth_password.get_untracked();
+        let code = reauth_code.get_untracked();
+        if password.is_empty() && code.is_empty() {
+            error.set("Enter your account password or a two-factor code".to_string());
+            return;
+        }
         busy.set(true);
         spawn_local(async move {
-            let result = crate::passkey::register(&name).await;
-            busy.set(false);
+            let result = match api::reauth(&password, &code).await {
+                Ok(token) => apply_action(action, &token).await,
+                Err(message) => Err(message),
+            };
             match result {
                 Ok(()) => {
                     error.set(String::new());
                     load.run(());
                 }
-                Err(e) => error.set(e),
+                Err(message) => error.set(message),
             }
+            reauth_password.set(String::new());
+            reauth_code.set(String::new());
+            pending.set(None);
+            busy.set(false);
         });
     };
 
-    let remove = move |id: i64| {
+    let use_passkey = move |_| {
+        let Some(action) = pending.get_untracked() else {
+            return;
+        };
+        busy.set(true);
         spawn_local(async move {
-            match api::delete(&format!("/api/passkeys/{id}")).await {
-                Ok(r) if r.status == 204 => load.run(()),
-                Ok(r) => error.set(r.error().unwrap_or("Could not remove passkey").to_string()),
-                Err(e) => error.set(e),
+            let result = match crate::passkey::reauth().await {
+                Ok(token) => apply_action(action, &token).await,
+                Err(message) => Err(message),
+            };
+            match result {
+                Ok(()) => {
+                    error.set(String::new());
+                    load.run(());
+                }
+                Err(message) => error.set(message),
             }
+            reauth_password.set(String::new());
+            reauth_code.set(String::new());
+            pending.set(None);
+            busy.set(false);
         });
+    };
+
+    let cancel = move |_| {
+        reauth_password.set(String::new());
+        reauth_code.set(String::new());
+        pending.set(None);
+        error.set(String::new());
     };
 
     view! {
@@ -155,7 +233,11 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                                         {name}
                                     </span>
                                     <span class="row-actions">
-                                        <button class="danger" on:click=move |_| remove(id)>
+                                        <button
+                                            class="danger"
+                                            disabled=move || busy.get() || pending.get().is_some()
+                                            on:click=move |_| remove(id)
+                                        >
                                             <Icon name="trash"/>
                                             "Remove"
                                         </button>
@@ -169,11 +251,73 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                     </Show>
                 </ul>
                 <div class="row-actions">
-                    <button class="primary" disabled=move || busy.get() on:click=add>
+                    <button
+                        class="primary"
+                        disabled=move || busy.get() || pending.get().is_some()
+                        on:click=add
+                    >
                         <Icon name="key"/>
                         {move || if busy.get() { "Waiting for authenticator…" } else { "Add passkey" }}
                     </button>
                 </div>
+
+                {move || {
+                    pending
+                        .get()
+                        .map(|action| {
+                            let description = match &action {
+                                PendingAction::Add(name) => format!("add “{name}”"),
+                                PendingAction::Remove(_) => "remove this passkey".to_string(),
+                            };
+                            view! {
+                                <div class="reauth">
+                                    <p class="muted">
+                                        {format!(
+                                            "Confirm your account password (or a two-factor code) to {description}.",
+                                        )}
+                                    </p>
+                                    <label>
+                                        "Account password"
+                                        <input
+                                            type="password"
+                                            autocomplete="current-password"
+                                            prop:value=move || reauth_password.get()
+                                            on:input=move |ev| {
+                                                reauth_password.set(event_target_value(&ev))
+                                            }
+                                        />
+                                    </label>
+                                    <label>
+                                        "Two-factor / recovery code"
+                                        <input
+                                            type="text"
+                                            autocomplete="one-time-code"
+                                            prop:value=move || reauth_code.get()
+                                            on:input=move |ev| reauth_code.set(event_target_value(&ev))
+                                        />
+                                    </label>
+                                    <div class="row-actions">
+                                        <button
+                                            class="primary"
+                                            disabled=move || busy.get()
+                                            on:click=confirm
+                                        >
+                                            {move || if busy.get() { "Confirming…" } else { "Confirm" }}
+                                        </button>
+                                        <button
+                                            class="ghost"
+                                            disabled=move || busy.get()
+                                            on:click=use_passkey
+                                        >
+                                            <Icon name="key"/>
+                                            "Use a passkey instead"
+                                        </button>
+                                        <button class="ghost" on:click=cancel>"Cancel"</button>
+                                    </div>
+                                </div>
+                            }
+                        })
+                }}
 
                 <h3>"Two-factor (TOTP)"</h3>
                 {move || {

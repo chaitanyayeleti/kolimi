@@ -6,11 +6,105 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use kolimi_auth::{CurrentUser, totp};
+use kolimi_auth::{CurrentUser, password, totp};
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::{AppState, api, audit};
+
+/// Body for a re-authentication request.
+#[derive(Deserialize, Default)]
+pub struct ReauthRequest {
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
+/// `POST /api/reauth` — prove presence for a sensitive account change.
+///
+/// Accepts the account password or, when TOTP is enrolled, a current code
+/// (or a recovery code). Returns a single-use token valid for five minutes.
+pub async fn reauth(
+    State(state): State<AppState>,
+    crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
+    Extension(user): Extension<CurrentUser>,
+    Json(req): Json<ReauthRequest>,
+) -> Response {
+    let lockout_key = format!("reauth:{}:{ip}", user.user_id);
+    if state.lockout.check(&lockout_key).is_some() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "too many failed attempts, try again later" })),
+        )
+            .into_response();
+    }
+    let Some(account) = state.db.get_user(user.user_id).await.ok().flatten() else {
+        return api::unauthorized("invalid credentials");
+    };
+    let password_ok = req
+        .password
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .is_some_and(|candidate| {
+            password::verify_password(&account.password_hash, candidate).unwrap_or(false)
+        });
+    let mut verified = password_ok;
+    if !verified && let Some(code) = req.code.as_deref().filter(|value| !value.is_empty()) {
+        let totp = state.db.totp_secret(user.user_id).await.ok().flatten();
+        if let Some((secret_b32, last_step)) = totp
+            && let Ok(secret) = totp::TotpSecret::from_base32(&secret_b32)
+        {
+            let now = (kolimi_db::now_millis() / 1000) as u64;
+            if let Some(step) = totp::verify(&secret, code, now, last_step.map(|step| step as u64))
+            {
+                verified = state
+                    .db
+                    .consume_totp_step(user.user_id, step)
+                    .await
+                    .unwrap_or(false);
+            }
+        }
+        if !verified {
+            verified = state
+                .db
+                .consume_recovery_code(user.user_id, &totp::hash_recovery_code(code))
+                .await
+                .unwrap_or(false);
+        }
+    }
+    if !verified {
+        state.lockout.record_failure(&lockout_key);
+        audit(
+            &state,
+            Some(user.user_id),
+            Some(&user.username),
+            "auth.reauth_failed",
+            &user.username,
+            json!({}),
+        )
+        .await;
+        return api::unauthorized("invalid credentials");
+    }
+    state.lockout.record_success(&lockout_key);
+    let Some(token) = state.reauth.issue(user.user_id) else {
+        return api::internal_error();
+    };
+    audit(
+        &state,
+        Some(user.user_id),
+        Some(&user.username),
+        "auth.reauth",
+        &user.username,
+        json!({}),
+    )
+    .await;
+    Json(json!({
+        "token": token,
+        "expires_in_secs": crate::reauth::REAUTH_TTL.as_secs(),
+    }))
+    .into_response()
+}
 
 /// `GET /api/totp` — enrollment status.
 pub async fn status(

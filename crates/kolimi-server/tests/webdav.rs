@@ -1895,6 +1895,45 @@ fn json_request(method: &str, uri: &str, auth: Option<&str>, body: &str) -> Requ
     builder.body(Body::from(body.to_string())).unwrap()
 }
 
+fn json_request_with_reauth(
+    method: &str,
+    uri: &str,
+    auth: &str,
+    reauth: &str,
+    body: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, auth)
+        .header("x-reauth-token", reauth)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn delete_with_reauth(uri: &str, auth: &str, reauth: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header(header::AUTHORIZATION, auth)
+        .header("x-reauth-token", reauth)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn reauth(app: &Router, auth: &str, password: &str) -> (StatusCode, Value) {
+    let body = json!({ "password": password }).to_string();
+    let (status, _, body) = send(app, json_request("POST", "/api/reauth", Some(auth), &body)).await;
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+async fn reauth_token(app: &Router, auth: &str, password: &str) -> String {
+    let (status, body) = reauth(app, auth, password).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["token"].as_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn proppatch_roundtrip_and_protected_props() {
     let server = setup().await;
@@ -2027,22 +2066,20 @@ async fn passkey_list_and_delete_scope_to_owner() {
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8(body).unwrap().contains("alice-key"));
 
-    // Bob cannot delete Alice's passkey.
+    // Bob cannot delete Alice's passkey, even after re-authenticating.
     let passkey_id = server.state.db.list_passkeys(alice_user.id).await.unwrap()[0].id;
+    let bob_token = reauth_token(&server.app, &bob, "bob password 1").await;
     let (status, _, _) = send(
         &server.app,
-        request("DELETE", &format!("/api/passkeys/{passkey_id}"), Some(&bob)),
+        delete_with_reauth(&format!("/api/passkeys/{passkey_id}"), &bob, &bob_token),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    let alice_token = reauth_token(&server.app, &alice, PASS).await;
     let (status, _, _) = send(
         &server.app,
-        request(
-            "DELETE",
-            &format!("/api/passkeys/{passkey_id}"),
-            Some(&alice),
-        ),
+        delete_with_reauth(&format!("/api/passkeys/{passkey_id}"), &alice, &alice_token),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -2073,20 +2110,87 @@ async fn passkey_register_finish_rejects_bogus_credentials() {
         }
     })
     .to_string();
+    let token = reauth_token(&server.app, &auth, PASS).await;
     let (status, _, _) = send(
         &server.app,
-        json_request("POST", "/api/passkeys/register/finish", Some(&auth), &bogus),
+        json_request_with_reauth(
+            "POST",
+            "/api/passkeys/register/finish",
+            &auth,
+            &token,
+            &bogus,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // Challenge was consumed: replaying the request fails the same way.
+    // Challenge was consumed: replaying the request fails the same way
+    // (with a fresh proof, since the previous token was single-use).
+    let token = reauth_token(&server.app, &auth, PASS).await;
     let (status, _, _) = send(
         &server.app,
-        json_request("POST", "/api/passkeys/register/finish", Some(&auth), &bogus),
+        json_request_with_reauth(
+            "POST",
+            "/api/passkeys/register/finish",
+            &auth,
+            &token,
+            &bogus,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn passkey_changes_require_reauthentication() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let alice = server.state.db.find_user(USER).await.unwrap().unwrap();
+    server
+        .state
+        .db
+        .add_passkey(alice.id, "existing", "{}", 0)
+        .await
+        .unwrap();
+    let passkey_id = server.state.db.list_passkeys(alice.id).await.unwrap()[0].id;
+
+    // No re-auth header: both credential writes are refused.
+    let body = json!({ "challenge_id": "x", "name": "x", "credential": {} }).to_string();
+    let (status, _, _) = send(
+        &server.app,
+        json_request("POST", "/api/passkeys/register/finish", Some(&auth), &body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = send(
+        &server.app,
+        request(
+            "DELETE",
+            &format!("/api/passkeys/{passkey_id}"),
+            Some(&auth),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // A wrong password does not mint a token.
+    let (status, _) = reauth(&server.app, &auth, "wrong password").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A valid token is single-use.
+    let token = reauth_token(&server.app, &auth, PASS).await;
+    let (status, _, _) = send(
+        &server.app,
+        delete_with_reauth(&format!("/api/passkeys/{passkey_id}"), &auth, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, _) = send(
+        &server.app,
+        delete_with_reauth(&format!("/api/passkeys/{passkey_id}"), &auth, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -2129,12 +2233,14 @@ async fn passkey_full_register_and_login_flow() {
         "credential": credential,
     })
     .to_string();
+    let proof = reauth_token(&server.app, &auth, PASS).await;
     let (status, _, body) = send(
         &server.app,
-        json_request(
+        json_request_with_reauth(
             "POST",
             "/api/passkeys/register/finish",
-            Some(&auth),
+            &auth,
+            &proof,
             &finish_body,
         ),
     )
@@ -2183,4 +2289,48 @@ async fn passkey_full_register_and_login_flow() {
     let (status, _, body) = send(&server.app, me).await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8(body).unwrap().contains(USER));
+
+    // A fresh assertion also mints a re-authentication token. This is the
+    // path a passkey-only account uses, since it has no password to type.
+    let (status, _, body) = send(
+        &server.app,
+        request("POST", "/api/reauth/passkey/begin", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let challenge_id = parsed["challenge_id"].as_str().unwrap().to_string();
+    let request_options: RequestChallengeResponse =
+        serde_json::from_value(parsed["options"].clone()).unwrap();
+    let assertion = token
+        .do_authentication(url::Url::parse(ORIGIN).unwrap(), request_options)
+        .unwrap();
+    let finish_body = json!({
+        "challenge_id": challenge_id,
+        "credential": assertion,
+    })
+    .to_string();
+    let (status, _, body) = send(
+        &server.app,
+        json_request(
+            "POST",
+            "/api/reauth/passkey/finish",
+            Some(&auth),
+            &finish_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let proof = parsed["token"].as_str().unwrap().to_string();
+    assert_eq!(proof.len(), 64);
+
+    let alice = server.state.db.find_user(USER).await.unwrap().unwrap();
+    let passkey_id = server.state.db.list_passkeys(alice.id).await.unwrap()[0].id;
+    let (status, _, _) = send(
+        &server.app,
+        delete_with_reauth(&format!("/api/passkeys/{passkey_id}"), &auth, &proof),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }

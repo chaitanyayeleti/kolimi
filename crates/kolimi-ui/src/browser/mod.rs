@@ -200,13 +200,16 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     };
     Effect::new(move |_| {
         let requested = nav.get();
+        // Unlocking encryption changes how every stored name is displayed,
+        // including received mounts, so the current folder must reload rather
+        // than keep the pre-unlock labels until the next navigation.
+        let master = e2ee_master.get();
         // Navigating leaves any multi-select behind.
         selected.set(std::collections::HashSet::new());
         loading.set(true);
         let seq = load_seq.get_untracked().wrapping_add(1);
         load_seq.set(seq);
         spawn_local(async move {
-            let master = e2ee_master.get_untracked();
             let (mounts, names) = received_mounts(master.as_ref()).await;
             received.set(mounts);
             shared_names.set(names);

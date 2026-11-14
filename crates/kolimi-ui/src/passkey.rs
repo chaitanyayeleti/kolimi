@@ -150,7 +150,10 @@ fn serialize_assertion(credential: &JsValue) -> Result<Value, String> {
 }
 
 /// Registers a new passkey for the signed-in user.
-pub async fn register(name: &str) -> Result<(), String> {
+///
+/// `reauth_token` comes from [`crate::api::reauth`]; the server refuses to
+/// store a credential without a fresh proof of presence.
+pub async fn register(name: &str, reauth_token: &str) -> Result<(), String> {
     let begin = api::send_json("POST", "/api/passkeys/register/begin", &json!({})).await?;
     if begin.status != 200 {
         return Err(begin
@@ -165,10 +168,11 @@ pub async fn register(name: &str) -> Result<(), String> {
     let options = prepare_options(&begin.body["options"], "excludeCredentials")?;
     let credential = ceremony("create", options).await?;
     let serialized = serialize_attestation(&credential)?;
-    let finish = api::send_json(
+    let finish = api::send_json_with(
         "POST",
         "/api/passkeys/register/finish",
         &json!({ "challenge_id": challenge_id, "name": name, "credential": serialized }),
+        Some(("x-reauth-token", reauth_token)),
     )
     .await?;
     if finish.status != 201 {
@@ -178,6 +182,44 @@ pub async fn register(name: &str) -> Result<(), String> {
             .to_string());
     }
     Ok(())
+}
+
+/// Performs a fresh passkey assertion for an already-signed-in user and
+/// returns the single-use re-authentication token.
+///
+/// This is how passkey-only accounts confirm credential changes: they have
+/// no password to re-enter, so the authenticator itself proves presence.
+pub async fn reauth() -> Result<String, String> {
+    let begin = api::send_json("POST", "/api/reauth/passkey/begin", &json!({})).await?;
+    if begin.status != 200 {
+        return Err(begin
+            .error()
+            .unwrap_or("could not start passkey confirmation")
+            .to_string());
+    }
+    let challenge_id = begin.body["challenge_id"]
+        .as_str()
+        .ok_or("missing challenge id")?
+        .to_string();
+    let options = prepare_options(&begin.body["options"], "allowCredentials")?;
+    let credential = ceremony("get", options).await?;
+    let serialized = serialize_assertion(&credential)?;
+    let finish = api::send_json(
+        "POST",
+        "/api/reauth/passkey/finish",
+        &json!({ "challenge_id": challenge_id, "credential": serialized }),
+    )
+    .await?;
+    if finish.status != 200 {
+        return Err(finish
+            .error()
+            .unwrap_or("passkey confirmation failed")
+            .to_string());
+    }
+    finish.body["token"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "confirmation response has no token".to_string())
 }
 
 /// Signs in with a passkey (the username must be filled in).

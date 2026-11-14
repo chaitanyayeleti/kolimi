@@ -81,6 +81,16 @@ pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
 
 /// POST/PATCH a JSON endpoint with a CSRF token.
 pub async fn send_json(method: &str, url: &str, value: &Value) -> Result<ApiResponse, String> {
+    send_json_with(method, url, value, None).await
+}
+
+/// Like [`send_json`], with one extra header (e.g. a re-auth token).
+pub async fn send_json_with(
+    method: &str,
+    url: &str,
+    value: &Value,
+    extra: Option<(&str, &str)>,
+) -> Result<ApiResponse, String> {
     let mut builder = match method {
         "PATCH" => Request::patch(url),
         "PUT" => Request::put(url),
@@ -90,6 +100,9 @@ pub async fn send_json(method: &str, url: &str, value: &Value) -> Result<ApiResp
     if let Some(token) = csrf_token() {
         builder = builder.header("X-CSRF-Token", &token);
     }
+    if let Some((name, value)) = extra {
+        builder = builder.header(name, value);
+    }
     let request = builder.json(value).map_err(|e| e.to_string())?;
     let response = request.send().await.map_err(|e| e.to_string())?;
     to_api(response).await
@@ -97,13 +110,44 @@ pub async fn send_json(method: &str, url: &str, value: &Value) -> Result<ApiResp
 
 /// DELETE a JSON endpoint with a CSRF token.
 pub async fn delete(url: &str) -> Result<ApiResponse, String> {
+    delete_with(url, None).await
+}
+
+/// Like [`delete`], with one extra header (e.g. a re-auth token).
+pub async fn delete_with(url: &str, extra: Option<(&str, &str)>) -> Result<ApiResponse, String> {
     let mut builder = Request::delete(url).credentials(RequestCredentials::SameOrigin);
     if let Some(token) = csrf_token() {
         builder = builder.header("X-CSRF-Token", &token);
     }
+    if let Some((name, value)) = extra {
+        builder = builder.header(name, value);
+    }
     let request = builder.build().map_err(|e| e.to_string())?;
     let response = request.send().await.map_err(|e| e.to_string())?;
     to_api(response).await
+}
+
+/// Exchanges the account password or a two-factor/recovery code for a
+/// short-lived re-authentication token.
+pub async fn reauth(password: &str, code: &str) -> Result<String, String> {
+    let mut body = serde_json::json!({});
+    if !password.is_empty() {
+        body["password"] = serde_json::json!(password);
+    }
+    if !code.is_empty() {
+        body["code"] = serde_json::json!(code);
+    }
+    let response = send_json("POST", "/api/reauth", &body).await?;
+    if response.status != 200 {
+        return Err(response
+            .error()
+            .unwrap_or("re-authentication failed")
+            .to_string());
+    }
+    response.body["token"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "re-authentication response has no token".to_string())
 }
 
 /// PUT raw bytes (chunk uploads) with a CSRF token.

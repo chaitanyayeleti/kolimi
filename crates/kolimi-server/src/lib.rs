@@ -17,6 +17,7 @@ pub mod hardening;
 pub mod janitor;
 pub mod metrics;
 pub mod preview;
+pub mod reauth;
 pub mod search_indexer;
 pub mod ui;
 
@@ -84,6 +85,8 @@ pub struct AppState {
     pub locks: Arc<kolimi_webdav::LockManager>,
     /// Failed-login tracker.
     pub lockout: Arc<FailedAuthTracker>,
+    /// Single-use re-authentication tokens for sensitive account changes.
+    pub reauth: Arc<reauth::ReauthTokens>,
     /// Basic-auth verification cache.
     pub cred_cache: Arc<CredentialCache>,
     /// WebAuthn ceremonies.
@@ -172,6 +175,7 @@ impl AppState {
                 LOGIN_WINDOW,
                 LOGIN_LOCKOUT,
             )),
+            reauth: Arc::new(reauth::ReauthTokens::new()),
             cred_cache: Arc::new(CredentialCache::new(Duration::from_secs(60), 1024)),
             passkeys: Arc::new(Passkeys::from_origin(origin, "Kolimi")?),
             search,
@@ -213,11 +217,17 @@ pub fn build_app(state: AppState) -> Router {
             "/api/passkeys/register/finish",
             post(api_passkey::register_finish),
         )
+        .route("/api/reauth/passkey/begin", post(api_passkey::reauth_begin))
+        .route(
+            "/api/reauth/passkey/finish",
+            post(api_passkey::reauth_finish),
+        )
         .route("/api/sync/changes", get(api_sync::changes))
         .route("/api/sync/tree", get(api_sync::tree))
         .route("/api/sync/events", get(api_sync::events))
         .route("/api/manifests/{content_id}", get(api_sync::manifest_by_id))
         .route("/api/files/manifest", get(api_sync::file_manifest))
+        .route("/api/reauth", post(api_2fa::reauth))
         .route("/api/totp", get(api_2fa::status))
         .route("/api/totp/begin", post(api_2fa::begin))
         .route("/api/totp/enable", post(api_2fa::enable))

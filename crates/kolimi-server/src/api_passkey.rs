@@ -1,9 +1,11 @@
 //! Passkey (WebAuthn) endpoints: registration, management, and login.
 
+#![allow(clippy::result_large_err)]
+
 use axum::{
     Extension, Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use kolimi_auth::{
@@ -103,8 +105,14 @@ pub struct RegisterFinish {
 pub async fn register_finish(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<RegisterFinish>,
 ) -> Response {
+    // A session alone must not add a credential that survives password
+    // changes and bypasses TOTP at login (RT-18).
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
+    }
     if !valid_name(&req.name) {
         return bad_request("passkey name must be 1-64 printable characters");
     }
@@ -178,8 +186,14 @@ pub async fn list(
 pub async fn delete(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Path(passkey_id): Path<i64>,
 ) -> Response {
+    // Removing a credential is equally sensitive: it can lock the owner out
+    // or erase the only strong factor they have left.
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
+    }
     match state.db.delete_passkey(user.user_id, passkey_id).await {
         Ok(()) => {
             audit(
@@ -196,6 +210,61 @@ pub async fn delete(
         Err(DbError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => internal_error(),
     }
+}
+
+/// Verifies a passkey assertion and persists the incremented sign counter.
+///
+/// Shared by login and re-authentication. A failure is deliberately generic
+/// so the caller can apply its own audit/lockout policy.
+async fn complete_assertion(
+    state: &AppState,
+    user_id: i64,
+    challenge_id: &str,
+    credential: &PublicKeyCredential,
+) -> Result<(), Response> {
+    let rows = match state.db.list_passkeys(user_id).await {
+        Ok(rows) => rows,
+        Err(_) => return Err(internal_error()),
+    };
+    let stored = parse_passkeys(&rows);
+    if stored.is_empty() {
+        return Err(unauthorized("invalid credentials"));
+    }
+    let result = match state
+        .passkeys
+        .finish_authentication(challenge_id, user_id, credential)
+    {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::debug!(error = %error, "passkey authentication failed");
+            return Err(unauthorized("invalid credentials"));
+        }
+    };
+    let Some((passkey_id, mut passkey)) = stored
+        .into_iter()
+        .find(|(_, passkey)| passkey.cred_id() == result.cred_id())
+    else {
+        return Err(unauthorized("invalid credentials"));
+    };
+    passkey.update_credential(&result);
+    // Fail closed: if the incremented counter cannot be stored, do not
+    // authenticate (a stale counter weakens replay protection).
+    let serialized = match serde_json::to_string(&passkey) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize passkey");
+            return Err(internal_error());
+        }
+    };
+    if let Err(error) = state
+        .db
+        .update_passkey(user_id, passkey_id, &serialized, kolimi_db::now_millis())
+        .await
+    {
+        tracing::error!(%error, "failed to persist passkey sign counter");
+        return Err(internal_error());
+    }
+    Ok(())
 }
 
 /// Body for starting a passkey login.
@@ -267,61 +336,22 @@ pub async fn login_finish(
         return unauthorized("invalid credentials");
     }
 
-    let rows = state.db.list_passkeys(user.id).await.unwrap_or_default();
-    let stored = parse_passkeys(&rows);
-    if stored.is_empty() {
-        return unauthorized("invalid credentials");
-    }
     let Ok(credential) = serde_json::from_value::<PublicKeyCredential>(req.credential) else {
         return bad_request("invalid credential");
     };
-
-    let result = match state
-        .passkeys
-        .finish_authentication(&req.challenge_id, user.id, &credential)
+    if let Err(response) = complete_assertion(&state, user.id, &req.challenge_id, &credential).await
     {
-        Ok(result) => result,
-        Err(error) => {
-            tracing::debug!(error = %error, "passkey authentication failed");
-            state.lockout.record_failure(&lockout_key);
-            audit(
-                &state,
-                None,
-                None,
-                "auth.login_failed",
-                &req.username,
-                json!({ "reason": "bad_passkey" }),
-            )
-            .await;
-            return unauthorized("invalid credentials");
-        }
-    };
-
-    let Some((passkey_id, mut passkey)) = stored
-        .into_iter()
-        .find(|(_, passkey)| passkey.cred_id() == result.cred_id())
-    else {
         state.lockout.record_failure(&lockout_key);
-        return unauthorized("invalid credentials");
-    };
-
-    passkey.update_credential(&result);
-    // Fail closed: if we cannot persist the incremented sign counter, do not
-    // issue a session (a stale counter weakens replay protection).
-    let serialized = match serde_json::to_string(&passkey) {
-        Ok(serialized) => serialized,
-        Err(error) => {
-            tracing::error!(%error, "failed to serialize passkey");
-            return internal_error();
-        }
-    };
-    if let Err(error) = state
-        .db
-        .update_passkey(user.id, passkey_id, &serialized, kolimi_db::now_millis())
-        .await
-    {
-        tracing::error!(%error, "failed to persist passkey sign counter");
-        return internal_error();
+        audit(
+            &state,
+            None,
+            None,
+            "auth.login_failed",
+            &req.username,
+            json!({ "reason": "bad_passkey" }),
+        )
+        .await;
+        return response;
     }
 
     state.lockout.record_success(&lockout_key);
@@ -335,4 +365,95 @@ pub async fn login_finish(
     )
     .await;
     start_session(&state, &user).await
+}
+
+/// `POST /api/reauth/passkey/begin` — start a fresh assertion for an
+/// already-signed-in user. Required for passkey-only accounts, which have
+/// no password to re-enter.
+pub async fn reauth_begin(
+    State(state): State<AppState>,
+    crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    let lockout_key = format!("passkey-reauth:{}:{ip}", user.user_id);
+    if state.lockout.check(&lockout_key).is_some() {
+        return too_many();
+    }
+    let rows = match state.db.list_passkeys(user.user_id).await {
+        Ok(rows) => rows,
+        Err(_) => return internal_error(),
+    };
+    let credentials: Vec<Passkey> = parse_passkeys(&rows).into_iter().map(|(_, p)| p).collect();
+    if credentials.is_empty() {
+        return no_passkeys();
+    }
+    match state
+        .passkeys
+        .begin_authentication(user.user_id, &credentials)
+    {
+        Ok((challenge_id, options)) => {
+            Json(json!({ "challenge_id": challenge_id, "options": options })).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "passkey re-auth begin failed");
+            internal_error()
+        }
+    }
+}
+
+/// Body for finishing a passkey re-authentication.
+#[derive(Deserialize)]
+pub struct ReauthFinish {
+    challenge_id: String,
+    credential: Value,
+}
+
+/// `POST /api/reauth/passkey/finish` — verify a fresh assertion and issue
+/// a single-use re-authentication token.
+pub async fn reauth_finish(
+    State(state): State<AppState>,
+    crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
+    Extension(user): Extension<CurrentUser>,
+    Json(req): Json<ReauthFinish>,
+) -> Response {
+    let lockout_key = format!("passkey-reauth:{}:{ip}", user.user_id);
+    if state.lockout.check(&lockout_key).is_some() {
+        return too_many();
+    }
+    let Ok(credential) = serde_json::from_value::<PublicKeyCredential>(req.credential) else {
+        return bad_request("invalid credential");
+    };
+    if let Err(response) =
+        complete_assertion(&state, user.user_id, &req.challenge_id, &credential).await
+    {
+        state.lockout.record_failure(&lockout_key);
+        audit(
+            &state,
+            Some(user.user_id),
+            Some(&user.username),
+            "auth.reauth_failed",
+            &user.username,
+            json!({ "reason": "bad_passkey" }),
+        )
+        .await;
+        return response;
+    }
+    state.lockout.record_success(&lockout_key);
+    let Some(token) = state.reauth.issue(user.user_id) else {
+        return internal_error();
+    };
+    audit(
+        &state,
+        Some(user.user_id),
+        Some(&user.username),
+        "auth.reauth",
+        &user.username,
+        json!({ "method": "passkey" }),
+    )
+    .await;
+    Json(json!({
+        "token": token,
+        "expires_in_secs": crate::reauth::REAUTH_TTL.as_secs(),
+    }))
+    .into_response()
 }

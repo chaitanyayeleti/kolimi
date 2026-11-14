@@ -101,6 +101,44 @@ test("web settings tabs and the passkeys panel", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("web passkey add requires re-authentication", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const modal = page.locator(".modal");
+  await modal.getByRole("tab", { name: "Passkeys", exact: true }).click();
+
+  // The name prompt is followed by a password confirmation, not an
+  // immediate WebAuthn ceremony.
+  const click = modal
+    .getByRole("button", { name: "Add passkey", exact: true })
+    .click();
+  const dialog = await page.waitForEvent("dialog");
+  await dialog.accept("browser-test-key");
+  await click;
+  await expect(
+    modal.getByText(/Confirm your account password/),
+  ).toBeVisible();
+
+  // A virtual authenticator completes the ceremony only after re-auth.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+    },
+  });
+
+  await modal.getByLabel("Account password", { exact: true }).fill(PASS);
+  await modal.getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect(
+    modal.getByText("browser-test-key", { exact: true }),
+  ).toBeVisible();
+});
+
 test("web rename and delete", async ({ page }) => {
   await login(page);
   const original = `browser-e2e-${Date.now()}.txt`;
@@ -296,18 +334,15 @@ test("web E2EE recipient decrypts a shared file", async ({ page }) => {
   await login(page, "bob");
   await unlock(page);
 
-  // The legacy fixture has no wrapped display name for Bob, so the mount is
-  // labelled generically; open it by its provenance instead of its name.
-  const shared = page
-    .locator("li.file", { hasText: "shared by alice" })
-    .first();
-  await shared.locator(".file-open").click();
+  // Unlocking must refresh the already-rendered folder, so the wrapped
+  // mount name ("Team") replaces the stored `k1_…` label without navigating.
+  await expect(page.getByText("Team", { exact: true }).first()).toBeVisible();
+  await openFolder(page, "Team");
+  await expect(page.getByText("note.txt", { exact: true }).first()).toBeVisible();
 
-  const downloadButton = page.getByTitle("Download & decrypt").first();
-  await expect(downloadButton).toBeVisible();
   const [download] = await Promise.all([
     page.waitForEvent("download"),
-    downloadButton.click(),
+    (await row(page, "note.txt")).getByTitle("Download & decrypt").click(),
   ]);
   const downloaded = await download.path();
   expect(downloaded).not.toBeNull();
