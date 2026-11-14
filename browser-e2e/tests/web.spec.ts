@@ -51,14 +51,14 @@ async function login(
 
 async function unlock(page: Page) {
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const modal = page.locator(".modal");
-  await modal.getByRole("tab", { name: "Encryption", exact: true }).click();
-  await modal.getByLabel("Passphrase", { exact: true }).fill(E2EE_PASS);
-  await modal.getByRole("button", { name: "Unlock", exact: true }).click();
+  const settings = page.locator(".settings-page");
+  await settings.getByRole("tab", { name: "Encryption", exact: true }).click();
+  await settings.getByLabel("Passphrase", { exact: true }).fill(E2EE_PASS);
+  await settings.getByRole("button", { name: "Unlock", exact: true }).click();
   await expect(
-    modal.getByText("Keyring unlocked for this browser."),
+    settings.getByText("Keyring unlocked for this browser."),
   ).toBeVisible();
-  await modal.getByRole("button", { name: "Close", exact: true }).click();
+  await settings.getByRole("button", { name: "Back to files" }).click();
 }
 
 async function openFolder(page: Page, name: string) {
@@ -90,32 +90,39 @@ test("web settings tabs and the passkeys panel", async ({ page }) => {
   ).toHaveCount(0);
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const modal = page.locator(".modal");
+  const settings = page.locator(".settings-page");
 
   await expect(
-    modal.getByRole("tab", { name: "Encryption", exact: true }),
+    settings.getByRole("tab", { name: "Encryption", exact: true }),
   ).toBeVisible();
 
-  await modal.getByRole("tab", { name: "Account", exact: true }).click();
+  await settings.getByRole("tab", { name: "Account", exact: true }).click();
   await expect(
-    modal.getByRole("heading", { name: "Account", exact: true }),
+    settings.getByRole("heading", { name: "Account", exact: true }),
   ).toBeVisible();
   await expect(
-    modal.getByText("Active sessions", { exact: true }),
+    settings.getByText("Active sessions", { exact: true }),
   ).toBeVisible();
-  await expect(modal.getByText("this device", { exact: true })).toBeVisible();
-  await modal.getByRole("button", { name: "Rename", exact: true }).first().click();
-  await modal.getByLabel("Session label", { exact: true }).fill("E2E laptop");
-  await modal.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(modal.getByText("E2E laptop", { exact: false })).toBeVisible();
+  await expect(settings.getByText("this device", { exact: true })).toBeVisible();
+  await settings
+    .getByRole("button", { name: "Rename", exact: true })
+    .first()
+    .click();
+  await settings
+    .getByLabel("Session label", { exact: true })
+    .fill("E2E laptop");
+  await settings.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(settings.getByText("E2E laptop", { exact: false })).toBeVisible();
 
-  await modal.getByRole("tab", { name: "Passkeys", exact: true }).click();
+  await settings.getByRole("tab", { name: "Passkeys", exact: true }).click();
   await expect(
-    modal.getByRole("heading", { name: "Passkeys", exact: true }),
+    settings.getByRole("heading", { name: "Passkeys", exact: true }),
   ).toBeVisible();
-  await expect(modal.getByText("Two-factor (TOTP)", { exact: true })).toBeVisible();
   await expect(
-    modal.getByLabel("Passphrase", { exact: true }),
+    settings.getByText("Two-factor (TOTP)", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    settings.getByLabel("Passphrase", { exact: true }),
   ).toHaveCount(0);
 });
 
@@ -124,8 +131,9 @@ test("web phase 0 polish: dialog keyboard and mobile toolbar", async ({
 }) => {
   await login(page);
 
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+  await page.getByRole("button", { name: "Create user", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Create user", exact: true });
   await expect(dialog).toBeVisible();
 
   for (let i = 0; i < 8; i += 1) {
@@ -138,9 +146,10 @@ test("web phase 0 polish: dialog keyboard and mobile toolbar", async ({
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Settings", exact: true }),
+    page.getByRole("button", { name: "Create user", exact: true }),
   ).toBeFocused();
 
+  await page.getByRole("button", { name: "Files", exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   const search = page.getByLabel("Search files", { exact: true });
   await expect(search).toBeVisible();
@@ -205,7 +214,7 @@ test("web admin page lists and inspects users", async ({ page }) => {
     page.getByRole("button", { name: "Create user", exact: true }),
   ).toBeVisible();
 
-  const bob = page.locator("main.content li.row", { hasText: "bob" }).first();
+  const bob = page.locator("main.content tbody tr", { hasText: "bob" }).first();
   await bob.getByRole("button", { name: "Manage", exact: true }).click();
   const modal = page.locator(".modal");
   await expect(
@@ -247,7 +256,7 @@ test("web admin creates and deletes a user", async ({ page }) => {
   await create.getByLabel("Confirm password", { exact: true }).fill("e2e-password-123");
   await create.getByRole("button", { name: "Create user", exact: true }).click();
 
-  const row = page.locator("main.content li.row", { hasText: username }).first();
+  const row = page.locator("main.content tbody tr", { hasText: username }).first();
   await expect(row).toBeVisible();
   await row.getByRole("button", { name: "Manage", exact: true }).click();
 
@@ -323,7 +332,7 @@ test("web forces a temporary password change", async ({ page }) => {
     .check();
   await create.getByRole("button", { name: "Create user", exact: true }).click();
   await expect(
-    page.locator("main.content li.row", { hasText: username }).first(),
+    page.locator("main.content tbody tr", { hasText: username }).first(),
   ).toBeVisible();
 
   // A fresh browser context mimics a new sign-in with the temporary password.
@@ -403,7 +412,7 @@ test("web admin filters and verifies the audit log", async ({ page }) => {
   await filter.getByLabel("Action", { exact: true }).fill("user.add");
   await filter.getByRole("button", { name: "Apply", exact: true }).click();
 
-  const entry = page.locator("main.content li.row", { hasText: "user.add" }).first();
+  const entry = page.locator("main.content tbody tr", { hasText: "user.add" }).first();
   await expect(entry).toBeVisible();
   await entry.locator("summary").click();
   await expect(entry.locator("dt").first()).toBeVisible();
@@ -417,19 +426,19 @@ test("web admin filters and verifies the audit log", async ({ page }) => {
 test("web passkey add requires re-authentication", async ({ page }) => {
   await login(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const modal = page.locator(".modal");
-  await modal.getByRole("tab", { name: "Passkeys", exact: true }).click();
+  const settings = page.locator(".settings-page");
+  await settings.getByRole("tab", { name: "Passkeys", exact: true }).click();
 
   // The name prompt is followed by a password confirmation, not an
   // immediate WebAuthn ceremony.
-  const click = modal
+  const click = settings
     .getByRole("button", { name: "Add passkey", exact: true })
     .click();
   const dialog = await page.waitForEvent("dialog");
   await dialog.accept("browser-test-key");
   await click;
   await expect(
-    modal.getByText(/Confirm your account password/),
+    settings.getByText(/Confirm your account password/),
   ).toBeVisible();
 
   // A virtual authenticator completes the ceremony only after re-auth.
@@ -445,10 +454,10 @@ test("web passkey add requires re-authentication", async ({ page }) => {
     },
   });
 
-  await modal.getByLabel("Account password", { exact: true }).fill(PASS);
-  await modal.getByRole("button", { name: "Confirm", exact: true }).click();
+  await settings.getByLabel("Account password", { exact: true }).fill(PASS);
+  await settings.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(
-    modal.getByText("browser-test-key", { exact: true }),
+    settings.getByText("browser-test-key", { exact: true }),
   ).toBeVisible();
 });
 
@@ -679,35 +688,40 @@ test("web migration upgrades a legacy folder share and reset clears state", asyn
 
   await login(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const modal = page.locator(".modal");
-  await modal
+  const settings = page.locator(".settings-page");
+  await settings.getByRole("tab", { name: "Encryption", exact: true }).click();
+  await settings
     .getByLabel("Passphrase", { exact: true })
     .fill(E2EE_PASS);
-  await modal.getByRole("button", { name: "Unlock", exact: true }).click();
+  await settings.getByRole("button", { name: "Unlock", exact: true }).click();
   await expect(
-    modal.getByText("Keyring unlocked for this browser."),
+    settings.getByText("Keyring unlocked for this browser."),
   ).toBeVisible();
 
   // The Devices tab hosts the extracted MLS device roster.
-  await modal.getByRole("tab", { name: "Devices", exact: true }).click();
+  await settings.getByRole("tab", { name: "Devices", exact: true }).click();
   await expect(
-    modal.getByRole("heading", { name: "MLS devices", exact: true }),
+    settings.getByRole("heading", { name: "MLS devices", exact: true }),
   ).toBeVisible();
-  await expect(modal.getByText("this device", { exact: true })).toBeVisible();
+  await expect(settings.getByText("this device", { exact: true })).toBeVisible();
 
-  await modal.getByRole("tab", { name: "Sharing", exact: true }).click();
-  await modal
+  await settings.getByRole("tab", { name: "Sharing", exact: true }).click();
+  await settings
     .getByRole("button", { name: "Upgrade shares to MLS", exact: true })
     .click();
-  await expect(modal.getByText(/Upgraded \d+ folder share/)).toBeVisible();
+  await expect(
+    settings.getByText(/Upgraded \d+ folder share/),
+  ).toBeVisible();
   expect((await request.get(groupUrl, { headers: AUTH })).status()).toBe(200);
 
   page.once("dialog", (dialog) => dialog.accept());
-  await modal
+  await settings
     .getByRole("button", {
       name: "Reset this browser's MLS state",
       exact: true,
     })
     .click();
-  await expect(modal.getByText(/MLS state cleared|had no stored/)).toBeVisible();
+  await expect(
+    settings.getByText(/MLS state cleared|had no stored/),
+  ).toBeVisible();
 });

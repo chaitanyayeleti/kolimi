@@ -4,7 +4,7 @@ use kolimi_crypto::MasterKey;
 use leptos::prelude::*;
 
 use super::types::Entry;
-use crate::dialogs::{SettingsDialog, SettingsTab, ShareDialog, VaultSetupDialog, VersionsDialog};
+use crate::dialogs::{ShareDialog, VaultSetupDialog, VersionsDialog};
 
 /// Vault setup, share, versions, admin and Settings dialogs.
 #[component]
@@ -12,9 +12,7 @@ pub(crate) fn BrowserDialogs(
     vault_setup: RwSignal<bool>,
     share_target: RwSignal<Option<Entry>>,
     versions_for: RwSignal<Option<Entry>>,
-    e2ee_open: RwSignal<bool>,
     master_signal: RwSignal<Option<MasterKey>>,
-    settings_tab: RwSignal<SettingsTab>,
     current_path: RwSignal<String>,
     notice: RwSignal<String>,
     on_load: Callback<String>,
@@ -73,20 +71,6 @@ pub(crate) fn BrowserDialogs(
                             name=entry.name.clone()
                             on_close=Callback::new(move |_| versions_for.set(None))
                             on_restored=Callback::new(move |_| on_load.run(current.clone()))
-                        />
-                    }
-                })
-        }}
-
-        {move || {
-            e2ee_open
-                .get()
-                .then(|| {
-                    view! {
-                        <SettingsDialog
-                            master=master_signal
-                            tab=settings_tab
-                            on_close=Callback::new(move |_| e2ee_open.set(false))
                         />
                     }
                 })

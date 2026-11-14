@@ -12,9 +12,16 @@ follow [Semantic Versioning](https://semver.org/).
   Upload and New folder actions, counts use proper singular/plural copy, and
   icon-only actions have accessible labels.
 - Dialogs now expose `role="dialog"`/`aria-modal`, trap Tab focus, close on
-  Escape or a backdrop click, restore focus to the opener, and lock page
-  scroll while open. This applies to Settings, Admin dialogs, sharing,
-  versions and first-run Vault setup.
+  Escape, restore focus to the opener, and lock page scroll while open. This
+  applies to Admin dialogs, sharing, version history and first-run Vault
+  setup; user details use a right-side drawer.
+- Settings is now a full page with vertical section navigation (Account,
+  Encryption, Sharing, Devices, Passkeys) and a **Back to files** action,
+  instead of a cramped modal.
+- Admin **Users** and **Audit** are data tables with sticky headers, role,
+  status and usage pills, quota bars, last-seen times, and expandable audit
+  details. User details open in a right-side drawer. Invites show
+  active/expiring/expired status, and group membership renders as chips.
 
 ## [0.4.8] - 2026-11-14
 

@@ -8,6 +8,7 @@ use serde_json::Value;
 pub(super) enum Tab {
     Files,
     Trash,
+    Settings,
     Admin,
 }
 

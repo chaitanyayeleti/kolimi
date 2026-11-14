@@ -145,11 +145,13 @@ fn focus_first_in(modal_id: &str) {
 ///
 /// The dialog traps Tab focus, closes on Escape, and restores focus to the
 /// element that opened it. Body scroll is locked while it is open. Backdrop
-/// clicks do not close it, so a stray click cannot discard a form.
+/// clicks do not close it, so a stray click cannot discard a form. Set
+/// `drawer` to slide the panel in from the right instead of centring it.
 #[component]
 pub fn Modal(
     #[prop(into)] title: String,
     on_close: Callback<()>,
+    #[prop(optional)] drawer: bool,
     children: Children,
 ) -> impl IntoView {
     let sequence = MODAL_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -234,9 +236,9 @@ pub fn Modal(
     Effect::new(move |_| focus_first_in(&focus_modal_id));
 
     view! {
-        <div class="backdrop">
+        <div class=if drawer { "backdrop drawer-backdrop" } else { "backdrop" }>
             <div
-                class="card modal"
+                class=if drawer { "card modal drawer" } else { "card modal" }
                 id=modal_id
                 role="dialog"
                 aria-modal="true"

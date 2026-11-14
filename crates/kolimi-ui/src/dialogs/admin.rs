@@ -278,67 +278,131 @@ fn UsersPanel(current_username: RwSignal<String>) -> impl IntoView {
         <Notice message=notice/>
         <p class="muted">{move || plural(users.get().len(), "user", "users")}</p>
 
-        <ul class="shares">
-            <For
-                each=move || users.get()
-                key=|user| user["id"].as_i64().unwrap_or(0)
-                children=move |user| {
-                    let username = user["username"].as_str().unwrap_or_default().to_string();
-                    let is_admin = user["is_admin"].as_bool().unwrap_or(false);
-                    let disabled = user["disabled"].as_bool().unwrap_or(false);
-                    let used = user["used_bytes"].as_u64().unwrap_or(0);
-                    let quota = user["quota_bytes"].as_i64();
-                    let near = quota.is_some_and(|q| {
-                        q > 0
-                            && used < q as u64
-                            && used.saturating_mul(10) >= (q as u64).saturating_mul(9)
-                    });
-                    let over = quota.is_some_and(|q| q > 0 && used >= q as u64);
-                    let detail = username.clone();
-                    view! {
-                        <li class="row">
-                            <span class="name">
-                                <span class="lead-icon">
-                                    <Icon name="users"/>
-                                </span>
-                                <span class="file-body">
-                                    <span class="file-name">
-                                        {username}
-                                        {is_admin
-                                            .then(|| view! { <span class="badge">"admin"</span> })}
-                                        {disabled
-                                            .then(|| view! { <span class="badge">"disabled"</span> })}
-                                        {over
-                                            .then(|| view! { <span class="badge">"over quota"</span> })}
-                                        {near
-                                            .then(|| view! { <span class="badge">"near quota"</span> })}
-                                    </span>
-                                    <span class="file-meta">
-                                        {fmt_bytes(used)} " / " {quota_label(quota)}
-                                        {quota
-                                            .is_some_and(|q| q > 0)
-                                            .then(|| {
-                                                let percent = (used as f64 / quota.unwrap_or(1) as f64
-                                                    * 100.0)
-                                                    .min(999.0);
-                                                format!(" · {percent:.0}%")
+        <div class="table-wrap">
+            <table class="data-table users-table">
+                <thead>
+                    <tr>
+                        <th scope="col">"User"</th>
+                        <th scope="col">"Role"</th>
+                        <th scope="col">"Status"</th>
+                        <th scope="col">"Usage"</th>
+                        <th scope="col" class="cell-actions">"Actions"</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <For
+                        each=move || users.get()
+                        key=|user| user["id"].as_i64().unwrap_or(0)
+                        children=move |user| {
+                            let username =
+                                user["username"].as_str().unwrap_or_default().to_string();
+                            let is_admin = user["is_admin"].as_bool().unwrap_or(false);
+                            let disabled = user["disabled"].as_bool().unwrap_or(false);
+                            let used = user["used_bytes"].as_u64().unwrap_or(0);
+                            let quota = user["quota_bytes"].as_i64();
+                            let quota_total = quota.filter(|value| *value > 0).map(|value| value as u64);
+                            let percent = quota_total.map(|total| {
+                                (used as f64 / total as f64 * 100.0).min(999.0)
+                            });
+                            let near =
+                                percent.is_some_and(|value| (90.0..100.0).contains(&value));
+                            let over = percent.is_some_and(|value| value >= 100.0);
+                            let usage_class = if over {
+                                "usage-bar-fill danger"
+                            } else if near {
+                                "usage-bar-fill warn"
+                            } else {
+                                "usage-bar-fill"
+                            };
+                            let last_login = user["last_login_at"].as_i64().unwrap_or(0);
+                            let detail = username.clone();
+                            view! {
+                                <tr>
+                                    <td>
+                                        <span class="cell-user">
+                                            <span class="lead-icon">
+                                                <Icon name="users"/>
+                                            </span>
+                                            <span class="file-body">
+                                                <span class="file-name">{username}</span>
+                                                <span class="file-meta">
+                                                    {if last_login > 0 {
+                                                        format!("last seen {}", relative_time(last_login))
+                                                    } else {
+                                                        "never signed in".to_string()
+                                                    }}
+                                                </span>
+                                            </span>
+                                        </span>
+                                    </td>
+                                    <td>
+                                        {if is_admin {
+                                            view! { <span class="badge">"admin"</span> }.into_any()
+                                        } else {
+                                            view! { <span class="badge muted">"member"</span> }
+                                                .into_any()
+                                        }}
+                                    </td>
+                                    <td>
+                                        <span class="status-pills">
+                                            {if disabled {
+                                                view! { <span class="badge danger">"disabled"</span> }
+                                                    .into_any()
+                                            } else {
+                                                view! { <span class="badge ok">"active"</span> }
+                                                    .into_any()
+                                            }}
+                                            {over
+                                                .then(|| {
+                                                    view! { <span class="badge danger">"over quota"</span> }
+                                                })}
+                                            {near
+                                                .then(|| {
+                                                    view! { <span class="badge warn">"near quota"</span> }
+                                                })}
+                                        </span>
+                                    </td>
+                                    <td class="cell-usage">
+                                        <span class="usage-line">
+                                            <span>
+                                                {fmt_bytes(used)}
+                                                " / "
+                                                {quota_label(quota)}
+                                            </span>
+                                            {percent
+                                                .map(|value| {
+                                                    view! { <span class="muted">{format!("{value:.0}%")}</span> }
+                                                })}
+                                        </span>
+                                        {percent
+                                            .map(|value| {
+                                                view! {
+                                                    <span class="usage-bar">
+                                                        <span
+                                                            class=usage_class
+                                                            style:width=format!("{value:.0}%")
+                                                        ></span>
+                                                    </span>
+                                                }
                                             })}
-                                    </span>
-                                </span>
-                            </span>
-                            <span class="row-actions">
-                                <button on:click=move |_| detail_user.set(Some(detail.clone()))>
-                                    "Manage"
-                                </button>
-                            </span>
-                        </li>
-                    }
-                }
-            />
-            <Show when=move || !loading.get() && users.get().is_empty()>
-                <li class="row muted">"No users match this search."</li>
-            </Show>
-        </ul>
+                                    </td>
+                                    <td class="cell-actions">
+                                        <button on:click=move |_| detail_user.set(Some(detail.clone()))>
+                                            "Manage"
+                                        </button>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    />
+                    <Show when=move || !loading.get() && users.get().is_empty()>
+                        <tr>
+                            <td colspan="5" class="muted">"No users match this search."</td>
+                        </tr>
+                    </Show>
+                </tbody>
+            </table>
+        </div>
 
         <Show when=move || has_more.get() && !sort_usage.get()>
             <div class="row-actions">
@@ -729,7 +793,7 @@ fn UserDetailDialog(
     let recover_expected = username.clone();
 
     view! {
-        <Modal title=format!("User — {username}") on_close=on_close>
+        <Modal title=format!("User — {username}") on_close=on_close drawer=true>
             <ErrorText message=error/>
             <Notice message=notice/>
 
@@ -843,11 +907,22 @@ fn UserDetailDialog(
                     </span>
                 </li>
                 <li class="row">
-                    <span class="name">"Sessions / groups / shares"</span>
+                    <span class="name">"Sessions"</span>
                     <span class="muted">
                         {move || {
-                            let value = detail.get();
-                            let groups = value["groups"]
+                            let sessions =
+                                detail.get()["session_count"].as_i64().unwrap_or(0).max(0)
+                                    as usize;
+                            plural(sessions, "session", "sessions")
+                        }}
+                    </span>
+                </li>
+                <li class="row">
+                    <span class="name">"Groups"</span>
+                    <span class="muted">
+                        {move || {
+                            detail
+                                .get()["groups"]
                                 .as_array()
                                 .map(|list| {
                                     list.iter()
@@ -856,22 +931,23 @@ fn UserDetailDialog(
                                         .join(", ")
                                 })
                                 .filter(|text| !text.is_empty())
-                                .unwrap_or_else(|| "none".to_string());
-                            let sessions =
-                                value["session_count"].as_i64().unwrap_or(0).max(0) as usize;
-                            let group_count =
-                                value["groups"].as_array().map(Vec::len).unwrap_or(0);
+                                .unwrap_or_else(|| "none".to_string())
+                        }}
+                    </span>
+                </li>
+                <li class="row">
+                    <span class="name">"Shares"</span>
+                    <span class="muted">
+                        {move || {
+                            let value = detail.get();
                             let owned =
                                 value["owned_shares"].as_i64().unwrap_or(0).max(0) as usize;
                             let received =
                                 value["received_shares"].as_i64().unwrap_or(0).max(0) as usize;
                             format!(
-                                "{} · {}: {} · {} / {}",
-                                plural(sessions, "session", "sessions"),
-                                plural(group_count, "group", "groups"),
-                                groups,
-                                plural(owned, "owned share", "owned shares"),
-                                plural(received, "received share", "received shares"),
+                                "{} / {}",
+                                plural(owned, "owned", "owned"),
+                                plural(received, "received", "received"),
                             )
                         }}
                     </span>
@@ -1285,6 +1361,9 @@ fn InvitesPanel() -> impl IntoView {
                     let email = invite["email"].as_str().unwrap_or_default().to_string();
                     let expired = invite["expired"].as_bool().unwrap_or(false);
                     let expires_at = invite["expires_at"].as_i64().unwrap_or(0);
+                    let soon = !expired
+                        && expires_at.saturating_sub(js_sys::Date::now() as i64)
+                            < 60 * 60 * 1000;
                     let profile = [display, email]
                         .into_iter()
                         .filter(|value| !value.is_empty())
@@ -1299,8 +1378,16 @@ fn InvitesPanel() -> impl IntoView {
                                 <span class="file-body">
                                     <span class="file-name">
                                         {username}
-                                        {expired
-                                            .then(|| view! { <span class="badge">"expired"</span> })}
+                                        {if expired {
+                                            view! { <span class="badge danger">"expired"</span> }
+                                                .into_any()
+                                        } else if soon {
+                                            view! { <span class="badge warn">"expires soon"</span> }
+                                                .into_any()
+                                        } else {
+                                            view! { <span class="badge ok">"active"</span> }
+                                                .into_any()
+                                        }}
                                     </span>
                                     <span class="file-meta">
                                         {if profile.is_empty() {
@@ -1529,11 +1616,13 @@ fn GroupsPanel() -> impl IntoView {
                     let name = group["name"].as_str().unwrap_or_default().to_string();
                     let members = group["members"].as_array().cloned().unwrap_or_default();
                     let count = members.len();
-                    let names = members
+                    let member_chips = members
                         .iter()
                         .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                        .map(|member| {
+                            view! { <span class="chip">{member.to_string()}</span> }
+                        })
+                        .collect_view();
                     let manage = name.clone();
                     view! {
                         <li class="row">
@@ -1549,10 +1638,12 @@ fn GroupsPanel() -> impl IntoView {
                                         </span>
                                     </span>
                                     <span class="file-meta">
-                                        {if names.is_empty() {
-                                            "no members".to_string()
+                                        {if count == 0 {
+                                            view! { <span class="muted">"no members"</span> }
+                                                .into_any()
                                         } else {
-                                            names
+                                            view! { <span class="chips">{member_chips}</span> }
+                                                .into_any()
                                         }}
                                     </span>
                                 </span>
@@ -2027,57 +2118,80 @@ fn AuditPanel() -> impl IntoView {
 
         <p class="muted">{move || plural(entries.get().len(), "entry", "entries")}</p>
 
-        <ul class="shares">
-            <For
-                each=move || entries.get()
-                key=|entry| entry["id"].as_i64().unwrap_or(0)
-                children=move |entry| {
-                    let rows = detail_rows(&entry["details"]);
-                    let has_details = !rows.is_empty();
-                    let rows = rows
-                        .into_iter()
-                        .map(|(key, value)| {
+        <div class="table-wrap">
+            <table class="data-table audit-table">
+                <thead>
+                    <tr>
+                        <th scope="col">"Time"</th>
+                        <th scope="col">"Action"</th>
+                        <th scope="col">"Actor"</th>
+                        <th scope="col">"Subject"</th>
+                        <th scope="col">"Details"</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <For
+                        each=move || entries.get()
+                        key=|entry| entry["id"].as_i64().unwrap_or(0)
+                        children=move |entry| {
+                            let rows = detail_rows(&entry["details"]);
+                            let has_details = !rows.is_empty();
+                            let rows = rows
+                                .into_iter()
+                                .map(|(key, value)| {
+                                    view! {
+                                        <dt>{key}</dt>
+                                        <dd>{value}</dd>
+                                    }
+                                })
+                                .collect_view();
+                            let action = entry["action"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string();
+                            let subject = entry["subject"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string();
                             view! {
-                                <dt>{key}</dt>
-                                <dd>{value}</dd>
-                            }
-                        })
-                        .collect_view();
-                    view! {
-                        <li class="row">
-                            <span class="name">
-                                <span class="lead-icon">
-                                    <Icon name="history"/>
-                                </span>
-                                <span class="file-body">
-                                    <span class="file-name">
-                                        {entry["action"].as_str().unwrap_or_default().to_string()}
-                                        <span class="badge">{actor_label(&entry)}</span>
-                                    </span>
-                                    <span class="file-meta">
+                                <tr>
+                                    <td class="nowrap">
                                         {relative_time(entry["ts"].as_i64().unwrap_or(0))}
-                                        " · "
-                                        {entry["subject"].as_str().unwrap_or_default().to_string()}
-                                    </span>
-                                </span>
-                            </span>
-                            <details class="audit-details">
-                                <summary>"Details"</summary>
-                                {if has_details {
-                                    view! { <dl>{rows}</dl> }.into_any()
-                                } else {
-                                    view! { <p class="muted">"No details recorded."</p> }
-                                        .into_any()
-                                }}
-                            </details>
-                        </li>
-                    }
-                }
-            />
-            <Show when=move || !loading.get() && entries.get().is_empty()>
-                <li class="row muted">"No audit entries match these filters."</li>
-            </Show>
-        </ul>
+                                    </td>
+                                    <td>
+                                        <span class="badge">{action}</span>
+                                    </td>
+                                    <td>
+                                        <span class="badge muted">{actor_label(&entry)}</span>
+                                    </td>
+                                    <td class="mono-cell">{subject}</td>
+                                    <td>
+                                        <details class="audit-details">
+                                            <summary>"View"</summary>
+                                            {if has_details {
+                                                view! { <dl>{rows}</dl> }.into_any()
+                                            } else {
+                                                view! {
+                                                    <p class="muted">"No details recorded."</p>
+                                                }
+                                                    .into_any()
+                                            }}
+                                        </details>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    />
+                    <Show when=move || !loading.get() && entries.get().is_empty()>
+                        <tr>
+                            <td colspan="5" class="muted">
+                                "No audit entries match these filters."
+                            </td>
+                        </tr>
+                    </Show>
+                </tbody>
+            </table>
+        </div>
 
         <Show when=move || has_more.get()>
             <div class="row-actions">

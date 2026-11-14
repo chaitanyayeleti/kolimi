@@ -586,6 +586,61 @@ textarea:focus {
   border: none;
 }
 
+.settings-page {
+  width: 100%;
+  max-width: 72rem;
+  margin: 0 auto;
+}
+
+.settings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.1rem;
+}
+
+.settings-head h2 {
+  margin: 0 0 0.2rem;
+  font-size: 1.35rem;
+}
+
+.settings-head p {
+  margin: 0;
+}
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 13.5rem minmax(0, 1fr);
+  gap: 1.1rem;
+  align-items: start;
+}
+
+.settings-nav {
+  position: sticky;
+  top: calc(var(--topbar-h) + 1rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.settings-nav .nav-item {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.settings-body {
+  min-width: 0;
+  padding: 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
 .settings-tabs {
   display: flex;
   flex-wrap: nowrap;
@@ -603,7 +658,15 @@ textarea:focus {
   font-weight: var(--weight-medium);
 }
 
-/* The first heading inside a tab already has the tab strip above it. */
+.settings-body h3 {
+  margin: var(--space-5) 0 var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+/* The first heading inside a tab already has the page header above it. */
 .settings-section > h3:first-of-type {
   margin-top: 0;
   padding-top: 0;
@@ -930,6 +993,163 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.badge.ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 25%, transparent);
+}
+
+.badge.warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
+.badge.danger {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
+.badge.muted {
+  color: var(--muted);
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+/* ---- data tables ---------------------------------------------------- */
+
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.data-table {
+  width: 100%;
+  min-width: 52rem;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0.65rem 0.8rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.data-table td {
+  padding: 0.65rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tbody tr:hover {
+  background: var(--surface-2);
+}
+
+.data-table .cell-user {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 12rem;
+}
+
+.data-table .cell-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.data-table .cell-usage {
+  min-width: 9rem;
+}
+
+.data-table .nowrap {
+  white-space: nowrap;
+}
+
+.data-table .mono-cell {
+  max-width: 18rem;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.data-table .audit-details {
+  flex-basis: auto;
+}
+
+.status-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.chip {
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.usage-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-bar {
+  display: block;
+  height: 5px;
+  margin-top: 0.3rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.usage-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.usage-bar-fill.warn {
+  background: var(--warn);
+}
+
+.usage-bar-fill.danger {
+  background: var(--danger);
+}
+
 /* ---- login ----------------------------------------------------------- */
 
 .login-wrap {
@@ -1043,6 +1263,31 @@ textarea:focus {
   max-height: 86vh;
   overflow: auto;
   animation: pop-in 0.16s ease;
+}
+
+.drawer-backdrop {
+  justify-content: flex-end;
+  padding: 0;
+}
+
+.modal.drawer {
+  width: min(100%, 34rem);
+  max-width: 34rem;
+  height: 100dvh;
+  max-height: 100dvh;
+  border-radius: 0;
+  animation: drawer-in 0.18s ease;
+}
+
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 @keyframes pop-in {
@@ -1346,6 +1591,26 @@ textarea:focus {
   .content {
     padding-bottom: 5rem;
   }
+
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .settings-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .settings-nav .nav-item {
+    width: auto;
+    flex: 0 0 auto;
+  }
 }
 
 @media (min-width: 861px) {
@@ -1387,6 +1652,14 @@ textarea:focus {
 
   .row-actions select {
     width: 100%;
+  }
+
+  .settings-head {
+    flex-direction: column;
+  }
+
+  .settings-body {
+    padding: 1rem;
   }
 }
 

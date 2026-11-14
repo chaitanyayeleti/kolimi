@@ -8,7 +8,7 @@ use super::enrollment::EnrollmentPanel;
 use super::passkeys::PasskeysPanel;
 use crate::api;
 use crate::app::plural;
-use crate::components::{ErrorText, Icon, MlsDevicesPanel, Modal, Notice};
+use crate::components::{ErrorText, Icon, MlsDevicesPanel, Notice};
 
 /// Sections shown inside the Settings dialog.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -20,12 +20,12 @@ pub(crate) enum SettingsTab {
     Passkeys,
 }
 
-/// Unlock end-to-end encryption and manage the account's devices and shares.
+/// Account, encryption, sharing, and device settings.
 #[component]
-pub(crate) fn SettingsDialog(
+pub(crate) fn SettingsPage(
     master: RwSignal<Option<MasterKey>>,
     tab: RwSignal<SettingsTab>,
-    on_close: Callback<()>,
+    on_back: Callback<()>,
 ) -> impl IntoView {
     let passphrase = RwSignal::new(String::new());
     let error = RwSignal::new(String::new());
@@ -331,58 +331,91 @@ pub(crate) fn SettingsDialog(
     });
 
     view! {
-        <Modal title="Settings" on_close=on_close>
-            <div class="segmented settings-tabs" role="tablist">
-                <button
-                    role="tab"
-                    aria-selected=move || tab.get() == SettingsTab::Account
-                    class:active=move || tab.get() == SettingsTab::Account
-                    on:click=move |_| tab.set(SettingsTab::Account)
-                >
-                    "Account"
-                </button>
-                <button
-                    role="tab"
-                    aria-selected=move || tab.get() == SettingsTab::Encryption
-                    class:active=move || tab.get() == SettingsTab::Encryption
-                    on:click=move |_| tab.set(SettingsTab::Encryption)
-                >
-                    "Encryption"
-                </button>
-                <button
-                    role="tab"
-                    aria-selected=move || tab.get() == SettingsTab::Sharing
-                    class:active=move || tab.get() == SettingsTab::Sharing
-                    on:click=move |_| tab.set(SettingsTab::Sharing)
-                >
-                    "Sharing"
-                </button>
-                <button
-                    role="tab"
-                    aria-selected=move || tab.get() == SettingsTab::Devices
-                    class:active=move || tab.get() == SettingsTab::Devices
-                    on:click=move |_| tab.set(SettingsTab::Devices)
-                >
-                    "Devices"
-                </button>
-                <button
-                    role="tab"
-                    aria-selected=move || tab.get() == SettingsTab::Passkeys
-                    class:active=move || tab.get() == SettingsTab::Passkeys
-                    on:click=move |_| tab.set(SettingsTab::Passkeys)
-                >
-                    "Passkeys"
-                </button>
-            </div>
-
-            <Show when=move || tab.get() == SettingsTab::Account>
-                <div class="settings-section">
-                    <AccountPanel/>
+        <div class="settings-page">
+            <header class="settings-head">
+                <div>
+                    <h2>"Settings"</h2>
+                    <p class="muted">
+                        "Account security, encryption, sharing, and devices."
+                    </p>
                 </div>
-            </Show>
+                <button class="ghost" on:click=move |_| on_back.run(())>
+                    <Icon name="folder"/>
+                    "Back to files"
+                </button>
+            </header>
+
+            <div class="settings-layout">
+                <nav
+                    class="settings-nav"
+                    role="tablist"
+                    aria-orientation="vertical"
+                    aria-label="Settings sections"
+                >
+                    <button
+                        class="nav-item"
+                        role="tab"
+                        aria-selected=move || tab.get() == SettingsTab::Account
+                        class:active=move || tab.get() == SettingsTab::Account
+                        on:click=move |_| tab.set(SettingsTab::Account)
+                    >
+                        <Icon name="users"/>
+                        "Account"
+                    </button>
+                    <button
+                        class="nav-item"
+                        role="tab"
+                        aria-selected=move || tab.get() == SettingsTab::Encryption
+                        class:active=move || tab.get() == SettingsTab::Encryption
+                        on:click=move |_| tab.set(SettingsTab::Encryption)
+                    >
+                        <Icon name="lock"/>
+                        "Encryption"
+                    </button>
+                    <button
+                        class="nav-item"
+                        role="tab"
+                        aria-selected=move || tab.get() == SettingsTab::Sharing
+                        class:active=move || tab.get() == SettingsTab::Sharing
+                        on:click=move |_| tab.set(SettingsTab::Sharing)
+                    >
+                        <Icon name="share"/>
+                        "Sharing"
+                    </button>
+                    <button
+                        class="nav-item"
+                        role="tab"
+                        aria-selected=move || tab.get() == SettingsTab::Devices
+                        class:active=move || tab.get() == SettingsTab::Devices
+                        on:click=move |_| tab.set(SettingsTab::Devices)
+                    >
+                        <Icon name="device"/>
+                        "Devices"
+                    </button>
+                    <button
+                        class="nav-item"
+                        role="tab"
+                        aria-selected=move || tab.get() == SettingsTab::Passkeys
+                        class:active=move || tab.get() == SettingsTab::Passkeys
+                        on:click=move |_| tab.set(SettingsTab::Passkeys)
+                    >
+                        <Icon name="key"/>
+                        "Passkeys"
+                    </button>
+                </nav>
+
+                <div class="settings-body">
+                    <ErrorText message=error/>
+                    <Notice message=notice/>
+
+                    <Show when=move || tab.get() == SettingsTab::Account>
+                        <div class="settings-section" role="tabpanel">
+                            <AccountPanel/>
+                        </div>
+                    </Show>
 
             <Show when=move || tab.get() == SettingsTab::Encryption>
-                <div class="settings-section">
+                <div class="settings-section" role="tabpanel">
             <h3>"Encryption"</h3>
             <p class="muted">
                 "Your passphrase is used locally and is never sent to the server."
@@ -575,7 +608,7 @@ pub(crate) fn SettingsDialog(
             </Show>
 
             <Show when=move || tab.get() == SettingsTab::Sharing>
-                <div class="settings-section">
+                <div class="settings-section" role="tabpanel">
                     <h3>"MLS shares"</h3>
                     <Show when=move || master.get().is_some()>
                 <p class="muted">
@@ -610,7 +643,7 @@ pub(crate) fn SettingsDialog(
             </Show>
 
             <Show when=move || tab.get() == SettingsTab::Devices>
-                <div class="settings-section">
+                <div class="settings-section" role="tabpanel">
                     <Show when=move || master.get().is_some()>
                 <h3>"Pending enrollments"</h3>
                 <p class="muted">
@@ -731,13 +764,13 @@ pub(crate) fn SettingsDialog(
             </Show>
 
             <Show when=move || tab.get() == SettingsTab::Passkeys>
-                <div class="settings-section">
+                <div class="settings-section" role="tabpanel">
                     <PasskeysPanel/>
                 </div>
             </Show>
 
-            <Notice message=notice/>
-            <ErrorText message=error/>
-        </Modal>
+                </div>
+            </div>
+        </div>
     }
 }

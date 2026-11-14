@@ -48,7 +48,11 @@ pub(crate) fn Sidebar(
                         "Trash"
                     </button>
                     <div class="nav-sep"></div>
-                    <button class="nav-item" on:click=move |_| on_settings.run(())>
+                    <button
+                        class="nav-item"
+                        class:active=move || tab.get() == Tab::Settings
+                        on:click=move |_| on_settings.run(())
+                    >
                         <Icon name="settings"/>
                         "Settings"
                     </button>
@@ -184,6 +188,12 @@ pub(crate) fn Topbar(
                             if tab.get() == Tab::Trash {
                                 return vec![
                                     view! { <span class="crumb current">"Trash"</span> }
+                                        .into_any(),
+                                ];
+                            }
+                            if tab.get() == Tab::Settings {
+                                return vec![
+                                    view! { <span class="crumb current">"Settings"</span> }
                                         .into_any(),
                                 ];
                             }

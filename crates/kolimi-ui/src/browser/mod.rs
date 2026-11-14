@@ -22,7 +22,7 @@ use self::uploads::UploadContext;
 use crate::api;
 use crate::app::{View as AppView, encode, encode_path, mark_session_expired, toggle_theme};
 use crate::components::Icon;
-use crate::dialogs::{AdminPage, SettingsTab};
+use crate::dialogs::{AdminPage, SettingsPage, SettingsTab};
 
 mod actions;
 mod dialogs;
@@ -50,17 +50,18 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let query = RwSignal::new(String::new());
     let results = RwSignal::new(Vec::<SearchHit>::new());
     let search_active = RwSignal::new(false);
-    let settings_tab = RwSignal::new(SettingsTab::Encryption);
+    let settings_tab = RwSignal::new(SettingsTab::Account);
     let is_admin = RwSignal::new(false);
     let username = RwSignal::new(String::new());
     let nav_open = RwSignal::new(false);
     let grid = RwSignal::new(false);
     let dragging = RwSignal::new(false);
     let e2ee_master = RwSignal::new(Option::<MasterKey>::None);
-    let e2ee_open = RwSignal::new(false);
-    let open_settings = Callback::new(move |tab: SettingsTab| {
-        settings_tab.set(tab);
-        e2ee_open.set(true);
+    let open_settings = Callback::new(move |settings: SettingsTab| {
+        settings_tab.set(settings);
+        search_active.set(false);
+        tab.set(Tab::Settings);
+        nav_open.set(false);
     });
     let open_encryption = Callback::new(move |_: ()| {
         open_settings.run(SettingsTab::Encryption);
@@ -543,7 +544,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         nav_open.set(false);
     });
     let nav_settings = Callback::new(move |_: ()| {
-        open_settings.run(SettingsTab::Encryption);
+        open_settings.run(SettingsTab::Account);
     });
     let nav_admin = Callback::new(move |_: ()| {
         search_active.set(false);
@@ -679,6 +680,16 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                     }
                         .into_any()
                 }
+                Tab::Settings => {
+                    view! {
+                        <SettingsPage
+                            master=e2ee_master
+                            tab=settings_tab
+                            on_back=Callback::new(move |_| tab.set(Tab::Files))
+                        />
+                    }
+                        .into_any()
+                }
                 Tab::Admin => {
                     view! { <AdminPage current_username=username/> }.into_any()
                 }
@@ -718,9 +729,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 vault_setup=vault_setup
                 share_target=share_target
                 versions_for=versions_for
-                e2ee_open=e2ee_open
                 master_signal=e2ee_master
-                settings_tab=settings_tab
                 current_path=path
                 notice=notice
                 on_load=file_load

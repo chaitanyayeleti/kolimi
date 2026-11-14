@@ -10,7 +10,7 @@ mod vault;
 mod versions;
 
 pub(crate) use admin::AdminPage;
-pub(crate) use settings::{SettingsDialog, SettingsTab};
+pub(crate) use settings::{SettingsPage, SettingsTab};
 pub(crate) use share::ShareDialog;
 pub(crate) use vault::VaultSetupDialog;
 pub(crate) use versions::VersionsDialog;
