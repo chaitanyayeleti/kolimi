@@ -367,6 +367,9 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
     {
         eprintln!("kolimi-sync: MLS owned-share refresh failed: {error}");
     }
+    // Publish CLI/desktop encrypted roots before the pull, so the web UI
+    // sees the same state and this pass consumes the folder-change event.
+    publish_encrypted_roots(&http, config, &root).await?;
     // The server's folder flags are the source of truth; local
     // `encrypted_roots` is only a fallback for older servers.
     let mut policy = EncryptPolicy {
@@ -419,6 +422,86 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
     }
     state.save(&config.local_dir)?;
     Ok(report)
+}
+
+/// Marks every locally configured encrypted root encrypted on the server.
+///
+/// `--e2ee-root` (and the desktop equivalent) used to be client-local, so a
+/// browser session saw the folder as plaintext and uploaded without
+/// encryption. The endpoint is owner-only and idempotent; a received share
+/// is skipped (its owner sets the flag), and a folder that does not exist
+/// yet is retried on the next pass.
+async fn publish_encrypted_roots(
+    http: &Http,
+    config: &SyncConfig,
+    root: &str,
+) -> Result<(), SyncError> {
+    let Some(e2ee) = config.e2ee.as_ref() else {
+        return Ok(());
+    };
+    for relative in &e2ee.encrypted_roots {
+        let relative = relative.trim_matches('/');
+        if relative.is_empty() {
+            continue;
+        }
+        // Only an owned local tree. A recipient's configured root normally
+        // lives under "Shared with me"; creating a same-named folder in
+        // their own namespace would be surprising and useless.
+        if !config.local_dir.join(relative).is_dir() {
+            continue;
+        }
+        let path = if root.is_empty() {
+            format!("/{relative}")
+        } else {
+            format!("{root}/{relative}")
+        };
+        // Already flagged (directly or through an ancestor)? Re-sending the
+        // flag would only bump the folder mtime and create a change event.
+        let info_path = format!("/api/files/info?path={}", encode(&path));
+        let (status, info) = http.get_json(&info_path).await?;
+        match status {
+            200 if info["encrypted"].as_bool() == Some(true) => continue,
+            200 | 404 => {}
+            403 => continue,
+            _ => {
+                return Err(SyncError::Server {
+                    status,
+                    path: info_path,
+                });
+            }
+        }
+        // Ensure the folder and its parents exist before marking it, so the
+        // flag change lands in this pass rather than after the file push.
+        let mut current = String::new();
+        for segment in path.trim_matches('/').split('/') {
+            current.push('/');
+            current.push_str(segment);
+            mkcol(http, &current).await?;
+        }
+        let (status, body) = http
+            .post_json(
+                "/api/files/encrypt",
+                &serde_json::json!({ "path": path, "encrypted": true }),
+            )
+            .await?;
+        match status {
+            200 => {}
+            // A received share: the owner controls the encryption flag.
+            403 => {}
+            400 => {
+                return Err(SyncError::E2ee(format!(
+                    "encrypted root {path} still contains plaintext files; move or delete them before syncing ({body})"
+                )));
+            }
+            _ => {
+                return Err(SyncError::Server {
+                    status,
+                    path: "/api/files/encrypt".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Normalize a remote root: `"/"` or empty -> `""` (account root); otherwise

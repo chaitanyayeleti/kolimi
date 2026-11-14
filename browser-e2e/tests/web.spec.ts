@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 
 const PASS = "browser-e2e-pass-123";
@@ -42,6 +43,22 @@ async function login(page: Page, username = "alice") {
   await expect(
     page.getByRole("button", { name: "Files", exact: true }),
   ).toBeVisible();
+}
+
+async function unlock(page: Page) {
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const modal = page.locator(".modal");
+  await modal.getByRole("tab", { name: "Encryption", exact: true }).click();
+  await modal.getByLabel("Passphrase", { exact: true }).fill(E2EE_PASS);
+  await modal.getByRole("button", { name: "Unlock", exact: true }).click();
+  await expect(
+    modal.getByText("Keyring unlocked for this browser."),
+  ).toBeVisible();
+  await modal.getByRole("button", { name: "Close", exact: true }).click();
+}
+
+async function openFolder(page: Page, name: string) {
+  await (await row(page, name)).locator(".file-open").click();
 }
 
 async function upload(page: Page, name: string, body = "browser e2e") {
@@ -167,6 +184,134 @@ test("upload progress and context menu avoid inline-style CSP violations", async
   await expect(menu).toBeVisible();
   await expect(menu).not.toHaveCSS("left", "auto");
   expect(csp).toEqual([]);
+});
+
+test("web E2EE upload stays ciphertext and decrypts in the browser", async ({
+  page,
+  request,
+}) => {
+  await login(page);
+  await unlock(page);
+  await openFolder(page, "Private");
+  await openFolder(page, "Team");
+  await expect(page.getByText("note.txt", { exact: true }).first()).toBeVisible();
+
+  const beforeResponse = await request.get(`${BASE}/api/sync/tree?limit=1000`, {
+    headers: AUTH,
+  });
+  const beforeEntries = (await beforeResponse.json()).entries as Array<{
+    path: string;
+    kind: string;
+  }>;
+  const beforePaths = new Set(beforeEntries.map((entry) => entry.path));
+  const teamPath = beforeEntries.find(
+    (entry) => entry.kind === "dir" && entry.path.startsWith("/Private/"),
+  )?.path;
+  expect(teamPath, "the encrypted Team folder must exist").toBeTruthy();
+
+  const name = `browser-e2ee-${Date.now()}.txt`;
+  const marker = `E2EE-BROWSER-MARKER-${Date.now()}`;
+  await upload(page, name, marker);
+
+  // The folder name is encrypted (`k1_…`), so resolve the new node from the
+  // server tree instead of guessing the path from the display name. The row
+  // is optimistic, so wait for the commit to land.
+  type TreeEntry = { path: string; kind: string; encrypted: boolean };
+  let entries: TreeEntry[] = [];
+  let uploaded: TreeEntry | undefined;
+  for (let attempt = 0; attempt < 40 && !uploaded; attempt++) {
+    const afterResponse = await request.get(
+      `${BASE}/api/sync/tree?limit=1000`,
+      { headers: AUTH },
+    );
+    entries = (await afterResponse.json()).entries as TreeEntry[];
+    uploaded = entries.find(
+      (entry) =>
+        entry.kind === "file" &&
+        entry.path.startsWith("/Private/") &&
+        !beforePaths.has(entry.path),
+    );
+    if (!uploaded) {
+      await page.waitForTimeout(250);
+    }
+  }
+  expect(
+    uploaded,
+    `new encrypted file must appear in the server tree: ${JSON.stringify(entries)}`,
+  ).toBeTruthy();
+  expect(uploaded!.encrypted).toBe(true);
+  const path = uploaded!.path;
+  const encoded = encodeURIComponent(path);
+  const info = await request.get(`${BASE}/api/files/info?path=${encoded}`, {
+    headers: AUTH,
+  });
+  expect(info.status()).toBe(200);
+  expect((await info.json()).encrypted).toBe(true);
+
+  // The plaintext DAV surface must refuse the encrypted node.
+  const davPath = path
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const dav = await request.get(`${BASE}/dav${davPath}`, { headers: AUTH });
+  expect(dav.status()).toBe(403);
+
+  // Every stored chunk is ciphertext: the marker must not appear.
+  const manifestResponse = await request.get(
+    `${BASE}/api/files/manifest?path=${encoded}`,
+    { headers: AUTH },
+  );
+  expect(manifestResponse.status()).toBe(200);
+  const manifest = (await manifestResponse.json()) as {
+    chunks: Array<{ hash: string }>;
+  };
+  let stored = Buffer.alloc(0);
+  for (const chunk of manifest.chunks) {
+    const response = await request.get(
+      `${BASE}/api/chunks/${chunk.hash}?path=${encoded}`,
+      { headers: AUTH },
+    );
+    expect(response.status()).toBe(200);
+    stored = Buffer.concat([stored, Buffer.from(await response.body())]);
+  }
+  expect(stored.includes(Buffer.from(marker))).toBe(false);
+
+  // And the browser decrypts it again end-to-end.
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    (await row(page, name)).getByTitle("Download & decrypt").click(),
+  ]);
+  const downloaded = await download.path();
+  expect(downloaded).not.toBeNull();
+  expect(await readFile(downloaded!, "utf8")).toBe(marker);
+
+  // Keep the shared fixture deterministic for the recipient test below.
+  const deleted = await request.delete(`${BASE}/dav${davPath}`, {
+    headers: AUTH,
+  });
+  expect(deleted.status()).toBe(204);
+});
+
+test("web E2EE recipient decrypts a shared file", async ({ page }) => {
+  await login(page, "bob");
+  await unlock(page);
+
+  // The legacy fixture has no wrapped display name for Bob, so the mount is
+  // labelled generically; open it by its provenance instead of its name.
+  const shared = page
+    .locator("li.file", { hasText: "shared by alice" })
+    .first();
+  await shared.locator(".file-open").click();
+
+  const downloadButton = page.getByTitle("Download & decrypt").first();
+  await expect(downloadButton).toBeVisible();
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    downloadButton.click(),
+  ]);
+  const downloaded = await download.path();
+  expect(downloaded).not.toBeNull();
+  expect(await readFile(downloaded!, "utf8")).toBe("legacy encrypted folder\n");
 });
 
 test("web migration upgrades a legacy folder share and reset clears state", async ({

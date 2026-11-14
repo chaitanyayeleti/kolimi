@@ -138,6 +138,14 @@ async fn encrypted_folder_share_uses_mls_keyring() {
     std::fs::write(alice_dir.join("Private/Team/Sub/b.txt"), b"beta").unwrap();
     sync_once(&alice).await.unwrap();
 
+    // The CLI root must be published so the web UI encrypts uploads too.
+    let (status, info) = get_json(&server.url, "alice", "/api/files/info?path=%2FPrivate").await;
+    assert_eq!(status, 200, "{info}");
+    assert_eq!(
+        info["encrypted"], true,
+        "a CLI --e2ee-root must be marked encrypted server-side"
+    );
+
     let wrapped = share_path_with_permission(
         &alice,
         "/",

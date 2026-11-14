@@ -647,23 +647,26 @@ impl Vfs {
                 (access.owner_id, access.node.id, name, owner_path)
             }
         };
-        // Encrypted folders must receive a wrapped key with the content.
-        // A file without one would be unreadable ciphertext, and accepting
-        // it would also let a plaintext client write into an encrypted tree.
-        if self.path_is_encrypted(owner_id, &owner_path).await? && wrapped_key.is_none() {
+        // Whether the file already had a wrapped key decides both whether
+        // an edit may reuse it and whether old version history is ciphertext
+        // (safe to keep) or plaintext (must be purged below).
+        let was_encrypted = match &existing_access {
+            Some(access) => self.db.file_key(access.node.id).await?.is_some(),
+            None => false,
+        };
+        // Encrypted folders must receive a wrapped key for new or plaintext
+        // content. An existing encrypted file already has its key on the
+        // server, so ordinary edits may omit the re-wrap.
+        if self.path_is_encrypted(owner_id, &owner_path).await?
+            && wrapped_key.is_none()
+            && !was_encrypted
+        {
             return Err(VfsError::Conflict(
                 "this folder is encrypted: upload the wrapped file key with the manifest"
                     .to_string(),
             ));
         }
         let current = existing_access.map(|access| access.node);
-        // Whether the file already had a wrapped key decides whether its old
-        // version history is ciphertext (safe to keep) or plaintext (must be
-        // purged below).
-        let was_encrypted = match &current {
-            Some(node) => self.db.file_key(node.id).await?.is_some(),
-            None => false,
-        };
         let current_id = current
             .as_ref()
             .and_then(|node| node.content_id)
