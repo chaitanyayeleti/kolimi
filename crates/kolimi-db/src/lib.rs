@@ -21,7 +21,7 @@ mod mls;
 mod search_state;
 mod sharing;
 
-pub use audit::{AuditEntry, AuditVerify};
+pub use audit::{AuditEntry, AuditPageQuery, AuditVerify};
 pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
 pub use devices::{Device, Enrollment, MAX_DEVICE_KEY_BYTES};
 pub use e2ee::{MAX_KEYRING_BYTES, MAX_WRAPPED_KEY_BYTES};

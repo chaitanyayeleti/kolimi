@@ -43,6 +43,13 @@ new password once (or accepts one) and by default drops sessions, clears TOTP
 and removes passkeys. Recovery and force sign-out require the admin's own
 password or a two-factor code.
 
+The **Groups** tab lists every group and its members and can create, delete,
+add, and remove. Group changes update share ACLs but do not rotate MLS keys;
+after adding or removing a member, re-share the affected encrypted folders
+from a client so the keyring advances. The **Audit** tab shows newest-first
+entries with structured details, filters by exact action or subject,
+keyset paging, and a **Verify chain** button.
+
 Passkeys are registered in the web UI (**Settings → Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is rejected
 (and audited). Adding or removing a passkey asks for the account password
@@ -183,6 +190,10 @@ edits, deletions and reordering are detectable.
 kolimi-server audit list --limit 50    # JSON lines, newest first
 kolimi-server audit verify             # exits 1 and names the first bad entry
 ```
+
+Administrators can read the same log over HTTP: `GET /api/audit` accepts
+`limit`, `before`, `action`, and `subject`, and `GET /api/audit/verify`
+recomputes the chain. Both are admin-only and never expose chain hashes.
 
 Events cover logins and failures, logouts, passkeys, TOTP, file
 mutations (via the change feed), shares, link unlocks/downloads, E2EE and

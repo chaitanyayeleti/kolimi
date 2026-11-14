@@ -1073,6 +1073,34 @@ textarea:focus {
   flex: 1 1 10rem;
 }
 
+.audit-details {
+  flex-basis: 100%;
+  margin: 0.15rem 0 0.35rem;
+}
+
+.audit-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.audit-details dl {
+  display: grid;
+  grid-template-columns: minmax(5rem, max-content) 1fr;
+  gap: 0.2rem 0.8rem;
+  margin: 0.5rem 0 0;
+  font-size: var(--text-sm);
+}
+
+.audit-details dt {
+  color: var(--muted);
+}
+
+.audit-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .created {
   margin-top: 0.75rem;
   padding: 0.75rem 0.9rem;

@@ -77,9 +77,60 @@ fn random_password() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Admin page: users, quotas, account recovery, and lifecycle actions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminTab {
+    Users,
+    Groups,
+    Audit,
+}
+
+/// Admin page: users, groups, and the audit log.
 #[component]
 pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
+    let tab = RwSignal::new(AdminTab::Users);
+    view! {
+        <div class="section-head">
+            <h2>"Admin"</h2>
+        </div>
+        <div class="segmented settings-tabs" role="tablist">
+            <button
+                role="tab"
+                class:active=move || tab.get() == AdminTab::Users
+                on:click=move |_| tab.set(AdminTab::Users)
+            >
+                "Users"
+            </button>
+            <button
+                role="tab"
+                class:active=move || tab.get() == AdminTab::Groups
+                on:click=move |_| tab.set(AdminTab::Groups)
+            >
+                "Groups"
+            </button>
+            <button
+                role="tab"
+                class:active=move || tab.get() == AdminTab::Audit
+                on:click=move |_| tab.set(AdminTab::Audit)
+            >
+                "Audit"
+            </button>
+        </div>
+
+        <Show when=move || tab.get() == AdminTab::Users>
+            <UsersPanel current_username=current_username/>
+        </Show>
+        <Show when=move || tab.get() == AdminTab::Groups>
+            <GroupsPanel/>
+        </Show>
+        <Show when=move || tab.get() == AdminTab::Audit>
+            <AuditPanel/>
+        </Show>
+    }
+}
+
+/// Users tab: search, create, inspect, recover, and lifecycle actions.
+#[component]
+fn UsersPanel(current_username: RwSignal<String>) -> impl IntoView {
     let users = RwSignal::new(Vec::<Value>::new());
     let query = RwSignal::new(String::new());
     let filter = RwSignal::new("all".to_string());
@@ -155,7 +206,7 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
 
     view! {
         <div class="section-head">
-            <h2>"Admin — users"</h2>
+            <h2>"Users"</h2>
             <button class="primary" on:click=move |_| create_open.set(true)>
                 <Icon name="users"/>
                 "Create user"
@@ -907,10 +958,680 @@ fn UserDetailDialog(
     }
 }
 
+fn actor_label(entry: &Value) -> String {
+    entry["actor"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| entry["actor_id"].as_i64().map(|id| format!("user #{id}")))
+        .unwrap_or_else(|| "system".to_string())
+}
+
+fn detail_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => "—".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn detail_rows(details: &Value) -> Vec<(String, String)> {
+    match details.as_object() {
+        Some(map) if !map.is_empty() => map
+            .iter()
+            .map(|(key, value)| (key.clone(), detail_text(value)))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Groups tab: rosters, membership, and group lifecycle.
+#[component]
+fn GroupsPanel() -> impl IntoView {
+    let groups = RwSignal::new(Vec::<Value>::new());
+    let loading = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    let notice = RwSignal::new(String::new());
+    let create_open = RwSignal::new(false);
+    let selected = RwSignal::new(Option::<String>::None);
+
+    let load = Callback::new(move |_: ()| {
+        loading.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            match api::get("/api/groups").await {
+                Ok(response) if response.status == 200 => {
+                    groups.set(
+                        response.body["groups"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not load groups")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            loading.set(false);
+        });
+    });
+    Effect::new(move |_| load.run(()));
+
+    let close_create = Callback::new(move |_: ()| create_open.set(false));
+    let created = Callback::new(move |_: ()| {
+        notice.set("Group created.".to_string());
+        load.run(());
+    });
+    let close_detail = Callback::new(move |_: ()| selected.set(None));
+    let changed = Callback::new(move |_: ()| load.run(()));
+
+    view! {
+        <div class="section-head">
+            <h2>"Groups"</h2>
+            <button class="primary" on:click=move |_| create_open.set(true)>
+                <Icon name="users"/>
+                "Create group"
+            </button>
+        </div>
+        <p class="muted">
+            "Groups target shares to several accounts. Membership changes do not rotate MLS keys, so re-share affected encrypted folders after editing members."
+        </p>
+        <ErrorText message=error/>
+        <Notice message=notice/>
+        <p class="muted">
+            {move || format!("{} group(s)", groups.get().len())}
+        </p>
+
+        <ul class="shares">
+            <For
+                each=move || groups.get()
+                key=|group| group["id"].as_i64().unwrap_or(0)
+                children=move |group| {
+                    let name = group["name"].as_str().unwrap_or_default().to_string();
+                    let members = group["members"].as_array().cloned().unwrap_or_default();
+                    let count = members.len();
+                    let names = members
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let manage = name.clone();
+                    view! {
+                        <li class="row">
+                            <span class="name">
+                                <span class="lead-icon">
+                                    <Icon name="users"/>
+                                </span>
+                                <span class="file-body">
+                                    <span class="file-name">
+                                        {name}
+                                        <span class="badge">
+                                            {format!("{count} member(s)")}
+                                        </span>
+                                    </span>
+                                    <span class="file-meta">
+                                        {if names.is_empty() {
+                                            "no members".to_string()
+                                        } else {
+                                            names
+                                        }}
+                                    </span>
+                                </span>
+                            </span>
+                            <span class="row-actions">
+                                <button on:click=move |_| selected.set(Some(manage.clone()))>
+                                    "Manage"
+                                </button>
+                            </span>
+                        </li>
+                    }
+                }
+            />
+            <Show when=move || !loading.get() && groups.get().is_empty()>
+                <li class="row muted">"No groups yet."</li>
+            </Show>
+        </ul>
+
+        {move || {
+            create_open
+                .get()
+                .then(|| {
+                    view! {
+                        <CreateGroupDialog on_close=close_create on_created=created/>
+                    }
+                })
+        }}
+        {move || {
+            selected
+                .get()
+                .map(|name| {
+                    view! {
+                        <GroupDetailDialog
+                            name=name
+                            on_close=close_detail
+                            on_changed=changed
+                        />
+                    }
+                })
+        }}
+    }
+}
+
+/// Create-group modal.
+#[component]
+fn CreateGroupDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl IntoView {
+    let name = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+
+    let submit = move |_| {
+        let value = name.get_untracked().trim().to_string();
+        if value.is_empty() {
+            error.set("Group name is required".to_string());
+            return;
+        }
+        busy.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            match api::send_json("POST", "/api/groups", &json!({ "name": value })).await {
+                Ok(response) if response.status == 201 => {
+                    on_created.run(());
+                    on_close.run(());
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not create the group")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            busy.set(false);
+        });
+    };
+
+    view! {
+        <Modal title="Create group" on_close=on_close>
+            <label>
+                "Name"
+                <input
+                    type="text"
+                    autocomplete="off"
+                    prop:value=move || name.get()
+                    on:input=move |ev| name.set(event_target_value(&ev))
+                />
+            </label>
+            <ErrorText message=error/>
+            <div class="row-actions">
+                <button class="primary" on:click=submit disabled=move || busy.get()>
+                    {move || if busy.get() { "Creating…" } else { "Create group" }}
+                </button>
+                <button class="ghost" on:click=move |_| on_close.run(())>
+                    "Cancel"
+                </button>
+            </div>
+        </Modal>
+    }
+}
+
+/// Group detail: add/remove members and delete the group.
+#[component]
+fn GroupDetailDialog(
+    name: String,
+    on_close: Callback<()>,
+    on_changed: Callback<()>,
+) -> impl IntoView {
+    let members = RwSignal::new(Vec::<String>::new());
+    let new_member = RwSignal::new(String::new());
+    let delete_name = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    let notice = RwSignal::new(String::new());
+
+    let load_name = name.clone();
+    let load = Callback::new(move |_: ()| {
+        let group = load_name.clone();
+        spawn_local(async move {
+            match api::get(&format!("/api/groups/{}/members", encode(&group))).await {
+                Ok(response) if response.status == 200 => {
+                    members.set(
+                        response.body["members"]
+                            .as_array()
+                            .map(|list| {
+                                list.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    );
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not load the group")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+        });
+    });
+    Effect::new(move |_| load.run(()));
+
+    let add_name = name.clone();
+    let add_member = Callback::new(move |_: ()| {
+        let member = new_member.get_untracked().trim().to_string();
+        if member.is_empty() {
+            error.set("Enter a username to add".to_string());
+            return;
+        }
+        let group = add_name.clone();
+        busy.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            let url = format!("/api/groups/{}/members/{}", encode(&group), encode(&member));
+            match api::send_json("POST", &url, &json!({})).await {
+                Ok(response) if response.status == 204 => {
+                    new_member.set(String::new());
+                    notice.set(format!("Added {member}."));
+                    load.run(());
+                    on_changed.run(());
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not add the member")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            busy.set(false);
+        });
+    });
+
+    let remove_name = name.clone();
+    let remove_member = Callback::new(move |member: String| {
+        let group = remove_name.clone();
+        busy.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            let url = format!("/api/groups/{}/members/{}", encode(&group), encode(&member));
+            match api::delete(&url).await {
+                Ok(response) if response.status == 204 => {
+                    notice.set(format!("Removed {member}."));
+                    load.run(());
+                    on_changed.run(());
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not remove the member")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            busy.set(false);
+        });
+    });
+
+    let delete_group = Callback::new({
+        let group = name.clone();
+        move |_: ()| {
+            if delete_name.get_untracked() != group {
+                error.set("Type the group name exactly to confirm deletion".to_string());
+                return;
+            }
+            let group = group.clone();
+            busy.set(true);
+            error.set(String::new());
+            spawn_local(async move {
+                match api::delete(&format!("/api/groups/{}", encode(&group))).await {
+                    Ok(response) if response.status == 204 => {
+                        on_changed.run(());
+                        on_close.run(());
+                    }
+                    Ok(response) => error.set(
+                        response
+                            .error()
+                            .unwrap_or("Could not delete the group")
+                            .to_string(),
+                    ),
+                    Err(message) => error.set(message),
+                }
+                busy.set(false);
+            });
+        }
+    });
+    let delete_expected = name.clone();
+
+    view! {
+        <Modal title=format!("Group — {name}") on_close=on_close>
+            <ErrorText message=error/>
+            <Notice message=notice/>
+            <p class="muted">
+                "Changing membership does not rotate MLS keys. Re-share affected encrypted folders so added members receive the current key and removed members stop receiving future epochs."
+            </p>
+
+            <h3>"Members"</h3>
+            <ul class="shares">
+                <For
+                    each=move || members.get()
+                    key=|member| member.clone()
+                    children=move |member| {
+                        let remove = member.clone();
+                        view! {
+                            <li class="row">
+                                <span class="name">{member}</span>
+                                <span class="row-actions">
+                                    <button
+                                        on:click=move |_| remove_member.run(remove.clone())
+                                        disabled=move || busy.get()
+                                    >
+                                        "Remove"
+                                    </button>
+                                </span>
+                            </li>
+                        }
+                    }
+                />
+                <Show when=move || members.get().is_empty()>
+                    <li class="row muted">"No members."</li>
+                </Show>
+            </ul>
+
+            <div class="share-form">
+                <label>
+                    "Add member"
+                    <input
+                        type="text"
+                        autocomplete="off"
+                        placeholder="username"
+                        prop:value=move || new_member.get()
+                        on:input=move |ev| new_member.set(event_target_value(&ev))
+                    />
+                </label>
+                <button
+                    on:click=move |_| add_member.run(())
+                    disabled=move || busy.get()
+                >
+                    "Add"
+                </button>
+            </div>
+
+            <h3>"Delete group"</h3>
+            <p class="muted">
+                "This removes the group, its memberships, and every group share. Type the group name to confirm."
+            </p>
+            <div class="share-form">
+                <label>
+                    "Group name"
+                    <input
+                        type="text"
+                        autocomplete="off"
+                        placeholder=name.clone()
+                        prop:value=move || delete_name.get()
+                        on:input=move |ev| delete_name.set(event_target_value(&ev))
+                    />
+                </label>
+                <button
+                    class="danger"
+                    on:click=move |_| delete_group.run(())
+                    disabled={
+                        let expected = delete_expected.clone();
+                        move || busy.get() || delete_name.get() != expected
+                    }
+                >
+                    "Delete group"
+                </button>
+            </div>
+        </Modal>
+    }
+}
+
+/// Audit tab: newest-first entries, filters, and chain verification.
+#[component]
+fn AuditPanel() -> impl IntoView {
+    let entries = RwSignal::new(Vec::<Value>::new());
+    let action = RwSignal::new(String::new());
+    let subject = RwSignal::new(String::new());
+    let before = RwSignal::new(Option::<i64>::None);
+    let has_more = RwSignal::new(false);
+    let loading = RwSignal::new(false);
+    let verifying = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    let notice = RwSignal::new(String::new());
+
+    let load = Callback::new(move |reset: bool| {
+        let action_value = action.get_untracked();
+        let subject_value = subject.get_untracked();
+        let after = if reset { None } else { before.get_untracked() };
+        loading.set(true);
+        error.set(String::new());
+        spawn_local(async move {
+            let mut url = "/api/audit?limit=100".to_string();
+            if let Some(after) = after {
+                url.push_str(&format!("&before={after}"));
+            }
+            let action_value = action_value.trim();
+            if !action_value.is_empty() {
+                url.push_str(&format!("&action={}", encode(action_value)));
+            }
+            let subject_value = subject_value.trim();
+            if !subject_value.is_empty() {
+                url.push_str(&format!("&subject={}", encode(subject_value)));
+            }
+            match api::get(&url).await {
+                Ok(response) if response.status == 200 => {
+                    let fresh = response.body["entries"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    if reset {
+                        entries.set(fresh);
+                    } else {
+                        entries.update(|current| current.extend(fresh));
+                    }
+                    before.set(response.body["next_before"].as_i64());
+                    has_more.set(response.body["has_more"].as_bool().unwrap_or(false));
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not load the audit log")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            loading.set(false);
+        });
+    });
+    Effect::new(move |_| load.run(true));
+
+    let verify = Callback::new(move |_: ()| {
+        verifying.set(true);
+        error.set(String::new());
+        notice.set(String::new());
+        spawn_local(async move {
+            match api::get("/api/audit/verify").await {
+                Ok(response) if response.status == 200 => {
+                    let entries = response.body["entries"].as_u64().unwrap_or(0);
+                    if response.body["ok"].as_bool() == Some(true) {
+                        notice.set(format!("Audit chain verified ({entries} entries)."));
+                    } else {
+                        error.set(format!(
+                            "Audit chain is broken at entry {} ({} entries checked).",
+                            response.body["first_bad"]
+                                .as_i64()
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            entries
+                        ));
+                    }
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not verify the audit chain")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            verifying.set(false);
+        });
+    });
+
+    view! {
+        <div class="section-head">
+            <h2>"Audit"</h2>
+            <button on:click=move |_| verify.run(()) disabled=move || verifying.get()>
+                <Icon name="history"/>
+                {move || if verifying.get() { "Verifying…" } else { "Verify chain" }}
+            </button>
+        </div>
+        <p class="muted">
+            "Newest-first hash-chained events. Filters match the action name or subject exactly."
+        </p>
+        <ErrorText message=error/>
+        <Notice message=notice/>
+
+        <div class="row-actions">
+            <form
+                class="row-actions"
+                on:submit=move |ev| {
+                    ev.prevent_default();
+                    load.run(true);
+                }
+            >
+                <label>
+                    "Action"
+                    <input
+                        type="text"
+                        autocomplete="off"
+                        placeholder="e.g. group.add"
+                        prop:value=move || action.get()
+                        on:input=move |ev| action.set(event_target_value(&ev))
+                    />
+                </label>
+                <label>
+                    "Subject"
+                    <input
+                        type="text"
+                        autocomplete="off"
+                        placeholder="username or group"
+                        prop:value=move || subject.get()
+                        on:input=move |ev| subject.set(event_target_value(&ev))
+                    />
+                </label>
+                <button class="primary" type="submit" disabled=move || loading.get()>
+                    "Apply"
+                </button>
+                <button
+                    type="button"
+                    on:click=move |_| {
+                        action.set(String::new());
+                        subject.set(String::new());
+                        load.run(true);
+                    }
+                >
+                    "Clear"
+                </button>
+                <button
+                    type="button"
+                    on:click=move |_| load.run(true)
+                    disabled=move || loading.get()
+                >
+                    <Icon name="refresh"/>
+                    "Refresh"
+                </button>
+            </form>
+        </div>
+
+        <p class="muted">{move || format!("{} entrie(s) loaded", entries.get().len())}</p>
+
+        <ul class="shares">
+            <For
+                each=move || entries.get()
+                key=|entry| entry["id"].as_i64().unwrap_or(0)
+                children=move |entry| {
+                    let rows = detail_rows(&entry["details"]);
+                    let has_details = !rows.is_empty();
+                    let rows = rows
+                        .into_iter()
+                        .map(|(key, value)| {
+                            view! {
+                                <dt>{key}</dt>
+                                <dd>{value}</dd>
+                            }
+                        })
+                        .collect_view();
+                    view! {
+                        <li class="row">
+                            <span class="name">
+                                <span class="lead-icon">
+                                    <Icon name="history"/>
+                                </span>
+                                <span class="file-body">
+                                    <span class="file-name">
+                                        {entry["action"].as_str().unwrap_or_default().to_string()}
+                                        <span class="badge">{actor_label(&entry)}</span>
+                                    </span>
+                                    <span class="file-meta">
+                                        {relative_time(entry["ts"].as_i64().unwrap_or(0))}
+                                        " · "
+                                        {entry["subject"].as_str().unwrap_or_default().to_string()}
+                                    </span>
+                                </span>
+                            </span>
+                            <details class="audit-details">
+                                <summary>"Details"</summary>
+                                {if has_details {
+                                    view! { <dl>{rows}</dl> }.into_any()
+                                } else {
+                                    view! { <p class="muted">"No details recorded."</p> }
+                                        .into_any()
+                                }}
+                            </details>
+                        </li>
+                    }
+                }
+            />
+            <Show when=move || !loading.get() && entries.get().is_empty()>
+                <li class="row muted">"No audit entries match these filters."</li>
+            </Show>
+        </ul>
+
+        <Show when=move || has_more.get()>
+            <div class="row-actions">
+                <button on:click=move |_| load.run(false) disabled=move || loading.get()>
+                    "Load more"
+                </button>
+            </div>
+        </Show>
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_quota;
+    use super::{detail_rows, parse_quota};
+    use serde_json::json;
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn audit_details_become_key_value_rows() {
+        let rows = detail_rows(&json!({ "by": "api", "count": 2 }));
+        assert_eq!(
+            rows,
+            [
+                ("by".to_string(), "api".to_string()),
+                ("count".to_string(), "2".to_string())
+            ]
+        );
+        assert!(detail_rows(&json!({})).is_empty());
+        assert!(detail_rows(&json!("text")).is_empty());
+    }
 
     #[wasm_bindgen_test]
     fn quota_inputs_use_binary_units() {

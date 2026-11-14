@@ -23,6 +23,15 @@ follow [Semantic Versioning](https://semver.org/).
   `POST /api/users/{username}/logout`, and
   `GET /api/users/{username}/sessions`; `GET /api/users` accepts `q=`.
 - `POST /api/users` now accepts optional `admin` and `quota_bytes` fields.
+- **Admin groups and audit tabs**: the Admin page now has **Users**,
+  **Groups**, and **Audit** tabs. Groups can be created, inspected,
+  deleted, and have members added or removed; the UI warns that membership
+  changes do not rotate MLS keys. The audit tab lists newest-first entries
+  with structured details, exact action/subject filters, keyset paging, and
+  a hash-chain verification button. New admin-only endpoints:
+  `GET|POST /api/groups`, `DELETE /api/groups/{name}`,
+  `POST|DELETE /api/groups/{name}/members/{username}`,
+  `GET /api/audit`, and `GET /api/audit/verify`.
 
 ## [0.4.7] - 2026-11-14
 

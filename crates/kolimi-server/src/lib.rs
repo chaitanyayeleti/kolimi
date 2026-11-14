@@ -6,6 +6,7 @@
 pub mod admin;
 pub mod api;
 pub mod api_2fa;
+pub mod api_admin;
 pub mod api_browse;
 pub mod api_e2ee;
 pub mod api_mls;
@@ -346,7 +347,18 @@ pub fn build_app(state: AppState) -> Router {
             patch(api_shares::update).delete(api_shares::delete),
         )
         .route("/api/shareable", get(api_shares::shareable))
+        .route(
+            "/api/groups",
+            get(api_admin::list_groups).post(api_admin::create_group),
+        )
+        .route("/api/groups/{name}", delete(api_admin::delete_group))
         .route("/api/groups/{name}/members", get(api_shares::group_members))
+        .route(
+            "/api/groups/{name}/members/{username}",
+            post(api_admin::add_group_member).delete(api_admin::remove_group_member),
+        )
+        .route("/api/audit", get(api_admin::list_audit))
+        .route("/api/audit/verify", get(api_admin::verify_audit))
         // Admin-only; the handler checks is_admin (401 when anonymous).
         .route("/metrics", get(metrics::handler))
         // Requires authentication so the exact version is not public.

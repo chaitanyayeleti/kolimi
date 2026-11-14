@@ -230,6 +230,18 @@ impl Db {
         .await?)
     }
 
+    /// Lists every group membership as `(group_id, username)`, sorted by
+    /// group and username. Used by the admin group overview.
+    pub async fn group_member_names(&self) -> Result<Vec<(i64, String)>, DbError> {
+        Ok(sqlx::query_as::<_, (i64, String)>(
+            "SELECT m.group_id, u.username FROM group_members m
+             JOIN users u ON u.id = m.user_id
+             ORDER BY m.group_id, u.username",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Lists the groups a user belongs to.
     pub async fn user_groups(&self, user_id: i64) -> Result<Vec<Group>, DbError> {
         Ok(sqlx::query_as::<_, Group>(

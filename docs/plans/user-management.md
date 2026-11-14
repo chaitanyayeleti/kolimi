@@ -1,6 +1,6 @@
 # User management — plan
 
-Status: **in progress** · Date: 2026-11-14 · Phases 1–2 landed on `main`
+Status: **in progress** · Date: 2026-11-14 · Phases 1–3 landed on `main`
 Builds on: [operations.md](../operations.md), [reference.md](../reference.md),
 [red-team report](../audit/redteam-2026-11-14.md)
 
@@ -33,22 +33,20 @@ web UI without weakening the current invariants:
 
 | Capability | API | CLI | Web UI |
 | --- | --- | --- | --- |
-| List / sort / filter users | Yes | `user list` | Yes, capped at 200 and no cursor |
-| Create user | Yes | `user add` | No |
-| User detail | Yes | No | No |
-| Admin / disabled / quota changes | Yes | Yes | Partial |
-| Change own password | No | `user passwd` | No |
-| Recover account | No | `user recover` | No |
-| List / revoke sessions | No | No | No |
-| Group management | Member list only | Yes | No |
-| Audit log | DB only | `audit list` / `verify` | No |
+| List / sort / filter users | Yes | `user list` | Yes, search + cursor paging |
+| Create user | Yes | `user add` | Yes |
+| User detail | Yes | No | Yes |
+| Admin / disabled / quota changes | Yes | Yes | Yes |
+| Change own password | Yes | `user passwd` | Yes |
+| Recover account | Yes | `user recover` | Yes, re-auth required |
+| List / revoke sessions | Yes | No | Yes |
+| Group management | Yes | Yes | Yes |
+| Audit log | Yes | `audit list` / `verify` | Yes, filters + verify |
 
-The sessions table already records `created_at`, `expires_at`, and
-`last_seen_at`. `GET /api/users` already supports sorting, filtering, and
-cursor pagination, but the admin modal ignores the cursor. Recovery is
-factored into `kolimi_server::admin::recover_user`, so the HTTP endpoint can
-reuse it; the audit actor currently needs to become a parameter instead of
-being hard-coded to `cli`.
+Phases 1–3 are implemented. The Admin page has **Users**, **Groups**, and
+**Audit** tabs; self-service password and session controls live under
+**Settings → Account**. The remaining Phase 4 work is invite-based
+onboarding and server-enforced password rotation.
 
 ## 4. Principles
 
@@ -131,7 +129,7 @@ When `password` is omitted, generate a random password and return it once with
 re-authentication. Extending that requirement to the existing `PATCH` and
 `DELETE /api/users/{username}` routes is a follow-up hardening item.
 
-### Phase 3 — groups and audit (P1)
+### Phase 3 — groups and audit (P1) — landed (Groups/Audit tabs)
 
 Add the remaining Admin tabs.
 

@@ -116,7 +116,7 @@ test("web admin page lists and inspects users", async ({ page }) => {
   await page.getByRole("button", { name: "Admin", exact: true }).click();
 
   await expect(
-    page.getByRole("heading", { name: "Admin — users", exact: true }),
+    page.getByRole("heading", { name: "Users", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Create user", exact: true }),
@@ -166,6 +166,74 @@ test("web admin creates and deletes a user", async ({ page }) => {
   await detail.getByLabel("Username", { exact: true }).fill(username);
   await detail.getByRole("button", { name: "Delete user", exact: true }).click();
   await expect(page.getByText(username, { exact: true })).toHaveCount(0);
+});
+
+test("web admin manages groups and members", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+  await page.getByRole("tab", { name: "Groups", exact: true }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Groups", exact: true }),
+  ).toBeVisible();
+
+  const name = `e2e-group-${Date.now()}`;
+  await page.getByRole("button", { name: "Create group", exact: true }).click();
+  const create = page.locator(".modal");
+  await create.getByLabel("Name", { exact: true }).fill(name);
+  await create.getByRole("button", { name: "Create group", exact: true }).click();
+
+  const group = page.locator("main.content li.row", { hasText: name }).first();
+  await expect(group).toBeVisible();
+  await group.getByRole("button", { name: "Manage", exact: true }).click();
+
+  const detail = page.locator(".modal");
+  await expect(
+    detail.getByRole("heading", { name: `Group — ${name}`, exact: true }),
+  ).toBeVisible();
+  await expect(
+    detail.getByText("Changing membership does not rotate MLS keys", {
+      exact: false,
+    }),
+  ).toBeVisible();
+
+  await detail.getByLabel("Add member", { exact: true }).fill("bob");
+  await detail.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(detail.getByText("Added bob.", { exact: true })).toBeVisible();
+  await expect(detail.locator("li.row", { hasText: "bob" })).toBeVisible();
+  await detail
+    .locator("li.row", { hasText: "bob" })
+    .getByRole("button", { name: "Remove", exact: true })
+    .click();
+  await expect(detail.getByText("Removed bob.", { exact: true })).toBeVisible();
+
+  await detail.getByLabel("Group name", { exact: true }).fill(name);
+  await detail.getByRole("button", { name: "Delete group", exact: true }).click();
+  await expect(page.getByText(name, { exact: true })).toHaveCount(0);
+});
+
+test("web admin filters and verifies the audit log", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+  await page.getByRole("tab", { name: "Audit", exact: true }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Audit", exact: true }),
+  ).toBeVisible();
+
+  const filter = page.locator("main.content form");
+  await filter.getByLabel("Action", { exact: true }).fill("user.add");
+  await filter.getByRole("button", { name: "Apply", exact: true }).click();
+
+  const entry = page.locator("main.content li.row", { hasText: "user.add" }).first();
+  await expect(entry).toBeVisible();
+  await entry.locator("summary").click();
+  await expect(entry.locator("dt").first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Verify chain", exact: true }).click();
+  await expect(
+    page.getByText(/Audit chain verified \(\d+ entries\)\./),
+  ).toBeVisible();
 });
 
 test("web passkey add requires re-authentication", async ({ page }) => {

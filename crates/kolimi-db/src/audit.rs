@@ -38,6 +38,19 @@ pub struct AuditEntry {
     pub hash: Vec<u8>,
 }
 
+/// Parameters for an audit-log page.
+#[derive(Debug, Clone, Copy)]
+pub struct AuditPageQuery<'a> {
+    /// Maximum rows to return.
+    pub limit: i64,
+    /// Return entries with an id lower than this (newest-first paging).
+    pub before: Option<i64>,
+    /// Exact action name, e.g. `group.add`.
+    pub action: Option<&'a str>,
+    /// Exact subject, e.g. a username or group name.
+    pub subject: Option<&'a str>,
+}
+
 /// Result of verifying the whole chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditVerify {
@@ -146,14 +159,31 @@ impl Db {
         limit: i64,
         before: Option<i64>,
     ) -> Result<Vec<AuditEntry>, DbError> {
-        let limit = limit.clamp(1, 1000);
+        self.audit_page(AuditPageQuery {
+            limit,
+            before,
+            action: None,
+            subject: None,
+        })
+        .await
+    }
+
+    /// Lists audit entries newest first with optional exact-match filters.
+    pub async fn audit_page(&self, query: AuditPageQuery<'_>) -> Result<Vec<AuditEntry>, DbError> {
+        let limit = query.limit.clamp(1, 1000);
         Ok(sqlx::query_as::<_, AuditEntry>(
             "SELECT * FROM audit_log
              WHERE (? IS NULL OR id < ?)
+               AND (? IS NULL OR action = ?)
+               AND (? IS NULL OR subject = ?)
              ORDER BY id DESC LIMIT ?",
         )
-        .bind(before)
-        .bind(before)
+        .bind(query.before)
+        .bind(query.before)
+        .bind(query.action)
+        .bind(query.action)
+        .bind(query.subject)
+        .bind(query.subject)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?)
@@ -246,6 +276,67 @@ mod tests {
         let older = db.audit_list(10, Some(list[1].id)).await.unwrap();
         assert_eq!(older.len(), 1);
         assert_eq!(older[0].action, "file.upsert");
+    }
+
+    #[tokio::test]
+    async fn pages_can_filter_by_action_and_subject() {
+        let (_dir, db) = db().await;
+        db.audit_append(None, Some("cli"), "group.add", "team", &json!({}))
+            .await
+            .unwrap();
+        db.audit_append(None, Some("cli"), "group.add", "ops", &json!({}))
+            .await
+            .unwrap();
+        db.audit_append(None, Some("cli"), "user.add", "team", &json!({}))
+            .await
+            .unwrap();
+
+        let groups = db
+            .audit_page(crate::audit::AuditPageQuery {
+                limit: 10,
+                before: None,
+                action: Some("group.add"),
+                subject: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|entry| entry.action == "group.add"));
+
+        let team = db
+            .audit_page(crate::audit::AuditPageQuery {
+                limit: 10,
+                before: None,
+                action: None,
+                subject: Some("team"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(team.len(), 2);
+        assert!(team.iter().all(|entry| entry.subject == "team"));
+
+        let first_page = db
+            .audit_page(crate::audit::AuditPageQuery {
+                limit: 1,
+                before: None,
+                action: Some("group.add"),
+                subject: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].subject, "ops");
+        let second_page = db
+            .audit_page(crate::audit::AuditPageQuery {
+                limit: 10,
+                before: Some(first_page[0].id),
+                action: Some("group.add"),
+                subject: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].subject, "team");
     }
 
     #[tokio::test]

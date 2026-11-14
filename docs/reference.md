@@ -183,6 +183,12 @@ Notes:
   `POST /api/users/{username}/recover` and `.../logout` require
   `X-Reauth-Token`; recovery returns a generated password once with
   `Cache-Control: no-store`.
+- Admin group routes are `GET|POST /api/groups`,
+  `DELETE /api/groups/{name}`, and
+  `POST|DELETE /api/groups/{name}/members/{username}`. `GET /api/audit`
+  accepts `limit`, `before`, `action`, and `subject`; `GET /api/audit/verify`
+  recomputes the hash chain. Both audit routes are admin-only and omit chain
+  hashes.
 - Public links use `/public/{token}` and set a scoped unlock cookie after
   `POST /public/{token}/unlock`.
 
@@ -196,6 +202,7 @@ Notes:
 | Trash / versions | `/api/trash*`, `/api/versions*` |
 | Delta sync | `/api/sync/changes`, `/api/sync/tree`, `/api/sync/events`, `/api/sync/shared-tree`, `/api/files/manifest`, `/api/manifests/{id}`, `PUT /api/files`, `/api/chunks*` |
 | Shares | `/api/shares`, `/api/shares/received`, `/api/shares/owned`, `/api/shares/{id}`, `/api/shareable`, `/api/groups/{name}/members` |
+| Groups / audit (admin) | `GET|POST /api/groups`, `DELETE /api/groups/{name}`, `POST|DELETE /api/groups/{name}/members/{username}`, `GET /api/audit`, `GET /api/audit/verify` |
 | Public links | `GET /public/{token}`, `/unlock`, `/list*`, `/download*` |
 | E2EE v1/v2 | `/api/e2ee/keyring`, `/api/e2ee/identity`, `/api/files/key`, `/api/e2ee/share-key`, `/api/e2ee/share-name`, `/api/e2ee/enrollments*`, `/api/e2ee/devices*` |
 | MLS | `/api/mls/key-packages`, `/api/mls/key-packages/consume`, `/api/mls/key-packages/{username}`, `/api/mls/devices`, `/api/mls/devices/{username}`, `/api/mls/group`, `/api/mls/commit`, `/api/mls/messages`, `/api/mls/epoch`, `/api/mls/keyring`, `/api/mls/revocations` |
