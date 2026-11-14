@@ -484,6 +484,11 @@ mod tests {
             master.as_bytes()
         );
         assert!(with_prf.methods().contains(&"prf"));
+        // A wrong 32-byte PRF output fails closed against a real PRF wrap.
+        assert!(matches!(
+            with_prf.unlock_with_prf(&[8u8; 32]),
+            Err(CryptoError::Unlock)
+        ));
     }
 
     #[test]
