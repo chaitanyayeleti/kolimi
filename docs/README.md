@@ -56,7 +56,7 @@ the source of truth for what has and has not been reviewed.
 | [../ROADMAP.md](../ROADMAP.md) | Current state, next work, deferred items, non-goals |
 | [plans/clients.md](plans/clients.md) | Desktop → mobile client roadmap |
 | [plans/android.md](plans/android.md) | Android/F-Droid client plan |
-| [plans/user-management.md](plans/user-management.md) | Admin and self-service account management plan |
+| [plans/user-management.md](plans/user-management.md) | Completed admin/self-service account plan and security decisions |
 | [plans/releases.md](plans/releases.md) | Release channels, tag pipeline, version-bump checklist |
 | [../CHANGELOG.md](../CHANGELOG.md) | What shipped in each release |
 
@@ -67,9 +67,10 @@ the source of truth for what has and has not been reviewed.
   `Status:` line with the last verified release.
 - **Decision records** (`decisions/NNNN-*.md`) capture one decision, its
   alternatives and its status (proposed / accepted / superseded).
-- **Plans** (`plans/`) look forward; [ROADMAP.md](../ROADMAP.md) is the
-  authoritative backlog. Shipped history belongs in `CHANGELOG.md`, not in
-  the roadmap.
+- **Plans** (`plans/`) describe forward work or a completed implementation;
+  [ROADMAP.md](../ROADMAP.md) is the authoritative backlog. Shipped history
+  belongs in `CHANGELOG.md`, not in the roadmap; completed plans remain as
+  design/security history.
 - **Status words** mean:
   - *design*: `draft` (still changing), `accepted` (agreed, not fully
     built), `implemented` (the design is what the code follows);
@@ -85,9 +86,10 @@ resolve, every RFC appears in the RFC index, and current-facing guides do
 not reintroduce known stale claims. Run it before sending a docs change.
 
 `browser-e2e/` (Playwright) drives the real web UI against a fixture server
-for rename, delete, share/revoke, MLS migration and reset. It runs in the
-`browser (Playwright)` CI job; build the UI and server binaries first when
-running it locally.
+for account/session controls, admin users/invites/groups/audit, forced
+password rotation, rename/delete, share/revoke, uploads, E2EE, and the MLS
+migration/reset flow. It runs in the `browser (Playwright)` CI job; build the
+UI and server binaries first when running it locally.
 
 CI is path-filtered: documentation-only changes run just this check, while
 code changes run the Rust suite plus the relevant browser, UI, desktop,

@@ -25,6 +25,9 @@ or MySQL to operate.
 - **Auth without extra services.** Passkeys, passwordless accounts, TOTP
   with recovery codes, CSRF-protected sessions, per-source rate limits and
   lockout.
+- **Account management built in.** Self-service password/profile/session
+  controls, one-time invite onboarding, admin users/groups/audit pages,
+  forced password rotation, and session labels.
 - **Operable by default.** Prometheus `/metrics`, a hash-chained audit log,
   online backup/verify, systemd hardening, distroless containers, Helm,
   AUR, `.deb` and AppImage packages.

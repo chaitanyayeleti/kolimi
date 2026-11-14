@@ -11,6 +11,9 @@ separate workflows but should be tagged together when both changed.
 - Desktop app: tag **`desktop-vX.Y.Z`** →
   `.github/workflows/desktop-release.yml`.
 - For a paired release, both tags point at the same commit. Push both.
+- For a server/web-only release, push only `vX.Y.Z` and leave the desktop
+  version and tag on the previous release. The desktop loads the server's
+  web UI, so server-side UI changes still reach desktop users.
 - Never move or re-create a published tag; ship a new patch instead.
 
 ## Channels
@@ -86,10 +89,11 @@ Before tagging:
       copy (server `packaging/arch`, desktop `packaging/aur/kolimi-desktop`).
       No manual edit is required for a release; update them only when testing
       a local package build.
-- [ ] `scripts/check-docs.sh` passes and install examples do not pin an
+- [ ] `scripts/check-docs.sh` passes. It verifies that `ROADMAP.md`,
+      `CHANGELOG.md`, `docs/README.md`, the RFC index, every RFC's
+      “Last verified” line, and the Docker/Helm defaults match
+      `[workspace.package] version`, and that install examples do not pin an
       old release.
-- [ ] “Last verified” in `docs/README.md` and `docs/rfc/README.md` matches
-      the release being tagged.
 - [ ] A backup/restore and upgrade path was tested for any new migration;
       migrations are forward-only.
 

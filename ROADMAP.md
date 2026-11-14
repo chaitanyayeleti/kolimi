@@ -1,6 +1,6 @@
 # Kolimi Roadmap
 
-Current release: **0.4.3** (2026-11-05). This file is the forward-looking
+Current release: **0.4.8** (2026-11-14). This file is the forward-looking
 backlog and the honest list of limitations. Shipped history lives in
 [CHANGELOG.md](CHANGELOG.md); design details live in [docs/rfc/](docs/rfc/).
 
@@ -17,7 +17,7 @@ backlog and the honest list of limitations. Shipped history lives in
 5. **No speculative platform work.** A plugin host or extra backend is
    added only with a concrete use case.
 
-## Current state (0.4.3)
+## Current state (0.4.8)
 
 | Area | Status |
 | --- | --- |
@@ -26,51 +26,33 @@ backlog and the honest list of limitations. Shipped history lives in
 | Delta sync | `kolimi-sync` CLI, desktop app, FFI core; chunk-level deltas, conflicts, shared mounts |
 | E2EE v1/v2 | Per-file keys, encrypted names, sharing, device enrollment, browser/sync/desktop clients |
 | MLS group E2EE | Node-scoped groups, membership add/remove, epoch keyring, folder + single-file write shares, serialized commits, key-package/message janitor, web/desktop/CLI |
-| Auth | Passwords, passkeys, passwordless accounts, TOTP, sessions, CSRF, lockout, rate limiting |
+| Auth / accounts | Passwords, passkeys, passwordless accounts, TOTP, sessions, CSRF, lockout, rate limiting; self-service account page; admin users/invites/groups/audit; forced password rotation and session labels |
 | Operations | Backup/verify, hash-chained audit log, Prometheus metrics, OTel traces, quotas, janitor |
 | Packaging | Release tarballs (gnu/musl/aarch64), `.deb`, multi-arch GHCR, Helm, AUR, AppImage; desktop `.deb`/AppImage, Windows `.msi`/NSIS and macOS `.dmg` |
 
 E2EE is **alpha** and MLS is **not externally audited**. That is the main
 ship-blocker for calling group E2EE production-grade.
 
-## Next milestone: 0.4.5 — UI refinement
+## Recently completed
 
-Status: **released as `v0.4.5` on 2026-11-05.** Keep Leptos and the
-single-binary/embedded-assets model; this is not a framework rewrite. Landed:
-`Modal`, `Notice`, `ErrorText`, `EmptyState`, `MlsDevicesPanel`, `FileRow`,
-`FileTile`, `TrashRow`, `Sidebar`, `Topbar`, toast/upload/context/lightbox
-overlays and their tests; `mls` split into `state`, `types`, `api` and
-`protocol`; `app.rs` reduced to the root/login surface; the browser split into
-`actions`, `dialogs`, `overlays`, `rows`, `search`, `sharing`, `shell`,
-`types` and `uploads`; Settings regrouped into Encryption, Sharing, Devices
-and Passkeys tabs; spacing and typography tokens applied to the modal and
-Settings surfaces.
-
-- **Reusable components**: extract modal, buttons, notices, empty states,
-  share rows and device rows from the large app modules.
-- **Split `app.rs` and `mls.rs`**: separate MLS persistence/state, protocol
-  helpers, API operations and display types so the UI modules stay
-  reviewable.
-- **Design tokens**: add CSS variables for colors, spacing, radius,
-  typography and elevation, then migrate the modal/settings surfaces first.
-- **Settings dialogs**: group Encryption, MLS shares, MLS devices, Passkeys
-  and device enrollment; add loading/empty/error states and a clear current
-  device marker.
-- **Component tests**: cover pure helpers and the extracted modal/device
-  components; keep the Playwright suite as the end-to-end guard.
-
-Validation for the milestone remains the full workspace tests, clippy
-(including wasm), formatting, docs checks and browser E2E.
+- **0.4.8 — account management**: self-service password/profile/session
+  controls and the admin users, invites, groups, and audit pages. See the
+  [completed plan](docs/plans/user-management.md) and [CHANGELOG](CHANGELOG.md).
+- **0.4.7 — credential hardening**: passkey/keyring re-auth, TOTP and
+  recovery hardening, and the internal red-team fixes.
+- **0.4.5 — UI refinement**: reusable components, module splits, design
+  tokens, and the regrouped Settings panels.
 
 ## Next
 
 ### 1. External MLS crypto audit (blocker)
 
-The review package is [`docs/audit/mls-delta.md`](docs/audit/mls-delta.md).
-The 89 openmls `cargo-vet` exemptions (724 total) are temporary and are
-not audits. Freeze the 0.4.3 surface, engage an independent reviewer, land
-only fixes during the review, then replace the exemptions with real audit
-entries. Do not describe MLS as audited before this completes.
+The review package is [`docs/audit/mls-delta.md`](docs/audit/mls-delta.md)
+and is intentionally frozen at the 0.4.3 surface even though the server is
+now 0.4.8. The 89 openmls `cargo-vet` exemptions (724 total) are temporary
+and are not audits. Engage an independent reviewer, land only fixes during
+the review, then replace the exemptions with real audit entries. Do not
+describe MLS as audited before this completes.
 
 ### 2. MLS operational hardening
 
@@ -92,13 +74,15 @@ entries. Do not describe MLS as audited before this completes.
 - **MLS message retention tuning**: per-device epoch reports now drive
   pruning (7-day grace, 30-day report freshness); review the thresholds
   with the external auditor.
-- **Deployment validation**: upgrade from 0.3.x to 0.4.3 with real data,
-  restore drill in CI, and a post-upgrade `verify` run.
+- **Deployment validation**: upgrade from 0.4.7 (and older 0.3.x data) to
+  0.4.8 with real data, a restore drill in CI, and a post-upgrade `verify`
+  run.
 
 ### 3. Clients
 
-- **Android / F-Droid** first, then iOS: [docs/plans/android.md](docs/plans/android.md)
-  and [docs/plans/clients.md](docs/plans/clients.md). The FFI core exists;
+- **Android / F-Droid is parked** until desktop signing and mobile
+  resourcing are settled: [docs/plans/android.md](docs/plans/android.md) and
+  [docs/plans/clients.md](docs/plans/clients.md). The FFI core exists;
   background scheduling and the Compose/SwiftUI shells remain.
 - Desktop Windows/macOS signing/notarization and native autostart glue
   (bundles and OS keychain storage are in place).
@@ -111,27 +95,13 @@ entries. Do not describe MLS as audited before this completes.
 
 ### 4. Documentation and release hygiene
 
-- Keep `scripts/check-docs.sh` in CI; update the RFC status table and
-  [docs/README.md](docs/README.md) on every release.
+- Keep `scripts/check-docs.sh` in CI. It now checks that release-facing
+  docs match the workspace version as well as links and stale claims.
 - Keep the version-bump checklist in
   [docs/plans/releases.md](docs/plans/releases.md) in sync with the
   workflows.
-- Add a docs review to the release checklist so install commands and
-  audit status cannot drift again.
-
-### 5. User management
-
-Self-service password/session control and admin create/recover/session
-management are the next usability gap: see
-[docs/plans/user-management.md](docs/plans/user-management.md). All four
-phases landed on `main`: **Settings → Account** (password change, profile,
-session revocation), **Admin → Users** (create, search, detail, quota,
-recovery, force sign-out), **Admin → Groups/Audit** (membership management,
-filtered audit log, chain verification), **Admin → Invites** (one-time
-onboarding links, expiry/revocation, server-enforced password rotation), and
-the Phase 5 hardening closeout (re-auth on every user mutation, typed
-recovery confirmation, recovery rate limiting, no-store session responses,
-and session labels).
+- Review install commands and audit status during every release so they
+  cannot drift again.
 
 ## Deferred / non-goals
 

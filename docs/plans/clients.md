@@ -2,8 +2,9 @@
 
 Priority order:
 
-1. **Desktop app** — Linux first, then Windows and macOS.
-2. **Mobile** — Android first (released on **F-Droid**), then iOS.
+1. **Desktop app** — shipped for Linux, Windows, and macOS.
+2. **Mobile** — Android/F-Droid first, then iOS. **Parked** until desktop
+   signing and mobile resourcing are settled.
 
 One Rust core, thin platform shells: the sync engine and crypto already
 live in `kolimi-sync` + `kolimi-crypto`, and `kolimi-ffi` (UniFFI) already
@@ -37,7 +38,8 @@ emits Kotlin/Swift/Python bindings.
 Windows/macOS follow once Linux is solid (mainly packaging, signing, and
 platform glue for the secret store and tray).
 
-**Status (as of 2026-10-13): phase 1 complete (weeks 1–6).** Week 1 =
+**Status (as of 2026-11-14): phase 1 complete and released through the
+`desktop-v*` workflow; phase 2 is parked.** Week 1 =
 shell (window, first-run setup, tray). Week 2 = parity via the loaded web UI
 plus the two native gaps it can't cover: OS file-drop uploads (Tauri's
 file-drop handler disabled so the web UI's own drop logic runs) and downloads
@@ -48,12 +50,12 @@ and E2EE passphrase (Secret Service / Credential Manager / Keychain) with a
 session-keyring and warned file fallback. Week 5 = E2EE surfacing and
 end-to-end verification. Week 6 = packaging: `.deb` + AppImage + AUR
 `kolimi-desktop`, released via the Desktop Release workflow on `desktop-v*`
-tags. Phase 2 (mobile) is next.
+tags. Phase 2 (mobile) is parked; see [android.md](android.md).
 
-## Phase 2 — Mobile (Android first → F-Droid), weeks 7+
+## Phase 2 — Mobile (parked)
 
-Design detail: **[android.md](android.md)**. Same as the Android plan, now
-explicitly after desktop. Kotlin/Compose shell over the UniFFI core;
+Design detail: **[android.md](android.md)**. Parked until desktop signing
+and mobile resourcing are settled. Kotlin/Compose shell over the UniFFI core;
 `WorkManager` background sync.
 
 | Week | Deliverable | Exit criteria |
@@ -83,10 +85,10 @@ explicitly after desktop. Kotlin/Compose shell over the UniFFI core;
 - **macOS/Windows signing** (notarization, EV cert) → plan early, budget time.
 - **Passkeys/WebAuthn on Android** often needs GMS → password + TOTP for v1.
 
-## Decisions to confirm
+## Decisions
 
-- Desktop stack: **Tauri reusing the Leptos UI** (recommended) vs Rust-native
-  (Dioxus/Slint/egui).
-- Desktop OS order: **Linux first**, then Windows/macOS.
-- Mobile: app id/package, minSdk/targetSdk, ABIs (`arm64-v8a`, `x86_64`),
-  local storage (SAF vs app dir), passkeys in v1 (recommend no).
+- Desktop stack: **Tauri reusing the Leptos UI**. Decided and shipped.
+- Desktop OS order: **Linux first**, then Windows/macOS. All three are
+  packaged; Windows/macOS bundles remain unsigned.
+- Mobile: app id, SDK levels, ABIs, storage, and the no-passkeys-v1 decision
+  are recorded in [android.md](android.md). Implementation is parked.

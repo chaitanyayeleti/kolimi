@@ -52,7 +52,46 @@ for rfc in sorted(rfc_dir.glob("[0-9][0-9][0-9][0-9]-*.md")):
     if "Status:" not in text and "**Status:**" not in text:
         problems.append(f"{rfc.relative_to(root)}: no Status line")
 
-# 3. Keep known stale claims out of current-facing guides. Historical files
+# 3. Release-facing docs must match the workspace version. This catches the
+#    common failure mode where a release is tagged but the roadmap, RFC index,
+#    packaging defaults, or changelog still name the previous version.
+cargo_text = (root / "Cargo.toml").read_text(encoding="utf-8")
+version_match = re.search(r'^version = "([^"]+)"', cargo_text, re.MULTILINE)
+if not version_match:
+    problems.append("Cargo.toml: cannot read [workspace.package] version")
+    version = None
+else:
+    version = version_match.group(1)
+
+if version:
+    release_needles = {
+        "ROADMAP.md": f"Current release: **{version}**",
+        "CHANGELOG.md": f"## [{version}]",
+        "docs/README.md": f"Last full verification: **{version}**",
+        "docs/rfc/README.md": f"Last full verification: **{version}**",
+        "packaging/docker/compose.yaml": f"kolimi:{version}",
+        "packaging/docker/compose.traefik.yaml": f"kolimi:{version}",
+        "packaging/docker/.env.example": f"kolimi:{version}",
+        "packaging/helm/kolimi/Chart.yaml": f"version: {version}",
+    }
+    for name, needle in release_needles.items():
+        path = root / name
+        if not path.exists():
+            problems.append(f"missing release doc: {name}")
+        elif needle not in path.read_text(encoding="utf-8"):
+            problems.append(f"{name}: missing current version {needle!r}")
+
+    rfc_needle = f"Last verified: {version}"
+    for rfc in sorted(rfc_dir.glob("*.md")):
+        text = rfc.read_text(encoding="utf-8")
+        if "Last verified:" in text and rfc_needle not in text:
+            problems.append(f"{rfc.relative_to(root)}: {rfc_needle!r} not found")
+
+    chart = (root / "packaging/helm/kolimi/Chart.yaml").read_text(encoding="utf-8")
+    if f'appVersion: "{version}"' not in chart:
+        problems.append("packaging/helm/kolimi/Chart.yaml: appVersion is stale")
+
+# 4. Keep known stale claims out of current-facing guides. Historical files
 #    (CHANGELOG, ROADMAP history, RFC bodies) are intentionally not checked.
 stale = {
     "README.md": [
@@ -81,6 +120,16 @@ stale = {
     ],
     "docs/known-advisories.md": [
         "Both entries below",
+    ],
+    "ROADMAP.md": [
+        "Next milestone: 0.4.5",
+    ],
+    "docs/plans/clients.md": [
+        "released on **F-Droid**",
+        "Phase 2 (mobile) is next",
+    ],
+    "docs/plans/android.md": [
+        "Android app released on **F-Droid**",
     ],
 }
 for name, needles in stale.items():

@@ -38,7 +38,8 @@ is informational only and is never used to sign in or send mail. Sessions
 can be given a private label (for example “Work laptop”) to make revocation
 easier.
 
-Administrators use the **Admin** sidebar entry, which opens a user page with
+Administrators use the **Admin** sidebar entry, which opens a page with
+**Users**, **Invites**, **Groups**, and **Audit** tabs. The Users tab has
 search, filters, and cursor paging. From there an admin can create a user,
 open a detail view, edit a quota, grant/revoke admin, disable/enable an
 account, force sign-out, or reset a password. Password recovery generates a

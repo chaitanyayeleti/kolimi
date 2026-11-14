@@ -63,7 +63,7 @@ controls live under **Settings → Account**.
 
 ## 5. Phases
 
-### Phase 1 — self-service account security (P0)
+### Phase 1 — self-service account security (P0) — landed
 
 Add **Settings → Account**:
 
@@ -88,7 +88,7 @@ they use the existing passkey management panel.
 ### Phase 2 — admin essentials (P0) — landed (Users page)
 
 The Admin modal is now a page. This phase shipped the **Users** view; the
-**Groups** and **Audit** tabs land in Phase 3.
+**Groups** and **Audit** tabs followed in Phase 3.
 
 Users view:
 
@@ -130,7 +130,7 @@ existing `PATCH` and `DELETE /api/users/{username}` routes.
 
 ### Phase 3 — groups and audit (P1) — landed (Groups/Audit tabs)
 
-Add the remaining Admin tabs.
+Added the remaining Admin tabs.
 
 Groups tab:
 
@@ -286,7 +286,8 @@ password with the encryption passphrase.
 
 ## 9. Testing
 
-- API integration tests in `crates/kolimi-server/tests/users.rs`:
+- API integration tests in `crates/kolimi-server/tests/users.rs`,
+  `account.rs`, `groups_audit.rs`, `invites.rs`, and `phase5.rs`:
   - non-admin gets `403` on every admin route;
   - re-auth is required for recover/delete/grant/revoke;
   - last enabled admin cannot be disabled, demoted, or deleted;
@@ -317,20 +318,9 @@ password with the encryption passphrase.
   records `cli` and HTTP recovery records the admin.
 - Update [operations.md](../operations.md) and [reference.md](../reference.md)
   with the new endpoints and recovery rules.
-- Keep `CHANGELOG.md` entry for the release that ships the first phase.
+- The release changelog entry is under `0.4.8`.
 
-## 11. First slice
-
-1. `POST /api/me/password` and `GET/DELETE /api/me/sessions`.
-2. Settings → Account tab.
-3. Admin create-user and recover-password endpoints + forms.
-4. Session metadata migration and force sign-out.
-5. Search/pagination and user detail.
-
-This is the smallest slice that removes the CLI-only workflows and gives users
-control over their own credentials.
-
-## 12. Resolved questions
+## 11. Resolved questions
 
 1. Invite links are the primary onboarding path; temporary passwords remain
    available for compatibility and can require rotation.

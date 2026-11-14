@@ -1,12 +1,15 @@
 # Android client (phase 2) — plan and design
 
-Status: **approved** · Date: 2026-10-14 · Tracks issue **#11**
+Status: **approved, implementation parked** · Date: 2026-10-14 · Tracks
+issue **#11**
 Builds on: [clients.md](clients.md), [decision 0002](../decisions/0002-client-stack.md),
 RFC 0006 (sync client), RFC 0007 (E2EE), RFC 0008 (device enrollment)
 
 The desktop client (phase 1) is shipped. This is the plan for a first-party
-Android app released on **F-Droid**, built as a Kotlin/Compose shell over the
-existing Rust core (`kolimi-sync` + `kolimi-crypto`) through `kolimi-ffi`.
+Android app for **F-Droid**, built as a Kotlin/Compose shell over the existing
+Rust core (`kolimi-sync` + `kolimi-crypto`) through `kolimi-ffi`. No Android
+project exists in this checkout yet; implementation is paused until desktop
+signing and mobile resourcing are settled.
 
 ## 1. Goal and non-goals
 
