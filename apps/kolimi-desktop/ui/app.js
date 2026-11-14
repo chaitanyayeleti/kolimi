@@ -90,10 +90,76 @@ function emptyState() {
     el("span", { class: "empty-icon", html: ICON_ACCOUNT }),
     el("h2", {}, "No accounts yet"),
     el("p", { class: "muted" }, "Add a Kolimi server below to start syncing folders."),
+    el("ol", { class: "onboarding-steps" },
+      el("li", {}, "Add your Kolimi account"),
+      el("li", {}, "Choose a local folder to sync"),
+      el("li", {}, "Unlock encryption if you use encrypted folders")),
     btn("Add your first account", "primary", () => {
       $("add-account").open = true;
       $("new-server").focus();
     }));
+}
+
+function relativeTime(ms) {
+  if (!ms) return "";
+  const seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (seconds < 45) return "just now";
+  if (seconds < 3600) return Math.round(seconds / 60) + "m ago";
+  if (seconds < 86400) return Math.round(seconds / 3600) + "h ago";
+  return Math.round(seconds / 86400) + "d ago";
+}
+
+async function refreshSyncStatus() {
+  let status;
+  try {
+    status = await invoke("get_sync_status");
+  } catch (_) {
+    return;
+  }
+  const dot = $("sync-dot");
+  const title = $("sync-title");
+  const detail = $("sync-detail");
+  const action = $("sync-status-now");
+  const labels = {
+    idle: "Sync idle",
+    syncing: "Syncing…",
+    paused: "Sync paused",
+    locked: "Encryption locked",
+    error: status.offline ? "Server unreachable" : "Sync problem",
+    conflict: "Sync conflicts",
+    no_account: "No account configured",
+  };
+  title.textContent = labels[status.state] || "Sync idle";
+  let text = status.detail || "";
+  if (status.synced_at && (status.state === "idle" || status.state === "conflict")) {
+    text += " · " + relativeTime(status.synced_at);
+  }
+  detail.textContent = text;
+  dot.className =
+    "sync-dot " +
+    (status.state === "error"
+      ? "err"
+      : status.state === "idle"
+        ? "ok"
+        : status.state === "no_account"
+          ? ""
+          : "warn");
+  action.disabled = status.state === "paused" || status.state === "syncing";
+  action.textContent =
+    status.state === "paused"
+      ? "Paused"
+      : status.state === "syncing"
+        ? "Syncing…"
+        : "Sync now";
+  const errors = $("sync-errors");
+  const list = $("sync-error-list");
+  if (status.errors && status.errors.length) {
+    errors.hidden = false;
+    list.replaceChildren(...status.errors.map((error) => el("li", {}, error)));
+  } else {
+    errors.hidden = true;
+    list.replaceChildren();
+  }
 }
 
 function renderPair(account, pair, editable) {
@@ -686,8 +752,7 @@ $("autostart").addEventListener("change", async (event) => {
   }
 });
 
-$("sync-now").addEventListener("click", async () => {
-  const button = $("sync-now");
+async function triggerSync(button) {
   button.disabled = true;
   try {
     await invoke("sync_now");
@@ -697,9 +762,15 @@ $("sync-now").addEventListener("click", async () => {
   } finally {
     setTimeout(() => {
       button.disabled = false;
+      refreshSyncStatus();
     }, 600);
   }
-});
+}
+
+$("sync-now").addEventListener("click", () => triggerSync($("sync-now")));
+$("sync-status-now").addEventListener("click", () =>
+  triggerSync($("sync-status-now")),
+);
 
 $("theme").addEventListener("click", () => {
   applyTheme(currentTheme() === "dark" ? "light" : "dark");
@@ -724,3 +795,5 @@ if (savedTheme === "light" || savedTheme === "dark") {
 updateThemeButton();
 
 refresh().catch((error) => setMsg(String(error), "err"));
+refreshSyncStatus();
+setInterval(refreshSyncStatus, 3000);

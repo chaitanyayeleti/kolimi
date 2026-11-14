@@ -208,11 +208,6 @@ test("web file list sorts, filters, selects, and shows details", async ({
   request,
 }) => {
   await login(page);
-  await page.keyboard.press("Control+k");
-  await expect(
-    page.getByLabel("Search files", { exact: true }),
-  ).toBeFocused();
-
   const folder = `phase1-${Date.now()}`;
 
   page.once("dialog", (dialog) => dialog.accept(folder));
@@ -221,6 +216,14 @@ test("web file list sorts, filters, selects, and shows details", async ({
     .getByRole("button", { name: "New folder", exact: true })
     .click();
   await (await row(page, folder)).locator(".file-open").click();
+  await expect(page).toHaveURL(/#\/files/);
+
+  await page.goBack();
+  await expect(page.getByText(folder, { exact: true })).toBeVisible();
+  await (await row(page, folder)).locator(".file-open").click();
+  await expect(
+    page.getByText("This folder is empty", { exact: true }),
+  ).toBeVisible();
 
   await upload(page, "alpha.txt", "alpha");
   await upload(page, "beta.txt", "beta");

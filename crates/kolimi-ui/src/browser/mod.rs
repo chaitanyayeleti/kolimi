@@ -4,6 +4,7 @@ use kolimi_crypto::MasterKey;
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
 use wasm_bindgen::{JsCast, closure::Closure};
 
@@ -34,14 +35,67 @@ mod shell;
 mod types;
 mod uploads;
 
+/// Parses `#/files/<path>`, `#/trash`, `#/settings` and `#/admin`.
+fn route_from_hash() -> Option<(Tab, String)> {
+    let hash = web_sys::window()?.location().hash().ok()?;
+    let raw = hash.strip_prefix('#')?;
+    if raw.is_empty() {
+        return None;
+    }
+    let decoded = percent_decode_str(raw).decode_utf8_lossy();
+    let route = decoded.strip_prefix('/').unwrap_or(&decoded);
+    let (head, rest) = route.split_once('/').unwrap_or((route, ""));
+    match head {
+        "files" => Some((
+            Tab::Files,
+            if rest.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{rest}")
+            },
+        )),
+        "trash" => Some((Tab::Trash, "/".to_string())),
+        "settings" => Some((Tab::Settings, "/".to_string())),
+        "admin" => Some((Tab::Admin, "/".to_string())),
+        _ => None,
+    }
+}
+
+fn route_hash(tab: Tab, path: &str) -> String {
+    match tab {
+        Tab::Files => format!("#/files{}", encode_path(path)),
+        Tab::Trash => "#/trash".to_string(),
+        Tab::Settings => "#/settings".to_string(),
+        Tab::Admin => "#/admin".to_string(),
+    }
+}
+
+fn set_route_hash(route: &str) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    if window.location().hash().ok().as_deref() != Some(route) {
+        let _ = window.location().set_hash(route);
+    }
+}
+
 #[component]
 pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
-    let path = RwSignal::new("/".to_string());
+    let initial_route = route_from_hash();
+    let initial_tab = initial_route
+        .as_ref()
+        .map(|(tab, _)| *tab)
+        .unwrap_or(Tab::Files);
+    let initial_path = initial_route
+        .as_ref()
+        .map(|(_, path)| path.clone())
+        .unwrap_or_else(|| "/".to_string());
+    let path = RwSignal::new(initial_path.clone());
     let entries = RwSignal::new(Vec::<Entry>::new());
     let parent = RwSignal::new(Option::<String>::None);
     let error = RwSignal::new(String::new());
     let notice = RwSignal::new(String::new());
-    let tab = RwSignal::new(Tab::Files);
+    let tab = RwSignal::new(initial_tab);
     let trash = RwSignal::new(Vec::<TrashItem>::new());
     let share_target = RwSignal::new(Option::<Entry>::None);
     let versions_for = RwSignal::new(Option::<Entry>::None);
@@ -50,31 +104,6 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let query = RwSignal::new(String::new());
     let results = RwSignal::new(Vec::<SearchHit>::new());
     let search_active = RwSignal::new(false);
-    let search_shortcut =
-        window_event_listener(ev::keydown, move |event: web_sys::KeyboardEvent| {
-            if !(event.ctrl_key() || event.meta_key()) || !event.key().eq_ignore_ascii_case("k") {
-                return;
-            }
-            let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-                return;
-            };
-            if document
-                .query_selector("[role='dialog']")
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                return;
-            }
-            if let Some(input) = document
-                .get_element_by_id("file-search")
-                .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
-            {
-                event.prevent_default();
-                let _ = input.focus();
-            }
-        });
-    on_cleanup(move || search_shortcut.remove());
     let settings_tab = RwSignal::new(SettingsTab::Account);
     let is_admin = RwSignal::new(false);
     let username = RwSignal::new(String::new());
@@ -90,6 +119,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         settings_tab.set(settings);
         search_active.set(false);
         tab.set(Tab::Settings);
+        set_route_hash(&route_hash(Tab::Settings, "/"));
         nav_open.set(false);
     });
     let open_encryption = Callback::new(move |_: ()| {
@@ -185,7 +215,18 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
 
     // Navigation is a signal: setting `nav` loads it, so a missing folder can
     // fall back to the root without recursive closures.
-    let nav = RwSignal::new("/".to_string());
+    let nav = RwSignal::new(initial_path);
+    let hash_listener = window_event_listener(ev::hashchange, move |_| {
+        let (next_tab, next_path) = route_from_hash().unwrap_or((Tab::Files, "/".to_string()));
+        search_active.set(false);
+        if next_tab == Tab::Files {
+            tab.set(Tab::Files);
+            nav.set(next_path);
+        } else {
+            tab.set(next_tab);
+        }
+    });
+    on_cleanup(move || hash_listener.remove());
     let load = move |next: String| nav.set(next);
     let undo_trash = Callback::new(move |_: ()| {
         if let Some((_, id)) = undo.get_untracked() {
@@ -267,6 +308,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                             .unwrap_or(&requested)
                             .to_string(),
                     );
+                    if tab.get_untracked() == Tab::Files {
+                        set_route_hash(&route_hash(Tab::Files, &path.get_untracked()));
+                    }
                     error.set(String::new());
                 }
                 Ok(r) if r.status == 401 => {
@@ -308,6 +352,11 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
             }
         });
     };
+    Effect::new(move |_| {
+        if tab.get() == Tab::Trash {
+            load_trash();
+        }
+    });
 
     // Toasts fade themselves out. A timer only clears the toast if it still
     // shows the message it was scheduled for, so a stale timer cannot wipe a
@@ -570,7 +619,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let nav_trash = Callback::new(move |_: ()| {
         search_active.set(false);
         tab.set(Tab::Trash);
-        load_trash();
+        set_route_hash(&route_hash(Tab::Trash, "/"));
         nav_open.set(false);
     });
     let nav_settings = Callback::new(move |_: ()| {
@@ -579,6 +628,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let nav_admin = Callback::new(move |_: ()| {
         search_active.set(false);
         tab.set(Tab::Admin);
+        set_route_hash(&route_hash(Tab::Admin, "/"));
         nav_open.set(false);
     });
     let nav_theme = Callback::new(move |_: ()| toggle_theme());

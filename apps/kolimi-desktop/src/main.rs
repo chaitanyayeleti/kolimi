@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -54,14 +54,11 @@ static CLOSE_TIP_SHOWN: AtomicBool = AtomicBool::new(false);
 /// Whether the "encryption is locked" tip has been shown this session.
 static LOCKED_TIP_SHOWN: AtomicBool = AtomicBool::new(false);
 
-/// Script injected into the server webview. Adds a **Sync folders** button
-/// that asks the native shell to open the **Accounts & Sync** window, so
-/// synced folders are reachable from inside the app and not only via the
-/// tray. When the server UI's toolbar exists the button is placed there so
-/// it aligns with the other controls; otherwise it falls back to a floating
-/// pill at the bottom-**center** (the bottom-right corner belongs to the
-/// upload tray and toasts). It navigates to a sentinel path that
-/// `on_navigation` intercepts — no remote IPC, no extra capabilities.
+/// Script injected into the server webview. Adds a **Sync** status item to
+/// the sidebar and an offline banner. The Rust sync loop publishes state via
+/// `window.__kolimiDesktopSync`; this script never calls Tauri IPC, so the
+/// remote server origin gets no extra capabilities. Clicking the item
+/// navigates to a sentinel path that `on_navigation` intercepts.
 const DESKTOP_INIT_JS: &str = r#"
 (function () {
   if (window.__kolimiDesktop) return;
@@ -69,42 +66,123 @@ const DESKTOP_INIT_JS: &str = r#"
 
   var SENTINEL = '/__kolimi/open-settings';
 
-  function makeButton() {
-    var b = document.createElement('button');
-    b.id = 'kolimi-sync-button';
-    b.type = 'button';
-    b.title = 'Open Accounts & Sync';
-    b.textContent = '\u21C4 Sync folders';
-    b.addEventListener('click', function () { window.location.href = SENTINEL; });
-    return b;
+  function statusData() {
+    return window.__kolimiDesktopSync || null;
+  }
+
+  function badgeClass(state) {
+    if (state === 'error') return 'badge danger';
+    if (state === 'conflict' || state === 'locked' || state === 'paused' || state === 'syncing') {
+      return 'badge warn';
+    }
+    if (state === 'no_account') return 'badge muted';
+    return 'badge ok';
+  }
+
+  function relativeTime(ms) {
+    if (!ms) return '';
+    var seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (seconds < 45) return 'just now';
+    if (seconds < 3600) return Math.round(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.round(seconds / 3600) + 'h ago';
+    return Math.round(seconds / 86400) + 'd ago';
+  }
+
+  function statusLabel(data) {
+    if (!data) return 'idle';
+    if (data.state === 'syncing') return 'syncing';
+    if (data.state === 'paused') return 'paused';
+    if (data.state === 'locked') return 'locked';
+    if (data.state === 'error') return 'error';
+    if (data.state === 'conflict') return 'conflicts';
+    if (data.state === 'no_account') return 'set up';
+    if (data.synced_at) return relativeTime(data.synced_at);
+    return 'idle';
+  }
+
+  function makeStatus() {
+    var button = document.createElement('button');
+    button.id = 'kolimi-sync-status';
+    button.type = 'button';
+    button.className = 'nav-item kolimi-sync-status';
+    button.title = 'Open Accounts & Sync';
+    button.innerHTML =
+      '<span class="icon" aria-hidden="true">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+      'stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/></svg></span>' +
+      '<span>Sync</span><span class="kolimi-sync-state badge ok">idle</span>';
+    button.addEventListener('click', function () {
+      window.location.href = SENTINEL;
+    });
+    return button;
+  }
+
+  function ensureOfflineBanner() {
+    var banner = document.getElementById('kolimi-offline-banner');
+    if (banner) return banner;
+    banner = document.createElement('div');
+    banner.id = 'kolimi-offline-banner';
+    banner.className = 'toast error';
+    banner.setAttribute('role', 'alert');
+    banner.style.position = 'fixed';
+    banner.style.left = '1rem';
+    banner.style.bottom = '1rem';
+    banner.style.zIndex = '9999';
+    banner.style.maxWidth = 'min(92vw, 28rem)';
+    banner.innerHTML =
+      '<span class="toast-msg">Server unreachable — changes will sync when it returns.</span>' +
+      '<button type="button" class="icon-btn" aria-label="Retry">\u21BB</button>';
+    banner.querySelector('button').addEventListener('click', function () {
+      window.location.reload();
+    });
+    document.body.appendChild(banner);
+    return banner;
+  }
+
+  function update() {
+    if (!document.body) return;
+    var data = statusData();
+    var state = data && data.state ? data.state : 'idle';
+    var button = document.getElementById('kolimi-sync-status');
+    if (button) {
+      var label = statusLabel(data);
+      var badge = button.querySelector('.kolimi-sync-state');
+      badge.textContent = label;
+      badge.className = 'kolimi-sync-state ' + badgeClass(state);
+      button.setAttribute(
+        'aria-label',
+        'Sync status: ' + label + '. Open Accounts & Sync.'
+      );
+      button.title = data && data.detail ? data.detail : 'Open Accounts & Sync';
+    }
+    var offline = (data && data.offline) || !navigator.onLine;
+    if (offline) {
+      ensureOfflineBanner();
+    } else {
+      var banner = document.getElementById('kolimi-offline-banner');
+      if (banner) banner.remove();
+    }
   }
 
   function place() {
     if (!document.body) return;
-    var el = document.getElementById('kolimi-sync-button');
-    var host = document.querySelector('.topbar-actions');
-    if (host) {
-      if (el && el.parentElement === host) return;
-      if (el) el.remove();
-      var b = makeButton();
-      b.className = 'button ghost';
-      host.appendChild(b);
-      return;
+    var host = document.querySelector('.sidebar .nav');
+    if (host && !document.getElementById('kolimi-sync-status')) {
+      host.appendChild(makeStatus());
     }
-    if (el && el.classList.contains('kolimi-floating')) return;
-    if (el) el.remove();
-    var f = makeButton();
-    f.classList.add('kolimi-floating');
-    f.style.cssText = 'position:fixed;z-index:2147483647;left:50%;transform:translateX(-50%);bottom:16px;padding:9px 14px;border:0;border-radius:999px;background:#4f46e5;color:#fff;font:600 13px system-ui,-apple-system,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.35);cursor:pointer';
-    document.body.appendChild(f);
+    update();
   }
 
-  function start() {
+  window.addEventListener('offline', update);
+  window.addEventListener('online', update);
+  window.addEventListener('hashchange', place);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', place);
+  } else {
     place();
-    setInterval(place, 1000);
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
-  else start();
+  setInterval(place, 1000);
 })();
 "#;
 
@@ -426,9 +504,71 @@ mod keyctl {
 // State + paths
 // ---------------------------------------------------------------------------
 
+/// Current sync state, shared by the tray, the Accounts & Sync window and the
+/// status chip injected into the remote web UI.
+#[derive(Debug, Clone, Serialize)]
+struct SyncStatus {
+    state: String,
+    detail: String,
+    synced_at: Option<i64>,
+    conflicts: u64,
+    errors: Vec<String>,
+    offline: bool,
+}
+
+impl Default for SyncStatus {
+    fn default() -> Self {
+        Self {
+            state: "idle".to_string(),
+            detail: "No sync has run yet.".to_string(),
+            synced_at: None,
+            conflicts: 0,
+            errors: Vec::new(),
+            offline: false,
+        }
+    }
+}
+
+impl SyncStatus {
+    fn tray_text(&self) -> String {
+        match self.state.as_str() {
+            "syncing" => {
+                if self.detail.is_empty() {
+                    "Syncing…".to_string()
+                } else {
+                    self.detail.clone()
+                }
+            }
+            "paused" => "Paused".to_string(),
+            "locked" => "Encryption locked — open Accounts & Sync to unlock".to_string(),
+            "error" => format!("Sync failed: {}", self.detail),
+            "conflict" => self.detail.clone(),
+            "no_account" => "No account configured".to_string(),
+            _ => {
+                if self.detail.is_empty() {
+                    "Idle".to_string()
+                } else {
+                    self.detail.clone()
+                }
+            }
+        }
+    }
+
+    fn icon_state(&self) -> &'static str {
+        match self.state.as_str() {
+            "syncing" => "syncing",
+            "error" | "conflict" => "error",
+            "locked" => "locked",
+            "paused" => "paused",
+            _ => "idle",
+        }
+    }
+}
+
 struct DesktopState {
     settings: Mutex<Settings>,
     status_item: MenuItem<tauri::Wry>,
+    status: Mutex<SyncStatus>,
     syncing: AtomicBool,
     paused: AtomicBool,
 }
@@ -707,6 +847,60 @@ fn set_tray_icon(app: &AppHandle, state: &str) {
     }
 }
 
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn current_status(app: &AppHandle) -> SyncStatus {
+    app.state::<DesktopState>()
+        .status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+fn push_status_to_main(app: &AppHandle, status: &SyncStatus) {
+    if let Some(window) = app.get_webview_window("main")
+        && let Ok(json) = serde_json::to_string(status)
+    {
+        let _ = window.eval(format!("window.__kolimiDesktopSync = {json};"));
+    }
+}
+
+fn set_sync_status(app: &AppHandle, status: SyncStatus) {
+    let status_item = {
+        let state = app.state::<DesktopState>();
+        *state
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = status.clone();
+        state.status_item.clone()
+    };
+    let _ = status_item.set_text(status.tray_text());
+    set_tray_icon(app, status.icon_state());
+    push_status_to_main(app, &status);
+}
+
+fn looks_offline(errors: &[String]) -> bool {
+    errors.iter().any(|error| {
+        let error = error.to_ascii_lowercase();
+        [
+            "cannot reach server",
+            "error sending request",
+            "connection refused",
+            "dns error",
+            "network is unreachable",
+            "timed out",
+            "connection reset",
+        ]
+        .iter()
+        .any(|needle| error.contains(needle))
+    })
+}
+
 /// Validate credentials against the server (any authenticated endpoint).
 async fn validate_login(server: &str, username: &str, password: &str) -> Result<(), String> {
     let url = format!("{}/api/me/usage", server.trim_end_matches('/'));
@@ -740,6 +934,7 @@ fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
         let _ = window.eval(format!("window.location.href = '{escaped}'"));
         let _ = window.show();
         let _ = window.set_focus();
+        push_status_to_main(app, &current_status(app));
         // Opening the app should reflect the server right away.
         run_sync(app.clone());
         return Ok(());
@@ -755,6 +950,10 @@ fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
         .title("Kolimi")
         .inner_size(1100.0, 720.0)
         .initialization_script(DESKTOP_INIT_JS)
+        .on_page_load(|window, _| {
+            let app = window.app_handle();
+            push_status_to_main(app, &current_status(app));
+        })
         .on_navigation(move |url| {
             if url.path() == SETTINGS_SENTINEL {
                 open_settings(&nav_handle);
@@ -798,6 +997,8 @@ fn open_main(app: &AppHandle, server: &str) -> Result<(), String> {
         .build()
         .map_err(|error| error.to_string())?;
 
+    push_status_to_main(app, &current_status(app));
+
     // Closing the window hides it to the tray so background sync keeps
     // running. The tray's "Quit" is the way to actually exit.
     let handle = window.clone();
@@ -838,25 +1039,40 @@ fn open_settings(app: &AppHandle) {
 // ---------------------------------------------------------------------------
 
 fn run_sync(app: AppHandle) {
-    let (settings, status_item) = {
+    let settings = {
         let state = app.state::<DesktopState>();
-        if state.paused.load(Ordering::SeqCst) || state.syncing.swap(true, Ordering::SeqCst) {
+        if state.paused.load(Ordering::SeqCst) {
+            set_sync_status(
+                &app,
+                SyncStatus {
+                    state: "paused".to_string(),
+                    detail: "Syncing paused".to_string(),
+                    ..Default::default()
+                },
+            );
             return;
         }
-        (
-            state
-                .settings
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-            state.status_item.clone(),
-        )
+        if state.syncing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     };
     if settings.accounts.is_empty() {
-        let _ = status_item.set_text("No account configured");
         app.state::<DesktopState>()
             .syncing
             .store(false, Ordering::SeqCst);
+        set_sync_status(
+            &app,
+            SyncStatus {
+                state: "no_account".to_string(),
+                detail: "Add an account in Accounts & Sync".to_string(),
+                ..Default::default()
+            },
+        );
         return;
     }
 
@@ -887,8 +1103,14 @@ fn run_sync(app: AppHandle) {
         }
     }
 
-    let _ = status_item.set_text("Syncing…");
-    set_tray_icon(&app, "syncing");
+    set_sync_status(
+        &app,
+        SyncStatus {
+            state: "syncing".to_string(),
+            detail: format!("Syncing {} folder(s)…", jobs.len()),
+            ..Default::default()
+        },
+    );
     let app_handle = app.clone();
     let accounts = settings.accounts.clone();
     tauri::async_runtime::spawn(async move {
@@ -950,18 +1172,38 @@ fn run_sync(app: AppHandle) {
                 propagate_account_files(account);
             }
         }
-        let state = app_handle.state::<DesktopState>();
-        state.syncing.store(false, Ordering::SeqCst);
+        let previous = current_status(&app_handle);
+        app_handle
+            .state::<DesktopState>()
+            .syncing
+            .store(false, Ordering::SeqCst);
         if !errors.is_empty() {
             let first = errors.first().cloned().unwrap_or_default();
-            let _ = state.status_item.set_text(format!("Sync failed: {first}"));
-            set_tray_icon(&app_handle, "error");
-            notify_user("Kolimi sync problem", &errors.join("\n"));
+            let offline = looks_offline(&errors);
+            let errors_text = errors.join("\n");
+            set_sync_status(
+                &app_handle,
+                SyncStatus {
+                    state: "error".to_string(),
+                    detail: first.clone(),
+                    conflicts,
+                    errors,
+                    offline,
+                    ..Default::default()
+                },
+            );
+            if previous.state != "error" || previous.detail != first {
+                notify_user("Kolimi sync problem", &errors_text);
+            }
         } else if !locked.is_empty() {
-            let _ = state
-                .status_item
-                .set_text("Encryption locked — open Accounts & Sync to unlock");
-            set_tray_icon(&app_handle, "locked");
+            set_sync_status(
+                &app_handle,
+                SyncStatus {
+                    state: "locked".to_string(),
+                    detail: format!("Encrypted folders locked: {}", locked.join(", ")),
+                    ..Default::default()
+                },
+            );
             if !LOCKED_TIP_SHOWN.swap(true, Ordering::SeqCst) {
                 notify_user(
                     "Kolimi",
@@ -970,13 +1212,33 @@ fn run_sync(app: AppHandle) {
             }
         } else {
             let failed_note = if failed > 0 {
-                format!(" ✗{failed} skipped")
+                format!(" · {failed} skipped")
             } else {
                 String::new()
             };
-            let _ = state.status_item.set_text(format!(
-                "Synced {total} dir(s): ↑{pushed} ↓{pulled} ⚠{conflicts}{failed_note}"
-            ));
+            let synced_detail = format!(
+                "Synced {total} folder{}: ↑{pushed} ↓{pulled}{failed_note}",
+                if total == 1 { "" } else { "s" }
+            );
+            let (state, detail) = if conflicts > 0 {
+                (
+                    "conflict".to_string(),
+                    format!("{conflicts} conflict(s) — local edits kept as .conflict-* files"),
+                )
+            } else {
+                ("idle".to_string(), synced_detail)
+            };
+            set_sync_status(
+                &app_handle,
+                SyncStatus {
+                    state,
+                    detail,
+                    synced_at: Some(now_ms()),
+                    conflicts,
+                    errors: Vec::new(),
+                    offline: false,
+                },
+            );
             if !approved.is_empty() {
                 // The "wasn't you?" notice for automatic approvals.
                 notify_user(
@@ -987,14 +1249,11 @@ fn run_sync(app: AppHandle) {
                     ),
                 );
             }
-            if conflicts > 0 {
-                set_tray_icon(&app_handle, "error");
+            if conflicts > 0 && (previous.state != "conflict" || previous.conflicts != conflicts) {
                 notify_user(
                     "Kolimi sync",
                     &format!("{conflicts} conflict(s) — local edits kept as .conflict-* files"),
                 );
-            } else {
-                set_tray_icon(&app_handle, "idle");
             }
         }
     });
@@ -1029,6 +1288,12 @@ struct AccountView {
 struct SettingsView {
     accounts: Vec<AccountView>,
     autostart: bool,
+}
+
+/// The current sync state for the Accounts & Sync window.
+#[tauri::command]
+fn get_sync_status(app: AppHandle) -> SyncStatus {
+    current_status(&app)
 }
 
 /// The current settings, with a `signed_in` flag per account (no secrets).
@@ -1889,6 +2154,7 @@ fn main() {
         }))
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            get_sync_status,
             sign_in,
             sign_out,
             remove_account,
@@ -2012,15 +2278,16 @@ fn main() {
                         } else {
                             "Pause syncing"
                         });
-                        let _ = app.state::<DesktopState>().status_item.set_text(if paused {
-                            "Paused"
-                        } else {
-                            "Idle"
-                        });
                         if paused {
-                            set_tray_icon(app, "paused");
+                            set_sync_status(
+                                app,
+                                SyncStatus {
+                                    state: "paused".to_string(),
+                                    detail: "Syncing paused".to_string(),
+                                    ..Default::default()
+                                },
+                            );
                         } else {
-                            set_tray_icon(app, "idle");
                             run_sync(app.clone());
                         }
                     }
@@ -2052,6 +2319,7 @@ fn main() {
             app.manage(DesktopState {
                 settings: Mutex::new(settings),
                 status_item: status,
+                status: Mutex::new(SyncStatus::default()),
                 syncing: AtomicBool::new(false),
                 paused: AtomicBool::new(false),
             });
@@ -2099,6 +2367,41 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_status_maps_to_tray_and_chip_states() {
+        let idle = SyncStatus {
+            state: "idle".to_string(),
+            detail: "Synced 2 folders: ↑3 ↓1".to_string(),
+            synced_at: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(idle.tray_text(), "Synced 2 folders: ↑3 ↓1");
+        assert_eq!(idle.icon_state(), "idle");
+
+        let failed = SyncStatus {
+            state: "error".to_string(),
+            detail: "cannot reach server".to_string(),
+            offline: true,
+            ..Default::default()
+        };
+        assert!(failed.tray_text().contains("Sync failed"));
+        assert_eq!(failed.icon_state(), "error");
+        assert!(looks_offline(&[
+            "alice@example: cannot reach server".to_string()
+        ]));
+        assert!(!looks_offline(&[
+            "alice@example: invalid password".to_string()
+        ]));
+    }
+
+    #[test]
+    fn desktop_init_script_has_status_and_offline_hooks() {
+        assert!(DESKTOP_INIT_JS.contains("kolimi-sync-status"));
+        assert!(DESKTOP_INIT_JS.contains("kolimi-offline-banner"));
+        assert!(DESKTOP_INIT_JS.contains("__kolimiDesktopSync"));
+        assert!(!DESKTOP_INIT_JS.contains("Sync folders"));
+    }
 
     #[test]
     #[cfg(target_os = "linux")]

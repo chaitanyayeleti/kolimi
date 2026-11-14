@@ -36,6 +36,21 @@
       <span class="pill" id="account-count">0 accounts</span>
     </section>
 
+    <section class="card sync-card" aria-live="polite">
+      <div class="sync-card-main">
+        <span class="sync-dot" id="sync-dot" aria-hidden="true"></span>
+        <div class="sync-copy">
+          <strong id="sync-title">Sync idle</strong>
+          <small id="sync-detail">No sync has run yet.</small>
+        </div>
+      </div>
+      <button class="btn small ghost" id="sync-status-now" type="button">Sync now</button>
+      <details class="sync-errors" id="sync-errors" hidden>
+        <summary>Sync details</summary>
+        <ul id="sync-error-list"></ul>
+      </details>
+    </section>
+
     <div id="accounts" class="stack"></div>
 
     <section class="card add-account-card">

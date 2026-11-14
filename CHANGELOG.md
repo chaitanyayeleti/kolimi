@@ -25,8 +25,14 @@ follow [Semantic Versioning](https://semver.org/).
 - The file browser now has a dense sortable/filterable list with column
   headers, size and modified columns, visible selection checkboxes,
   select-all, and a single per-row actions menu. Folders stay above files.
-  **Ctrl/Cmd+K** focuses search, and the context menu offers a file-details
-  drawer with quick actions.
+  The context menu offers a file-details drawer with quick actions, and the
+  current folder is reflected in the URL so browser back/forward works.
+- Desktop: the main window gets a sidebar **Sync** status item
+  (idle/syncing/paused/error/locked/conflicts), an offline banner, and a
+  **Server unreachable** retry path. Accounts & Sync now shows a live sync
+  status card with last-sync time, conflict counts and expandable error
+  details, plus a first-run checklist. Sync failures and conflicts notify
+  once per state change instead of every interval.
 
 ## [0.4.8] - 2026-11-14
 

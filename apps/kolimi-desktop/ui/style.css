@@ -223,6 +223,89 @@ button:disabled {
   white-space: nowrap;
 }
 
+.sync-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.sync-card-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sync-dot {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.sync-dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent);
+}
+
+.sync-dot.warn {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent);
+}
+
+.sync-dot.err {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+.sync-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sync-copy strong {
+  font-size: 14px;
+}
+
+.sync-copy small {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.sync-errors {
+  flex-basis: 100%;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.sync-errors summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.sync-errors ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.onboarding-steps {
+  margin: 8px 0 14px;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 .stack {
   display: flex;
   flex-direction: column;
