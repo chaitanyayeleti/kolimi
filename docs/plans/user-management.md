@@ -1,6 +1,6 @@
 # User management — plan
 
-Status: **complete** · Date: 2026-11-14 · Phases 1–4 landed on `main`
+Status: **complete** · Date: 2026-11-14 · Phases 1–5 landed on `main`
 Builds on: [operations.md](../operations.md), [reference.md](../reference.md),
 [red-team report](../audit/redteam-2026-11-14.md)
 
@@ -43,7 +43,7 @@ web UI without weakening the current invariants:
 | Group management | Yes | Yes | Yes |
 | Audit log | Yes | `audit list` / `verify` | Yes, filters + verify |
 
-Phases 1–4 are implemented. The Admin page has **Users**, **Invites**,
+Phases 1–5 are implemented. The Admin page has **Users**, **Invites**,
 **Groups**, and **Audit** tabs; self-service password, profile, and session
 controls live under **Settings → Account**.
 
@@ -125,8 +125,8 @@ The recover payload is:
 
 When `password` is omitted, generate a random password and return it once with
 `Cache-Control: no-store`. Recovery and force sign-out require
-re-authentication. Extending that requirement to the existing `PATCH` and
-`DELETE /api/users/{username}` routes is a follow-up hardening item.
+re-authentication. Phase 5 later extended the same requirement to the
+existing `PATCH` and `DELETE /api/users/{username}` routes.
 
 ### Phase 3 — groups and audit (P1) — landed (Groups/Audit tabs)
 
@@ -181,6 +181,22 @@ Implementation notes:
 - `display_name` and `email` are optional, visible in account/admin views,
   and editable via `PATCH /api/me`; email is not used for authentication or
   delivery.
+
+### Phase 5 — hardening closeout (P1) — landed
+
+- `PATCH` and `DELETE /api/users/{username}` now require a fresh
+  `X-Reauth-Token`, like recovery and force sign-out. The UI prompts for the
+  admin password or a second factor before quota, role, access, or deletion
+  changes.
+- Password recovery requires the admin to type the target username in
+  addition to re-authenticating.
+- Admin recovery requests have their own per-client rate limit.
+- Login and session-list responses use `Cache-Control: no-store`.
+- Sessions have an optional user-editable label (migration 0029) exposed via
+  `PATCH /api/me/sessions/{id}` and rendered in Settings → Account.
+
+The read-only auditor role remains intentionally unimplemented; adding it
+would be an RBAC expansion and needs its own threat model.
 
 ## 6. Data model changes
 
@@ -254,7 +270,7 @@ password with the encryption passphrase.
 ## 8. Security and invariants
 
 - Re-authenticate before: password change, admin recovery, user deletion,
-  force sign-out, and grant/revoke admin.
+  force sign-out, and every user `PATCH` (quota, role, disable/enable).
 - Preserve the last-enabled-admin guard in `set_admin`, `set_disabled`, and
   `delete_user`; exercise every new path through those methods.
 - Preserve the passwordless-account last-passkey guard.
@@ -279,8 +295,11 @@ password with the encryption passphrase.
   - session listing never exposes token hashes;
   - group changes are audited;
   - invite creation/acceptance/revocation, expiry, and single-use behavior;
-  - forced password rotation blocks the API until the password is replaced.
-- DB tests for `last_login_at`, session metadata, invites, and the
+  - forced password rotation blocks the API until the password is replaced;
+  - user `PATCH`/`DELETE` reject a missing re-auth token;
+  - recovery is rate-limited and session responses are `no-store`;
+  - session labels are scoped to their owner.
+- DB tests for `last_login_at`, session metadata/labels, invites, and the
   last-admin race.
 - Browser E2E: create user, recover password, revoke a session, disable/delete,
   search/pagination.
@@ -290,8 +309,10 @@ password with the encryption passphrase.
 ## 10. Rollout and docs
 
 - New API routes are additive. Existing response shapes stay stable.
-  Recovery and force sign-out require re-authentication; extending that to
-  the existing `PATCH`/`DELETE` routes is a separate compatibility change.
+  Recovery, force sign-out, and the existing user `PATCH`/`DELETE` routes
+  now require `X-Reauth-Token`; callers must obtain a fresh token from
+  `POST /api/reauth`. This is documented in the changelog as a deliberate
+  compatibility change.
 - Refactor `admin::recover_user` to accept an actor so CLI recovery still
   records `cli` and HTTP recovery records the admin.
 - Update [operations.md](../operations.md) and [reference.md](../reference.md)

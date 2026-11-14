@@ -104,6 +104,10 @@ test("web settings tabs and the passkeys panel", async ({ page }) => {
     modal.getByText("Active sessions", { exact: true }),
   ).toBeVisible();
   await expect(modal.getByText("this device", { exact: true })).toBeVisible();
+  await modal.getByRole("button", { name: "Rename", exact: true }).first().click();
+  await modal.getByLabel("Session label", { exact: true }).fill("E2E laptop");
+  await modal.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(modal.getByText("E2E laptop", { exact: false })).toBeVisible();
 
   await modal.getByRole("tab", { name: "Passkeys", exact: true }).click();
   await expect(
@@ -138,6 +142,15 @@ test("web admin page lists and inspects users", async ({ page }) => {
   await expect(
     modal.getByText("Storage quota", { exact: true }),
   ).toBeVisible();
+
+  // Recovery requires typing the target username before confirmation.
+  await modal.getByRole("button", { name: "Reset password", exact: true }).click();
+  const reauth = modal.locator(".reauth");
+  await reauth.getByLabel("Username", { exact: true }).fill("wrong");
+  await expect(
+    reauth.getByRole("button", { name: "Confirm", exact: true }),
+  ).toBeDisabled();
+  await reauth.getByRole("button", { name: "Cancel", exact: true }).click();
   await modal.getByRole("button", { name: "Close", exact: true }).click();
 
   await page.getByRole("button", { name: "Create user", exact: true }).click();
@@ -169,6 +182,8 @@ test("web admin creates and deletes a user", async ({ page }) => {
   ).toBeVisible();
   await detail.getByLabel("Username", { exact: true }).fill(username);
   await detail.getByRole("button", { name: "Delete user", exact: true }).click();
+  await detail.getByLabel("Your password", { exact: true }).fill(PASS);
+  await detail.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByText(username, { exact: true })).toHaveCount(0);
 });
 

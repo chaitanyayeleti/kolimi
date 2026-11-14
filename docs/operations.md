@@ -34,15 +34,19 @@ Users manage their own login password and active sessions under
 **Settings → Account**. A password change asks for a fresh password or
 two-factor proof and revokes every other session; the current session stays
 signed in. The same panel edits the optional display name and email; email
-is informational only and is never used to sign in or send mail.
+is informational only and is never used to sign in or send mail. Sessions
+can be given a private label (for example “Work laptop”) to make revocation
+easier.
 
 Administrators use the **Admin** sidebar entry, which opens a user page with
 search, filters, and cursor paging. From there an admin can create a user,
 open a detail view, edit a quota, grant/revoke admin, disable/enable an
 account, force sign-out, or reset a password. Password recovery generates a
 new password once (or accepts one) and by default drops sessions, clears TOTP
-and removes passkeys. Recovery and force sign-out require the admin's own
-password or a two-factor code.
+and removes passkeys. Recovery, force sign-out, and every user edit or
+deletion (quota, role, disable/enable, delete) require the admin's own
+password or a two-factor code. Password recovery also asks the admin to type
+the target username.
 
 The **Groups** tab lists every group and its members and can create, delete,
 add, and remove. Group changes update share ACLs but do not rotate MLS keys;
@@ -97,18 +101,30 @@ two-factor from the **Passkeys** panel.
 The same operations are available to an authenticated administrator over
 HTTP (JSON API, `Authorization: Basic` or a session cookie):
 
+Mutation calls need a fresh, single-use re-authentication token. This helper
+fetches one; call it again for every PATCH or DELETE:
+
 ```sh
+reauth() {
+  curl -s -u admin:pw -X POST -H 'Content-Type: application/json' \
+    -d '{"password":"pw"}' https://…/api/reauth | jq -r .token
+}
+
 curl -u admin:pw https://cloud.example.com/api/users                 # list
 curl -u admin:pw -X POST -H 'Content-Type: application/json' \
   -d '{"username":"alice","password":"…"}' https://…/api/users      # create
 curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
+  -H "X-Reauth-Token: $(reauth)" \
   -d '{"disabled":true}' https://…/api/users/alice                   # disable
 curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
+  -H "X-Reauth-Token: $(reauth)" \
   -d '{"admin":true}' https://…/api/users/alice                      # grant admin
-curl -u admin:pw -X DELETE https://…/api/users/alice                 # delete
+curl -u admin:pw -X DELETE -H "X-Reauth-Token: $(reauth)" \
+  https://…/api/users/alice                                          # delete
 curl -u admin:pw 'https://…/api/users?limit=100'                     # paginated list
 curl -u admin:pw https://…/api/users/alice/usage                     # fresh usage
 curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
+  -H "X-Reauth-Token: $(reauth)" \
   -d '{"quota_bytes":10737418240}' https://…/api/users/alice          # set quota
 ```
 

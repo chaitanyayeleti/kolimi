@@ -1758,10 +1758,14 @@ async fn admin_users_list_sorts_filters_and_warns_on_quota() {
 
     // Give both a small quota.
     for name in ["bob", "carol"] {
-        let patch = json_request(
+        let (status, body) = reauth(&server.app, &auth, PASS).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let token = body["token"].as_str().unwrap();
+        let patch = json_request_with_reauth(
             "PATCH",
             &format!("/api/users/{name}"),
-            Some(&auth),
+            &auth,
+            token,
             r#"{"quota_bytes":100}"#,
         );
         let (status, _, _) = send(&server.app, patch).await;

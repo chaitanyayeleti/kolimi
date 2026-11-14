@@ -63,6 +63,9 @@ pub(crate) fn AccountPanel() -> impl IntoView {
     let display_name = RwSignal::new(String::new());
     let email = RwSignal::new(String::new());
     let profile_busy = RwSignal::new(false);
+    let editing_session = RwSignal::new(Option::<i64>::None);
+    let session_label = RwSignal::new(String::new());
+    let label_busy = RwSignal::new(false);
 
     let load = Callback::new(move |_: ()| {
         spawn_local(async move {
@@ -185,6 +188,30 @@ pub(crate) fn AccountPanel() -> impl IntoView {
             profile_busy.set(false);
         });
     };
+
+    let save_label = Callback::new(move |id: i64| {
+        label_busy.set(true);
+        error.set(String::new());
+        notice.set(String::new());
+        spawn_local(async move {
+            let body = json!({ "label": session_label.get_untracked() });
+            match api::send_json("PATCH", &format!("/api/me/sessions/{id}"), &body).await {
+                Ok(response) if response.status == 200 => {
+                    notice.set("Session label saved.".to_string());
+                    editing_session.set(None);
+                    load.run(());
+                }
+                Ok(response) => error.set(
+                    response
+                        .error()
+                        .unwrap_or("Could not save the session label")
+                        .to_string(),
+                ),
+                Err(message) => error.set(message),
+            }
+            label_busy.set(false);
+        });
+    });
 
     let revoke = Callback::new(move |id: i64| {
         sessions_busy.set(true);
@@ -379,12 +406,24 @@ pub(crate) fn AccountPanel() -> impl IntoView {
         <ul class="shares">
             <For
                 each=move || sessions.get()
-                key=|session| session["id"].as_i64().unwrap_or(0)
+                key=|session| {
+                    (
+                        session["id"].as_i64().unwrap_or(0),
+                        session["label"].as_str().unwrap_or_default().to_string(),
+                    )
+                }
                 children=move |session| {
                     let id = session["id"].as_i64().unwrap_or(0);
                     let current = session["current"].as_bool().unwrap_or(false);
                     let ip = session["ip"].as_str().unwrap_or("unknown address");
-                    let agent = session["user_agent"].as_str().unwrap_or_default();
+                    let agent = session["user_agent"].as_str().unwrap_or_default().to_string();
+                    let label = session["label"].as_str().unwrap_or_default().to_string();
+                    let label_display = if label.is_empty() {
+                        device_label(&agent)
+                    } else {
+                        label.clone()
+                    };
+                    let label_for_edit = label.clone();
                     let last_seen = session["last_seen_at"].as_i64().unwrap_or(0);
                     let created = session["created_at"].as_i64().unwrap_or(0);
                     view! {
@@ -395,11 +434,13 @@ pub(crate) fn AccountPanel() -> impl IntoView {
                                 </span>
                                 <span class="file-body">
                                     <span class="file-name">
-                                        {device_label(agent)}
+                                        {label_display}
                                         {current
                                             .then(|| view! { <span class="badge">"this device"</span> })}
                                     </span>
                                     <span class="file-meta">
+                                        {(!label.is_empty())
+                                            .then(|| format!("{} · ", device_label(&agent)))}
                                         {format!("{ip} · last used {}", relative_time(last_seen))}
                                     </span>
                                     <span class="file-meta">
@@ -408,18 +449,61 @@ pub(crate) fn AccountPanel() -> impl IntoView {
                                 </span>
                             </span>
                             <span class="row-actions">
-                                {(!current)
-                                    .then(|| {
+                                {move || {
+                                    if editing_session.get() == Some(id) {
                                         view! {
+                                            <input
+                                                type="text"
+                                                aria-label="Session label"
+                                                placeholder="e.g. Work laptop"
+                                                prop:value=move || session_label.get()
+                                                on:input=move |ev| {
+                                                    session_label.set(event_target_value(&ev))
+                                                }
+                                            />
                                             <button
-                                                class="danger"
-                                                disabled=move || sessions_busy.get()
-                                                on:click=move |_| revoke.run(id)
+                                                disabled=move || label_busy.get()
+                                                on:click=move |_| save_label.run(id)
                                             >
-                                                "Revoke"
+                                                "Save"
+                                            </button>
+                                            <button
+                                                class="ghost"
+                                                on:click=move |_| editing_session.set(None)
+                                            >
+                                                "Cancel"
                                             </button>
                                         }
-                                    })}
+                                            .into_any()
+                                    } else {
+                                        view! {
+                                            <button
+                                                on:click={
+                                                    let label = label_for_edit.clone();
+                                                    move |_| {
+                                                        editing_session.set(Some(id));
+                                                        session_label.set(label.clone());
+                                                    }
+                                                }
+                                            >
+                                                "Rename"
+                                            </button>
+                                            {(!current)
+                                                .then(|| {
+                                                    view! {
+                                                        <button
+                                                            class="danger"
+                                                            disabled=move || sessions_busy.get()
+                                                            on:click=move |_| revoke.run(id)
+                                                        >
+                                                            "Revoke"
+                                                        </button>
+                                                    }
+                                                })}
+                                        }
+                                            .into_any()
+                                    }
+                                }}
                             </span>
                         </li>
                     }

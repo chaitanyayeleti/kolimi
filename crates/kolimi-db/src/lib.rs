@@ -181,6 +181,8 @@ pub struct Session {
     pub ip: Option<String>,
     /// Client `User-Agent` captured when the session was created.
     pub user_agent: Option<String>,
+    /// Optional user-editable label.
+    pub label: Option<String>,
 }
 
 /// A file or directory in a user's tree.
@@ -975,6 +977,22 @@ impl Db {
         .bind(now_millis())
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// Sets or clears a label on one session owned by `user_id`.
+    pub async fn set_session_label(
+        &self,
+        user_id: i64,
+        session_id: i64,
+        label: Option<&str>,
+    ) -> Result<bool, DbError> {
+        let result = sqlx::query("UPDATE sessions SET label = ? WHERE user_id = ? AND id = ?")
+            .bind(label)
+            .bind(user_id)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Deletes one session owned by `user_id`, returning whether it existed.
@@ -1936,7 +1954,21 @@ mod tests {
         assert_eq!(session.user_id, user.id);
         assert_eq!(session.ip.as_deref(), Some("127.0.0.1"));
         assert_eq!(session.user_agent.as_deref(), Some("test-agent"));
+        assert!(session.label.is_none());
         assert_eq!(db.list_user_sessions(user.id).await.unwrap().len(), 1);
+
+        assert!(
+            db.set_session_label(user.id, session.id, Some("Work laptop"))
+                .await
+                .unwrap()
+        );
+        let session = db.find_session(&token).await.unwrap().unwrap();
+        assert_eq!(session.label.as_deref(), Some("Work laptop"));
+        assert!(
+            !db.set_session_label(user.id + 1, session.id, None)
+                .await
+                .unwrap()
+        );
 
         db.touch_session(session.id, now_millis()).await.unwrap();
         assert!(db.delete_user_session(user.id, session.id).await.unwrap());

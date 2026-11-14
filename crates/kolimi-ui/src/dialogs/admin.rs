@@ -521,10 +521,16 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum PendingAction {
     Recover,
     Logout,
+    Patch {
+        body: Value,
+        notice: String,
+        description: &'static str,
+    },
+    Delete,
 }
 
 /// User detail, recovery, quota, and lifecycle actions.
@@ -545,6 +551,7 @@ fn UserDetailDialog(
     let pending = RwSignal::new(Option::<PendingAction>::None);
     let reauth_password = RwSignal::new(String::new());
     let reauth_code = RwSignal::new(String::new());
+    let recover_name = RwSignal::new(String::new());
 
     let load_name = username.clone();
     let load = Callback::new(move |_: ()| {
@@ -570,30 +577,6 @@ fn UserDetailDialog(
     });
     Effect::new(move |_| load.run(()));
 
-    let patch_name = username.clone();
-    let patch = Callback::new(move |(body, message): (Value, &'static str)| {
-        let name = patch_name.clone();
-        busy.set(true);
-        error.set(String::new());
-        spawn_local(async move {
-            match api::send_json("PATCH", &format!("/api/users/{}", encode(&name)), &body).await {
-                Ok(response) if response.status == 200 => {
-                    notice.set(message.to_string());
-                    load.run(());
-                    on_changed.run(());
-                }
-                Ok(response) => error.set(
-                    response
-                        .error()
-                        .unwrap_or("Could not update the user")
-                        .to_string(),
-                ),
-                Err(message) => error.set(message),
-            }
-            busy.set(false);
-        });
-    });
-
     let apply_quota = move |_| {
         let value = match parse_quota(&quota.get_untracked()) {
             Ok(value) => value,
@@ -602,37 +585,12 @@ fn UserDetailDialog(
                 return;
             }
         };
-        patch.run((json!({ "quota_bytes": value }), "Quota updated"));
+        pending.set(Some(PendingAction::Patch {
+            body: json!({ "quota_bytes": value }),
+            notice: "Quota updated".to_string(),
+            description: "update this storage quota",
+        }));
     };
-
-    let delete = Callback::new({
-        let username = username.clone();
-        move |_: ()| {
-            if delete_name.get_untracked() != username {
-                error.set("Type the username exactly to confirm deletion".to_string());
-                return;
-            }
-            let name = username.clone();
-            busy.set(true);
-            error.set(String::new());
-            spawn_local(async move {
-                match api::delete(&format!("/api/users/{}", encode(&name))).await {
-                    Ok(response) if response.status == 204 => {
-                        on_changed.run(());
-                        on_close.run(());
-                    }
-                    Ok(response) => error.set(
-                        response
-                            .error()
-                            .unwrap_or("Could not delete the user")
-                            .to_string(),
-                    ),
-                    Err(message) => error.set(message),
-                }
-                busy.set(false);
-            });
-        }
-    });
 
     let confirm_reauth = Callback::new({
         let username = username.clone();
@@ -640,6 +598,11 @@ fn UserDetailDialog(
             let Some(action) = pending.get_untracked() else {
                 return;
             };
+            if matches!(action, PendingAction::Recover) && recover_name.get_untracked() != username
+            {
+                error.set("Type the username exactly to confirm recovery".to_string());
+                return;
+            }
             let password = reauth_password.get_untracked();
             let code = reauth_code.get_untracked();
             if password.is_empty() && code.is_empty() {
@@ -650,32 +613,70 @@ fn UserDetailDialog(
             busy.set(true);
             error.set(String::new());
             spawn_local(async move {
-                let result = async {
+                let result: Result<Value, String> = async {
                     let token = api::reauth(&password, &code).await?;
-                    let (url, body) = match action {
+                    let extra = ("x-reauth-token", token.as_str());
+                    let url = format!("/api/users/{}", encode(&name));
+                    match &action {
                         PendingAction::Recover => {
-                            (format!("/api/users/{}/recover", encode(&name)), json!({}))
+                            let response = api::send_json_with(
+                                "POST",
+                                &format!("{url}/recover"),
+                                &json!({}),
+                                Some(extra),
+                            )
+                            .await?;
+                            if response.status != 200 {
+                                return Err(response
+                                    .error()
+                                    .unwrap_or("The action failed")
+                                    .to_string());
+                            }
+                            Ok(response.body)
                         }
                         PendingAction::Logout => {
-                            (format!("/api/users/{}/logout", encode(&name)), json!({}))
+                            let response = api::send_json_with(
+                                "POST",
+                                &format!("{url}/logout"),
+                                &json!({}),
+                                Some(extra),
+                            )
+                            .await?;
+                            if response.status != 200 {
+                                return Err(response
+                                    .error()
+                                    .unwrap_or("The action failed")
+                                    .to_string());
+                            }
+                            Ok(response.body)
                         }
-                    };
-                    let response = api::send_json_with(
-                        "POST",
-                        &url,
-                        &body,
-                        Some(("x-reauth-token", token.as_str())),
-                    )
-                    .await?;
-                    if response.status != 200 {
-                        return Err(response.error().unwrap_or("The action failed").to_string());
+                        PendingAction::Patch { body, .. } => {
+                            let response =
+                                api::send_json_with("PATCH", &url, body, Some(extra)).await?;
+                            if response.status != 200 {
+                                return Err(response
+                                    .error()
+                                    .unwrap_or("Could not update the user")
+                                    .to_string());
+                            }
+                            Ok(response.body)
+                        }
+                        PendingAction::Delete => {
+                            let response = api::delete_with(&url, Some(extra)).await?;
+                            if response.status != 204 {
+                                return Err(response
+                                    .error()
+                                    .unwrap_or("Could not delete the user")
+                                    .to_string());
+                            }
+                            Ok(Value::Null)
+                        }
                     }
-                    Ok(response.body)
                 }
                 .await;
                 match result {
                     Ok(body) => {
-                        match action {
+                        match &action {
                             PendingAction::Recover => {
                                 generated.set(body["password"].as_str().map(str::to_string));
                                 notice.set(
@@ -688,15 +689,26 @@ fn UserDetailDialog(
                                     body["sessions_revoked"].as_u64().unwrap_or(0)
                                 ));
                             }
+                            PendingAction::Patch {
+                                notice: message, ..
+                            } => {
+                                notice.set(message.clone());
+                            }
+                            PendingAction::Delete => {
+                                on_changed.run(());
+                                on_close.run(());
+                            }
                         }
-                        load.run(());
-                        on_changed.run(());
+                        if !matches!(action, PendingAction::Delete) {
+                            load.run(());
+                            on_changed.run(());
+                        }
+                        pending.set(None);
                     }
                     Err(message) => error.set(message),
                 }
                 reauth_password.set(String::new());
                 reauth_code.set(String::new());
-                pending.set(None);
                 busy.set(false);
             });
         }
@@ -707,6 +719,8 @@ fn UserDetailDialog(
         Callback::new(move |_: ()| current_username.get() == username)
     };
     let delete_expected = username.clone();
+    let delete_click_user = username.clone();
+    let recover_expected = username.clone();
 
     view! {
         <Modal title=format!("User — {username}") on_close=on_close>
@@ -872,7 +886,11 @@ fn UserDetailDialog(
                     <button
                         on:click=move |_| {
                             let admin = detail.get_untracked()["is_admin"].as_bool().unwrap_or(false);
-                            patch.run((json!({ "admin": !admin }), "Role updated"));
+                            pending.set(Some(PendingAction::Patch {
+                                body: json!({ "admin": !admin }),
+                                notice: "Role updated".to_string(),
+                                description: "grant or revoke administrator rights",
+                            }));
                         }
                         disabled=move || busy.get()
                     >
@@ -887,7 +905,11 @@ fn UserDetailDialog(
                     <button
                         on:click=move |_| {
                             let disabled = detail.get_untracked()["disabled"].as_bool().unwrap_or(false);
-                            patch.run((json!({ "disabled": !disabled }), "Access updated"));
+                            pending.set(Some(PendingAction::Patch {
+                                body: json!({ "disabled": !disabled }),
+                                notice: "Access updated".to_string(),
+                                description: "change this account's access",
+                            }));
                         }
                         disabled=move || busy.get()
                     >
@@ -910,6 +932,7 @@ fn UserDetailDialog(
                     </button>
                     <button
                         on:click=move |_| {
+                            recover_name.set(String::new());
                             pending.set(Some(PendingAction::Recover));
                             generated.set(None);
                         }
@@ -946,10 +969,14 @@ fn UserDetailDialog(
                 pending
                     .get()
                     .map(|action| {
-                        let description = match action {
+                        let description = match &action {
                             PendingAction::Recover => "reset this password",
                             PendingAction::Logout => "sign this user out everywhere",
+                            PendingAction::Patch { description, .. } => *description,
+                            PendingAction::Delete => "delete this account",
                         };
+                        let requires_username = matches!(action, PendingAction::Recover);
+                        let expected = recover_expected.clone();
                         view! {
                             <div class="reauth">
                                 <h3>"Confirm admin action"</h3>
@@ -958,6 +985,22 @@ fn UserDetailDialog(
                                         "Confirm your admin password or a two-factor code to {description}.",
                                     )}
                                 </p>
+                                {requires_username
+                                    .then(|| {
+                                        view! {
+                                            <label>
+                                                "Username"
+                                                <input
+                                                    type="text"
+                                                    autocomplete="off"
+                                                    prop:value=move || recover_name.get()
+                                                    on:input=move |ev| {
+                                                        recover_name.set(event_target_value(&ev))
+                                                    }
+                                                />
+                                            </label>
+                                        }
+                                    })}
                                 <label>
                                     "Your password"
                                     <input
@@ -982,7 +1025,11 @@ fn UserDetailDialog(
                                     <button
                                         class="primary"
                                         on:click=move |_| confirm_reauth.run(())
-                                        disabled=move || busy.get()
+                                        disabled=move || {
+                                            busy.get()
+                                                || (requires_username
+                                                    && recover_name.get() != expected)
+                                        }
                                     >
                                         {move || if busy.get() { "Confirming…" } else { "Confirm" }}
                                     </button>
@@ -992,6 +1039,7 @@ fn UserDetailDialog(
                                             pending.set(None);
                                             reauth_password.set(String::new());
                                             reauth_code.set(String::new());
+                                            recover_name.set(String::new());
                                         }
                                     >
                                         "Cancel"
@@ -1020,7 +1068,18 @@ fn UserDetailDialog(
                     </label>
                     <button
                         class="danger"
-                        on:click=move |_| delete.run(())
+                        on:click={
+                            let expected = delete_click_user.clone();
+                            move |_| {
+                                if delete_name.get_untracked() != expected {
+                                    error.set(
+                                        "Type the username exactly to confirm deletion".to_string(),
+                                    );
+                                    return;
+                                }
+                                pending.set(Some(PendingAction::Delete));
+                            }
+                        }
                         disabled={
                             let expected = delete_expected.clone();
                             move || busy.get() || delete_name.get() != expected

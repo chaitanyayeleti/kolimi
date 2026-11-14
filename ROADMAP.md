@@ -127,8 +127,11 @@ management are the next usability gap: see
 phases landed on `main`: **Settings → Account** (password change, profile,
 session revocation), **Admin → Users** (create, search, detail, quota,
 recovery, force sign-out), **Admin → Groups/Audit** (membership management,
-filtered audit log, chain verification), and **Admin → Invites** (one-time
-onboarding links, expiry/revocation, server-enforced password rotation).
+filtered audit log, chain verification), **Admin → Invites** (one-time
+onboarding links, expiry/revocation, server-enforced password rotation), and
+the Phase 5 hardening closeout (re-auth on every user mutation, typed
+recovery confirmation, recovery rate limiting, no-store session responses,
+and session labels).
 
 ## Deferred / non-goals
 

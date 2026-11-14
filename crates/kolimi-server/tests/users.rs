@@ -112,6 +112,27 @@ async fn login_with_password(app: &Router, user: &str, password: &str) -> String
         .expect("session cookie")
 }
 
+/// Performs an admin mutation with a freshly issued re-auth token.
+async fn admin_mutation(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    admin_user: &str,
+    admin_password: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let token = reauth_token(app, admin_user, admin_password).await;
+    request_with_reauth(
+        app,
+        method,
+        uri,
+        Some(&basic(admin_user, admin_password)),
+        Some(&token),
+        body,
+    )
+    .await
+}
+
 async fn reauth_token(app: &Router, user: &str, password: &str) -> String {
     let (status, body) = request(
         app,
@@ -184,6 +205,27 @@ async fn listing_and_creation_are_admin_only() {
     assert_eq!(body["username"], "carol");
     assert_eq!(body["is_admin"], false);
 
+    // A PATCH or DELETE without fresh re-authentication is refused even for
+    // an administrator; the same routes are exercised with a token below.
+    let (status, _) = request(
+        &app,
+        "PATCH",
+        "/api/users/carol",
+        Some(&basic("alice", PASS)),
+        Some(json!({ "disabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = request(
+        &app,
+        "DELETE",
+        "/api/users/carol",
+        Some(&basic("alice", PASS)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
     // Non-admins cannot patch or delete.
     let (status, _) = request(
         &app,
@@ -217,11 +259,12 @@ async fn disable_blocks_login_and_drops_sessions() {
     );
 
     // Disable bob.
-    let (status, body) = request(
+    let (status, body) = admin_mutation(
         &app,
         "PATCH",
         "/api/users/bob",
-        Some(&basic("alice", PASS)),
+        "alice",
+        PASS,
         Some(json!({ "disabled": true })),
     )
     .await;
@@ -253,11 +296,12 @@ async fn disable_blocks_login_and_drops_sessions() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Re-enable restores access.
-    let (status, _) = request(
+    let (status, _) = admin_mutation(
         &app,
         "PATCH",
         "/api/users/bob",
-        Some(&basic("alice", PASS)),
+        "alice",
+        PASS,
         Some(json!({ "disabled": false })),
     )
     .await;
@@ -275,11 +319,12 @@ async fn disable_blocks_login_and_drops_sessions() {
     assert_eq!(status, StatusCode::OK);
 
     // You cannot disable yourself.
-    let (status, _) = request(
+    let (status, _) = admin_mutation(
         &app,
         "PATCH",
         "/api/users/alice",
-        Some(&basic("alice", PASS)),
+        "alice",
+        PASS,
         Some(json!({ "disabled": true })),
     )
     .await;
@@ -378,37 +423,17 @@ async fn delete_removes_the_user_and_cascades() {
     assert_eq!(state.db.shares_owned(bob_id).await.unwrap().len(), 1);
 
     // You cannot delete yourself; a missing user is 404.
-    let (status, _) = request(
-        &app,
-        "DELETE",
-        "/api/users/alice",
-        Some(&basic("alice", PASS)),
-        None,
-    )
-    .await;
+    let (status, _) = admin_mutation(&app, "DELETE", "/api/users/alice", "alice", PASS, None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, _) = request(
-        &app,
-        "DELETE",
-        "/api/users/nobody",
-        Some(&basic("alice", PASS)),
-        None,
-    )
-    .await;
+    let (status, _) =
+        admin_mutation(&app, "DELETE", "/api/users/nobody", "alice", PASS, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     // The last admin cannot be deleted.
     assert!(state.db.delete_user("alice").await.is_err());
 
     // Admin deletes bob.
-    let (status, _) = request(
-        &app,
-        "DELETE",
-        "/api/users/bob",
-        Some(&basic("alice", PASS)),
-        None,
-    )
-    .await;
+    let (status, _) = admin_mutation(&app, "DELETE", "/api/users/bob", "alice", PASS, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     assert!(
@@ -492,20 +517,22 @@ async fn delete_removes_the_user_and_cascades() {
         Some(json!({ "username": "carol", "password": "pw123456" })),
     )
     .await;
-    let (status, _) = request(
+    let (status, _) = admin_mutation(
         &app,
         "PATCH",
         "/api/users/carol",
-        Some(&basic("alice", PASS)),
+        "alice",
+        PASS,
         Some(json!({ "admin": true })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = request(
+    let (status, _) = admin_mutation(
         &app,
         "DELETE",
         "/api/users/alice",
-        Some(&basic("carol", "pw123456")),
+        "carol",
+        "pw123456",
         None,
     )
     .await;

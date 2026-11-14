@@ -32,6 +32,30 @@ async fn setup() -> (tempfile::TempDir, AppState, Router) {
     (dir, state, app)
 }
 
+async fn reauth_token(app: &Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/reauth")
+                .header(header::AUTHORIZATION, basic("alice", PASS))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "password": PASS }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    body["token"].as_str().unwrap().to_string()
+}
+
 async fn admin_req(
     app: &Router,
     method: &str,
@@ -42,6 +66,9 @@ async fn admin_req(
         .method(method)
         .uri(uri)
         .header(header::AUTHORIZATION, basic("alice", PASS));
+    if method == "PATCH" && uri.starts_with("/api/users/") {
+        builder = builder.header("X-Reauth-Token", reauth_token(app).await);
+    }
     let body = match body {
         Some(value) => {
             builder = builder.header(header::CONTENT_TYPE, "application/json");

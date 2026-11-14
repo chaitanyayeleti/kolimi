@@ -205,7 +205,10 @@ pub fn build_app(state: AppState) -> Router {
             "/api/me/sessions",
             get(api::my_sessions).delete(api::revoke_my_sessions),
         )
-        .route("/api/me/sessions/{id}", delete(api::revoke_my_session))
+        .route(
+            "/api/me/sessions/{id}",
+            delete(api::revoke_my_session).patch(api::set_my_session_label),
+        )
         .route("/api/session", delete(api::logout))
         .route("/api/users", get(api::list_users).post(api::create_user))
         .route(

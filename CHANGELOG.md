@@ -44,6 +44,14 @@ follow [Semantic Versioning](https://semver.org/).
   `DELETE /api/invites/{id}`, `POST /api/invites/lookup`,
   `POST /api/invites/accept`, and `PATCH /api/me` for optional display
   name/email profile fields (migration 0028).
+- **User-management hardening**: `PATCH` and `DELETE /api/users/{username}`
+  now require a fresh `X-Reauth-Token`, matching recovery and force
+  sign-out. This is a deliberate compatibility change for scripts. Password
+  recovery now asks the admin to type the target username, and admin
+  recovery requests are rate-limited. Session list/login responses are
+  `Cache-Control: no-store`. Sessions can carry an optional user-edited
+  label (migration 0029) via `PATCH /api/me/sessions/{id}`; labels appear in
+  Settings → Account.
 
 ## [0.4.7] - 2026-11-14
 

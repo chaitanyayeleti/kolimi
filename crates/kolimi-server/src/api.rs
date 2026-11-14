@@ -264,15 +264,17 @@ pub(crate) async fn start_session(
     let _ = state.db.set_last_login(user.id, now).await;
     let _ = state.db.delete_expired_sessions(now).await;
 
-    let mut response = Json(json!({
-        "username": user.username,
-        "is_admin": user.is_admin,
-        "display_name": user.display_name,
-        "email": user.email,
-        "must_change_password": user.must_change_password,
-        "expires_at": expires_at,
-    }))
-    .into_response();
+    let mut response = no_store(
+        Json(json!({
+            "username": user.username,
+            "is_admin": user.is_admin,
+            "display_name": user.display_name,
+            "email": user.email,
+            "must_change_password": user.must_change_password,
+            "expires_at": expires_at,
+        }))
+        .into_response(),
+    );
     response.headers_mut().append(
         header::SET_COOKIE,
         cookie(
@@ -493,10 +495,62 @@ pub async fn my_sessions(
                 .iter()
                 .map(|session| session_json(session, current))
                 .collect();
-            Json(json!({ "sessions": sessions })).into_response()
+            no_store(Json(json!({ "sessions": sessions })).into_response())
         }
         Err(_) => internal_error(),
     }
+}
+
+/// Body for [`set_my_session_label`].
+#[derive(Deserialize, Default)]
+pub struct SessionLabelRequest {
+    /// New label; empty or omitted clears it.
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `PATCH /api/me/sessions/{id}` — label one of the caller's sessions.
+pub async fn set_my_session_label(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(session_id): Path<i64>,
+    Json(req): Json<SessionLabelRequest>,
+) -> Response {
+    let label = req.label.map(|value| value.trim().to_string());
+    if label
+        .as_deref()
+        .is_some_and(|value| value.chars().count() > 80 || value.chars().any(char::is_control))
+    {
+        return bad_request("session label must be at most 80 characters");
+    }
+    let label = label.filter(|value| !value.is_empty());
+    match state
+        .db
+        .set_session_label(user.user_id, session_id, label.as_deref())
+        .await
+    {
+        Ok(true) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "session.label",
+                &user.username,
+                json!({ "session_id": session_id, "labeled": label.is_some() }),
+            )
+            .await;
+            no_store(Json(json!({ "label": label })).into_response())
+        }
+        Ok(false) => not_found(),
+        Err(_) => internal_error(),
+    }
+}
+
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn session_json(session: &kolimi_db::Session, current: Option<&[u8; 32]>) -> Value {
@@ -508,6 +562,7 @@ fn session_json(session: &kolimi_db::Session, current: Option<&[u8; 32]>) -> Val
         "expires_at": session.expires_at,
         "ip": session.ip.clone(),
         "user_agent": session.user_agent.clone(),
+        "label": session.label.clone(),
     })
 }
 
@@ -1151,7 +1206,7 @@ pub async fn admin_user_sessions(
                 .iter()
                 .map(|session| session_json(session, current))
                 .collect();
-            Json(json!({ "sessions": sessions })).into_response()
+            no_store(Json(json!({ "sessions": sessions })).into_response())
         }
         Err(_) => internal_error(),
     }
@@ -1245,11 +1300,15 @@ mod double_option {
 pub async fn update_user(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Path(username): Path<String>,
     Json(req): Json<UpdateUserRequest>,
 ) -> Response {
     if !user.is_admin {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
     }
     if req.disabled.is_none() && req.admin.is_none() && req.quota_bytes.is_none() {
         return bad_request("nothing to update");
@@ -1333,10 +1392,14 @@ pub async fn update_user(
 pub async fn delete_user(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Path(username): Path<String>,
 ) -> Response {
     if !user.is_admin {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
     }
     let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
         return not_found();
