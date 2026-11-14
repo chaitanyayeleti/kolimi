@@ -8,6 +8,7 @@ Last full verification: **0.4.8** (2026-11-14).
 ## Start here
 
 - **New installation** → [install.md](install.md)
+- **Day-to-day use** → [usage.md](usage.md)
 - **Day-2 administration** → [operations.md](operations.md)
 - **CLI, environment and HTTP API** → [reference.md](reference.md)
 - **How the code is organized** → [architecture.md](architecture.md)
@@ -21,6 +22,7 @@ Last full verification: **0.4.8** (2026-11-14).
 | Document | What it covers |
 | --- | --- |
 | [install.md](install.md) | One-command install, Docker/Podman, Compose + Traefik, Helm, AUR, `.deb`, desktop client, source builds, TLS/reverse proxies, first run, upgrades, uninstall |
+| [usage.md](usage.md) | Sign-in, account security, files, sharing, encrypted content, desktop/sync, and the admin quick reference |
 | [operations.md](operations.md) | Users and groups, account recovery, 2FA, backup/restore, audit log, metrics/tracing, quotas, hardening, E2EE/MLS operations, desktop/mobile clients, upgrades, troubleshooting |
 | [reference.md](reference.md) | `kolimi-server` and `kolimi-sync` commands, environment variables, HTTP endpoint groups, data-directory layout |
 

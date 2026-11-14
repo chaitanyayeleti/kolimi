@@ -119,7 +119,7 @@ docker run -d --name kolimi \
 Create the first admin inside the running container:
 
 ```sh
-docker exec kolimi kolimi-server user add admin
+docker exec -it kolimi kolimi-server user add admin
 ```
 
 Open <http://localhost:8080/app/>. In production, set `KOLIMI_ORIGIN` to
@@ -153,7 +153,7 @@ cp .env.example .env         # set KOLIMI_DOMAIN and ACME_EMAIL
 docker compose -f compose.traefik.yaml up -d
 
 # create the first admin inside the container
-docker compose -f compose.traefik.yaml exec kolimi \
+docker compose -f compose.traefik.yaml exec -it kolimi \
   kolimi-server user add admin
 ```
 
@@ -384,6 +384,9 @@ limits and login lockout use the real client address from
    - Enable TOTP and store the recovery codes.
    - Point a WebDAV client at `https://cloud.example.com/dav/`, and
      CalDAV/CardDAV at `/.well-known/caldav` / `/.well-known/carddav`.
+
+For day-to-day file, sharing, encryption, desktop, and admin workflows see
+[usage.md](usage.md).
 
 ## Upgrading
 

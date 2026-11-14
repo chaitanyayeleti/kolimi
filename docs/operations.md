@@ -1,6 +1,7 @@
 # Operating Kolimi
 
-Day-2 administration for a running server. Commands read `KOLIMI_DATA`
+Day-2 administration for a running server. For end-user file, sharing, and
+account workflows see [usage.md](usage.md). Commands read `KOLIMI_DATA`
 (default `./kolimi-data`); on systemd hosts that is `/var/lib/kolimi`.
 
 ## Users

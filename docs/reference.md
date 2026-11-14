@@ -1,7 +1,7 @@
 # Reference
 
 Commands, environment variables, HTTP surfaces and on-disk layout. For
-narrative guides see [install.md](install.md) and
+narrative guides see [install.md](install.md), [usage.md](usage.md), and
 [operations.md](operations.md).
 
 ## `kolimi-server`

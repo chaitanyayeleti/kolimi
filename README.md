@@ -43,7 +43,7 @@ docker run -d --name kolimi \
   -e KOLIMI_ORIGIN=http://localhost:8080 \
   ghcr.io/chaitanyayeleti/kolimi:latest
 
-docker exec kolimi kolimi-server user add admin
+docker exec -it kolimi kolimi-server user add admin
 ```
 
 Open <http://localhost:8080/app/> and sign in. Set `KOLIMI_ORIGIN` to the
@@ -96,6 +96,7 @@ documented in [RFC 0007](docs/rfc/0007-e2ee.md) and the
 | Start here | What it covers |
 | --- | --- |
 | [docs/install.md](docs/install.md) | Every installation path, TLS/reverse proxies, first run, upgrades |
+| [docs/usage.md](docs/usage.md) | Sign-in, account security, files, sharing, encrypted content, desktop/sync, admin quick reference |
 | [docs/operations.md](docs/operations.md) | Users, groups, backup/restore, audit, metrics, E2EE, desktop clients, troubleshooting |
 | [docs/reference.md](docs/reference.md) | CLI commands, environment variables, HTTP API, data layout |
 | [docs/architecture.md](docs/architecture.md) | Crate map, dependency rules, runtime shape |
