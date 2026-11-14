@@ -38,7 +38,7 @@ kolimi-server user passwd alice [--password PW]
 kolimi-server user list
 kolimi-server user passkey-only alice      # requires a registered passkey
 kolimi-server user totp-disable alice
-kolimi-server user recover alice [--password PW] [--keep-totp] [--remove-passkeys]
+kolimi-server user recover alice [--password PW] [--keep-totp] [--keep-passkeys]
 kolimi-server user disable alice
 kolimi-server user enable alice
 kolimi-server user delete alice --yes

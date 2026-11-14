@@ -47,12 +47,13 @@ kolimi-server user recover alice             # prompts for a new password
 
 `user recover` sets a new password, drops all of the account's live
 sessions (so a lost or compromised credential cannot keep a session
-alive), and by default **clears TOTP** so the new password alone works.
-Options:
+alive), **clears TOTP**, and **removes every registered passkey** so the
+new password alone works and a credential added by an attacker cannot
+survive. Options:
 
 - `--keep-totp` — keep two-factor enabled (the user must still have codes).
-- `--remove-passkeys` — also delete every registered passkey so the user
-  re-enrols fresh (use if a device was lost or the account was compromised).
+- `--keep-passkeys` — keep registered passkeys (only when the devices are
+  known to be safe; the default is a full credential reset).
 
 The action is recorded in the audit log as `user.recover`. Afterwards, have
 the user sign in with the new password and re-enrol their passkey and

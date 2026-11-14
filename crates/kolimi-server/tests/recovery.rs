@@ -97,3 +97,37 @@ async fn recover_restores_password_login_and_clears_totp() {
     let (status, _) = login(&app, "alice", "old-pass-123").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn cli_recover_removes_passkeys_by_default() {
+    let (dir, state, app) = setup().await;
+    let alice = state.db.find_user("alice").await.unwrap().unwrap();
+    state
+        .db
+        .add_passkey(alice.id, "attacker-added", "{}", kolimi_db::now_millis())
+        .await
+        .unwrap();
+    assert_eq!(state.db.count_passkeys(alice.id).await.unwrap(), 1);
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_kolimi-server"))
+        .args([
+            "user",
+            "recover",
+            "alice",
+            "--password",
+            "recovered-pass-456",
+        ])
+        .env("KOLIMI_DATA", dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A credential added by a session attacker must not survive recovery.
+    assert_eq!(state.db.count_passkeys(alice.id).await.unwrap(), 0);
+    let (status, body) = login(&app, "alice", "recovered-pass-456").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}

@@ -253,3 +253,80 @@ async fn cli_escape_hatch_disables_totp() {
             .any(|entry| entry.action == "totp.admin_disable")
     );
 }
+
+#[tokio::test]
+async fn totp_cannot_be_re_enrolled_from_a_session() {
+    let (_dir, state, app) = setup().await;
+    // Create a session while login is still password-only; Basic auth is
+    // refused once TOTP is enrolled, so the re-enrollment attempt must use
+    // a cookie like a real browser session.
+    let (status, cookies) = login_session(&app, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie_header = cookies.join("; ");
+    let csrf = csrf_token_from(&cookies);
+
+    let (_, begin) = post(&app, "/api/totp/begin", &json!({})).await;
+    let secret = TotpSecret::from_base32(begin["secret"].as_str().unwrap()).unwrap();
+    let first_secret = begin["secret"].as_str().unwrap().to_string();
+    let code = current_code(&secret);
+    let (status, _) = post(
+        &app,
+        "/api/totp/enable",
+        &json!({ "secret": begin["secret"], "code": code }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A session without a current factor must not replace the secret (and
+    // thereby lock the real user out of their own second factor).
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/totp/begin")
+                .header(header::COOKIE, &cookie_header)
+                .header("x-csrf-token", &csrf)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let begin: Value = serde_json::from_slice(&bytes).unwrap();
+    let replacement = TotpSecret::from_base32(begin["secret"].as_str().unwrap()).unwrap();
+    let code = current_code(&replacement);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/totp/enable")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie_header)
+                .header("x-csrf-token", &csrf)
+                .body(Body::from(
+                    json!({ "secret": begin["secret"], "code": code }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("already enabled"))
+    );
+
+    let alice = state.db.find_user(ALICE).await.unwrap().unwrap();
+    let (stored, _) = state.db.totp_secret(alice.id).await.unwrap().unwrap();
+    assert_eq!(stored, first_secret);
+}

@@ -129,9 +129,9 @@ enum UserCommand {
         /// Keep TOTP enabled (default: disabled).
         #[arg(long)]
         keep_totp: bool,
-        /// Also delete all of the user's registered passkeys.
+        /// Keep registered passkeys (default: remove them).
         #[arg(long)]
-        remove_passkeys: bool,
+        keep_passkeys: bool,
     },
     /// Disable a user (rejects logins and drops their sessions).
     Disable { username: String },
@@ -411,7 +411,7 @@ async fn user_command(command: UserCommand, data: PathBuf) -> Result<(), Box<dyn
             username,
             password,
             keep_totp,
-            remove_passkeys,
+            keep_passkeys,
         } => {
             let password = match password {
                 Some(password) => password,
@@ -423,7 +423,7 @@ async fn user_command(command: UserCommand, data: PathBuf) -> Result<(), Box<dyn
                 &username,
                 &hash,
                 keep_totp,
-                remove_passkeys,
+                !keep_passkeys,
             )
             .await?;
             println!(

@@ -78,6 +78,21 @@ pub async fn enable(
     Extension(user): Extension<CurrentUser>,
     Json(req): Json<EnableRequest>,
 ) -> Response {
+    // A session alone must not replace an existing second factor: that
+    // would let a stolen cookie permanently lock the real user out. The
+    // account must disable TOTP first, which requires a current code or a
+    // recovery code.
+    match state.db.totp_secret(user.user_id).await {
+        Ok(Some(_)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "TOTP is already enabled; disable it first" })),
+            )
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(_) => return api::internal_error(),
+    }
     let Ok(secret) = totp::TotpSecret::from_base32(&req.secret) else {
         return api::bad_request("invalid secret");
     };
