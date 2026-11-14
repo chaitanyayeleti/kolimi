@@ -16,6 +16,15 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
+    /// Data directory (database and blob store).
+    #[arg(
+        long,
+        global = true,
+        env = "KOLIMI_DATA",
+        default_value = "./kolimi-data"
+    )]
+    data: PathBuf,
+
     #[command(flatten)]
     serve: ServeArgs,
 }
@@ -36,19 +45,12 @@ enum Command {
     },
     /// Back up the database snapshot and blob store.
     Backup {
-        /// Data directory to back up.
-        #[arg(long, env = "KOLIMI_DATA", default_value = "./kolimi-data")]
-        data: PathBuf,
         /// Destination directory (created if needed).
         #[arg(long)]
         to: PathBuf,
     },
     /// Verify the integrity of every stored file and version.
-    Verify {
-        /// Data directory to verify.
-        #[arg(long, env = "KOLIMI_DATA", default_value = "./kolimi-data")]
-        data: PathBuf,
-    },
+    Verify,
     /// Inspect the append-only audit log.
     Audit {
         #[command(subcommand)]
@@ -71,10 +73,6 @@ struct ServeArgs {
     /// Address to bind the listener to.
     #[arg(long, env = "KOLIMI_BIND", default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
-
-    /// Data directory (database and blob store).
-    #[arg(long, env = "KOLIMI_DATA", default_value = "./kolimi-data")]
-    data: PathBuf,
 
     /// TLS certificate (PEM). Requires --tls-key.
     #[arg(long, env = "KOLIMI_TLS_CERT")]
@@ -244,14 +242,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     init_tracing();
 
     let cli = Cli::parse();
-    match cli.command {
-        None => serve(cli.serve).await,
-        Some(Command::Serve(args)) => serve(args).await,
-        Some(Command::User { command }) => user_command(command).await,
-        Some(Command::Group { command }) => group_command(command).await,
-        Some(Command::Backup { data, to }) => backup(data, to).await,
-        Some(Command::Verify { data }) => verify(data).await,
-        Some(Command::Audit { command }) => audit_command(command).await,
+    let Cli {
+        command,
+        data,
+        serve: serve_args,
+    } = cli;
+    match command {
+        None => serve(serve_args, data).await,
+        Some(Command::Serve(args)) => serve(args, data).await,
+        Some(Command::User { command }) => user_command(command, data).await,
+        Some(Command::Group { command }) => group_command(command, data).await,
+        Some(Command::Backup { to }) => backup(data, to).await,
+        Some(Command::Verify) => verify(data).await,
+        Some(Command::Audit { command }) => audit_command(command, data).await,
         Some(Command::PreviewWorker { kind, input, max }) => {
             match kolimi_preview::worker::run(&kind, &input, max) {
                 Ok(()) => std::process::exit(0),
@@ -264,8 +267,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
-    let state = AppState::init(&args.data, args.secure_cookies, &args.origin).await?;
+async fn serve(args: ServeArgs, data: PathBuf) -> Result<(), Box<dyn Error>> {
+    let state = AppState::init(&data, args.secure_cookies, &args.origin).await?;
     tokio::spawn(kolimi_server::janitor::run(state.clone()));
     tokio::spawn(kolimi_server::search_indexer::run(state.clone()));
     let app = build_app(state);
@@ -305,9 +308,7 @@ async fn serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
-    let data: PathBuf =
-        std::env::var("KOLIMI_DATA").map_or_else(|_| PathBuf::from("./kolimi-data"), PathBuf::from);
+async fn user_command(command: UserCommand, data: PathBuf) -> Result<(), Box<dyn Error>> {
     tokio::fs::create_dir_all(&data).await?;
     let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
 
@@ -579,9 +580,7 @@ async fn user_command(command: UserCommand) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn group_command(command: GroupCommand) -> Result<(), Box<dyn Error>> {
-    let data: PathBuf =
-        std::env::var("KOLIMI_DATA").map_or_else(|_| PathBuf::from("./kolimi-data"), PathBuf::from);
+async fn group_command(command: GroupCommand, data: PathBuf) -> Result<(), Box<dyn Error>> {
     tokio::fs::create_dir_all(&data).await?;
     let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
 
@@ -719,9 +718,7 @@ async fn verify(data: PathBuf) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn audit_command(command: AuditCommand) -> Result<(), Box<dyn Error>> {
-    let data: PathBuf =
-        std::env::var("KOLIMI_DATA").map_or_else(|_| PathBuf::from("./kolimi-data"), PathBuf::from);
+async fn audit_command(command: AuditCommand, data: PathBuf) -> Result<(), Box<dyn Error>> {
     tokio::fs::create_dir_all(&data).await?;
     let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
 
@@ -809,4 +806,33 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn data_flag_is_global() {
+        let cli =
+            Cli::try_parse_from(["kolimi-server", "--data", "/tmp/a", "user", "list"]).unwrap();
+        assert_eq!(cli.data, PathBuf::from("/tmp/a"));
+
+        // Global flags parse after the subcommand too.
+        let cli =
+            Cli::try_parse_from(["kolimi-server", "user", "list", "--data", "/tmp/b"]).unwrap();
+        assert_eq!(cli.data, PathBuf::from("/tmp/b"));
+
+        let cli = Cli::try_parse_from([
+            "kolimi-server",
+            "backup",
+            "--to",
+            "/tmp/backup",
+            "--data",
+            "/tmp/c",
+        ])
+        .unwrap();
+        assert_eq!(cli.data, PathBuf::from("/tmp/c"));
+    }
 }

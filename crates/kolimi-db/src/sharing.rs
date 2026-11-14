@@ -300,6 +300,66 @@ impl Db {
         )
     }
 
+    /// Whether `user_id` can reach `node_id` through a user or group share
+    /// on the node itself or one of its ancestors.
+    ///
+    /// Used when the caller only has the owner's path (for example the MLS
+    /// group a key package is being consumed for), so the caller's mounted
+    /// `/Shared with me/...` path is not available.
+    pub async fn user_has_share_access(&self, user_id: i64, node_id: i64) -> Result<bool, DbError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "WITH RECURSIVE chain(id, parent_id) AS (
+                 SELECT id, parent_id FROM nodes WHERE id = ?
+                 UNION ALL
+                 SELECT n.id, n.parent_id
+                 FROM nodes n JOIN chain c ON n.id = c.parent_id
+             )
+             SELECT 1
+             FROM chain c
+             JOIN shares s ON s.node_id = c.id
+             WHERE s.recipient_user_id = ?
+                OR s.recipient_group_id IN (
+                    SELECT group_id FROM group_members WHERE user_id = ?
+                )
+             LIMIT 1",
+        )
+        .bind(node_id)
+        .bind(user_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Whether two accounts share at least one node through a user or group
+    /// share in either direction.
+    pub async fn users_share_access(&self, a: i64, b: i64) -> Result<bool, DbError> {
+        if a == b {
+            return Ok(true);
+        }
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM shares s
+             WHERE (s.owner_id = ? AND (
+                      s.recipient_user_id = ?
+                      OR s.recipient_group_id IN (
+                          SELECT group_id FROM group_members WHERE user_id = ?)))
+                OR (s.owner_id = ? AND (
+                      s.recipient_user_id = ?
+                      OR s.recipient_group_id IN (
+                          SELECT group_id FROM group_members WHERE user_id = ?)))
+             LIMIT 1",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(b)
+        .bind(b)
+        .bind(a)
+        .bind(a)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     /// Lists the shares an owner created for a node.
     pub async fn shares_for_node(
         &self,

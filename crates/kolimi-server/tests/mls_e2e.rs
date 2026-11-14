@@ -167,13 +167,13 @@ async fn mls_group_share_roundtrip_and_writer_keyring() {
     let (status, sent) = send(
         &app,
         "POST",
-        "/api/mls/messages?path=%2FTeam",
+        "/api/mls/commit?path=%2FTeam",
         "alice",
         Some(
             json!({
                 "epoch": 1,
-                "kind": "commit",
-                "payload": STANDARD.encode(&commit),
+                "commit": STANDARD.encode(&commit),
+                "welcome": STANDARD.encode(&welcome),
             })
             .to_string()
             .into_bytes(),
@@ -182,24 +182,6 @@ async fn mls_group_share_roundtrip_and_writer_keyring() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{sent}");
-    let (status, _) = send(
-        &app,
-        "POST",
-        "/api/mls/messages?path=%2FTeam",
-        "alice",
-        Some(
-            json!({
-                "epoch": 1,
-                "kind": "welcome",
-                "payload": STANDARD.encode(&welcome),
-            })
-            .to_string()
-            .into_bytes(),
-        ),
-        Some("application/json"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
 
     // Bob follows the messages, joins from the Welcome, and agrees on the
     // epoch exporter.
@@ -240,7 +222,7 @@ async fn mls_group_share_roundtrip_and_writer_keyring() {
     let (status, _) = send(
         &app,
         "PUT",
-        "/api/mls/keyring?path=%2FTeam&if_epoch=1",
+        "/api/mls/keyring?path=%2FTeam&if_epoch=1&if_revision=0",
         "alice",
         Some(blob.clone()),
         Some("application/octet-stream"),
@@ -292,7 +274,7 @@ async fn mls_group_share_roundtrip_and_writer_keyring() {
     let (status, _) = send(
         &app,
         "PUT",
-        "/api/mls/keyring?path=%2FShared%20with%20me%2FTeam&if_epoch=1",
+        "/api/mls/keyring?path=%2FShared%20with%20me%2FTeam&if_epoch=1&if_revision=2",
         "bob",
         Some(blob),
         Some("application/octet-stream"),

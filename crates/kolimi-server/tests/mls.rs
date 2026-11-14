@@ -68,6 +68,240 @@ async fn setup() -> (tempfile::TempDir, AppState, Router) {
 }
 
 #[tokio::test]
+async fn commits_and_welcomes_must_use_the_atomic_endpoint() {
+    let (_dir, _state, app) = setup().await;
+    let (status, _) = send(&app, "MKCOL", "/dav/Team", "alice", None, None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let group_id = STANDARD.encode([7u8; 16]);
+    let (status, body) = send(
+        &app,
+        "PUT",
+        "/api/mls/group?path=/Team",
+        "alice",
+        Some(json!({ "group_id": group_id }).to_string().into_bytes()),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for kind in ["commit", "welcome"] {
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/api/mls/messages?path=/Team",
+            "alice",
+            Some(
+                json!({
+                    "epoch": 1,
+                    "kind": kind,
+                    "payload": STANDARD.encode(b"x"),
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+            Some("application/json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}: {body}");
+    }
+
+    // Proposals at the current epoch still work.
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/mls/messages?path=/Team",
+        "alice",
+        Some(
+            json!({
+                "epoch": 0,
+                "kind": "proposal",
+                "payload": STANDARD.encode(b"x"),
+            })
+            .to_string()
+            .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn keyring_writes_require_a_matching_revision() {
+    let (_dir, _state, app) = setup().await;
+    let (status, _) = send(&app, "MKCOL", "/dav/Team", "alice", None, None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/mls/group?path=/Team",
+        "alice",
+        Some(
+            json!({ "group_id": STANDARD.encode([5u8; 16]) })
+                .to_string()
+                .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Omitting if_revision must not fall back to an unconditional write.
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/mls/keyring?path=/Team&if_epoch=0",
+        "alice",
+        Some(b"first".to_vec()),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/mls/keyring?path=/Team&if_epoch=0&if_revision=0",
+        "alice",
+        Some(b"first".to_vec()),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // A stale revision loses instead of overwriting newer keys.
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/mls/keyring?path=/Team&if_epoch=0&if_revision=0",
+        "alice",
+        Some(b"stale".to_vec()),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/mls/keyring?path=/Team&if_epoch=0&if_revision=1",
+        "alice",
+        Some(b"second".to_vec()),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn key_package_consumption_is_scoped_to_the_group() {
+    let (_dir, _state, app) = setup().await;
+    let mut ids = std::collections::HashMap::new();
+    for (user, device) in [("bob", "bob-dev"), ("carol", "carol-dev")] {
+        let (status, _) = send(
+            &app,
+            "PUT",
+            "/api/mls/key-packages",
+            user,
+            Some(
+                json!({
+                    "device_id": device,
+                    "device_name": device,
+                    "payload": STANDARD.encode(format!("package-{device}").as_bytes()),
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+            Some("application/json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = send(
+            &app,
+            "GET",
+            &format!("/api/mls/key-packages/{user}"),
+            "alice",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        ids.insert(user, body["packages"][0]["id"].as_i64().unwrap());
+    }
+
+    // Alice owns Team and shares it with Bob only.
+    let (status, _) = send(&app, "MKCOL", "/dav/Team", "alice", None, None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/shares",
+        "alice",
+        Some(
+            json!({
+                "path": "/Team",
+                "kind": "user",
+                "recipient": "bob",
+                "permission": "read",
+            })
+            .to_string()
+            .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Carol has no access to Team, so her package cannot be consumed there.
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/mls/key-packages/consume",
+        "alice",
+        Some(
+            json!({ "path": "/Team", "ids": [ids["carol"]] })
+                .to_string()
+                .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // Bob already has access (the add flow creates the share first).
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/mls/key-packages/consume",
+        "alice",
+        Some(
+            json!({ "path": "/Team", "ids": [ids["bob"]] })
+                .to_string()
+                .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // A non-member cannot reach the group path at all.
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/mls/key-packages/consume",
+        "carol",
+        Some(
+            json!({ "path": "/Shared with me/Team", "ids": [ids["bob"]] })
+                .to_string()
+                .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn mls_device_roster_lists_metadata_and_removes_packages() {
     let (_dir, _state, app) = setup().await;
 
@@ -102,11 +336,37 @@ async fn mls_device_roster_lists_metadata_and_removes_packages() {
     );
     assert!(roster["devices"][0]["last_seen_at"].as_i64().unwrap() > 0);
 
-    // Another account cannot see or remove Bob's device in its own roster,
-    // but can read the public per-user roster for a group removal.
+    // Another account cannot see Bob's device in its own roster.
     let (status, other) = send(&app, "GET", "/api/mls/devices", "carol", None, None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(other["devices"].as_array().unwrap().is_empty(), "{other}");
+
+    // The per-user roster requires a share relationship. Alice shares a
+    // folder with Bob first; Carol still gets a 404.
+    let (status, _) = send(&app, "MKCOL", "/dav/Team", "alice", None, None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/shares",
+        "alice",
+        Some(
+            json!({
+                "path": "/Team",
+                "kind": "user",
+                "recipient": "bob",
+                "permission": "read",
+            })
+            .to_string()
+            .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = send(&app, "GET", "/api/mls/devices/bob", "carol", None, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     let (status, public) = send(&app, "GET", "/api/mls/devices/bob", "alice", None, None).await;
     assert_eq!(status, StatusCode::OK, "{public}");
     assert_eq!(public["devices"][0]["device_id"], "bob-laptop");
@@ -260,6 +520,132 @@ async fn group_revocations_are_visible_and_clearable() {
 }
 
 #[tokio::test]
+async fn revocations_are_owner_or_self_only() {
+    let (_dir, _state, app) = setup().await;
+    let (status, _) = send(&app, "MKCOL", "/dav/Team", "alice", None, None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/mls/group?path=%2FTeam",
+        "alice",
+        Some(
+            json!({ "group_id": STANDARD.encode([4u8; 16]) })
+                .to_string()
+                .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/shares",
+        "alice",
+        Some(
+            json!({
+                "path": "/Team",
+                "kind": "user",
+                "recipient": "bob",
+                "permission": "write",
+            })
+            .to_string()
+            .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    for (user, device, signature) in [
+        ("bob", "bob-phone", "bob-signature"),
+        ("alice", "alice-phone", "alice-signature"),
+    ] {
+        let (status, _) = send(
+            &app,
+            "PUT",
+            "/api/mls/key-packages",
+            user,
+            Some(
+                json!({
+                    "device_id": device,
+                    "device_name": device,
+                    "signature_key": STANDARD.encode(signature.as_bytes()),
+                    "payload": STANDARD.encode(b"package"),
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+            Some("application/json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    // Bob may self-revoke a device in his own roster...
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/mls/revocations?path=%2FShared%20with%20me%2FTeam",
+        "bob",
+        Some(
+            json!({ "signature_key": STANDARD.encode(b"bob-signature") })
+                .to_string()
+                .into_bytes(),
+        ),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // ...but not an arbitrary key or Alice's key.
+    for signature in ["victim-signature", "alice-signature"] {
+        let body = json!({ "signature_key": STANDARD.encode(signature.as_bytes()) })
+            .to_string()
+            .into_bytes();
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/api/mls/revocations?path=%2FShared%20with%20me%2FTeam",
+            "bob",
+            Some(body),
+            Some("application/json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{signature}");
+    }
+
+    // Clearing a revocation is owner-only.
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!(
+            "/api/mls/revocations?path=%2FShared%20with%20me%2FTeam&signature_key={}",
+            STANDARD.encode(b"bob-signature")
+        ),
+        "bob",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!(
+            "/api/mls/revocations?path=%2FTeam&signature_key={}",
+            STANDARD.encode(b"bob-signature")
+        ),
+        "alice",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn group_state_acl_epochs_and_share_keyring() {
     let (_dir, _state, app) = setup().await;
 
@@ -401,15 +787,14 @@ async fn group_state_acl_epochs_and_share_keyring() {
     // Epochs cannot go backwards.
     let old = json!({
         "epoch": 0,
-        "kind": "commit",
-        "payload": STANDARD.encode(b"old"),
+        "commit": STANDARD.encode(b"old"),
     })
     .to_string()
     .into_bytes();
     let (status, _) = send(
         &app,
         "POST",
-        "/api/mls/messages?path=%2FTeam",
+        "/api/mls/commit?path=%2FTeam",
         "alice",
         Some(old),
         Some("application/json"),
@@ -420,15 +805,14 @@ async fn group_state_acl_epochs_and_share_keyring() {
     // A commit cannot skip epochs.
     let skip = json!({
         "epoch": 3,
-        "kind": "commit",
-        "payload": STANDARD.encode(b"skip"),
+        "commit": STANDARD.encode(b"skip"),
     })
     .to_string()
     .into_bytes();
     let (status, _) = send(
         &app,
         "POST",
-        "/api/mls/messages?path=%2FTeam",
+        "/api/mls/commit?path=%2FTeam",
         "alice",
         Some(skip),
         Some("application/json"),
@@ -480,7 +864,7 @@ async fn group_state_acl_epochs_and_share_keyring() {
     let (status, _) = send(
         &app,
         "PUT",
-        "/api/mls/keyring?path=%2FTeam&if_epoch=0",
+        "/api/mls/keyring?path=%2FTeam&if_epoch=0&if_revision=0",
         "alice",
         Some(b"stale".to_vec()),
         Some("application/octet-stream"),
@@ -490,7 +874,7 @@ async fn group_state_acl_epochs_and_share_keyring() {
     let (status, _) = send(
         &app,
         "PUT",
-        "/api/mls/keyring?path=%2FTeam&if_epoch=1",
+        "/api/mls/keyring?path=%2FTeam&if_epoch=1&if_revision=0",
         "alice",
         Some(b"keyring-1".to_vec()),
         Some("application/octet-stream"),
@@ -542,7 +926,7 @@ async fn group_state_acl_epochs_and_share_keyring() {
     let (status, _) = send(
         &app,
         "PUT",
-        "/api/mls/keyring?path=%2FShared%20with%20me%2FTeam&if_epoch=1",
+        "/api/mls/keyring?path=%2FShared%20with%20me%2FTeam&if_epoch=1&if_revision=1",
         "bob",
         Some(b"keyring-from-bob".to_vec()),
         Some("application/octet-stream"),

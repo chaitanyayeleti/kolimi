@@ -137,6 +137,9 @@ pub async fn put_file_key(
             .await;
             StatusCode::NO_CONTENT.into_response()
         }
+        Err(kolimi_db::DbError::Conflict(message)) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
+        }
         Err(_) => api::internal_error(),
     }
 }
@@ -202,6 +205,9 @@ pub async fn put_identity(
             )
             .await;
             StatusCode::NO_CONTENT.into_response()
+        }
+        Err(kolimi_db::DbError::Conflict(message)) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
         }
         Err(_) => api::internal_error(),
     }

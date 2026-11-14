@@ -43,6 +43,25 @@ const MAX_PROPFIND_BODY: usize = 1024 * 1024;
 const MAX_UPLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_SYNC_CHANGES: i64 = 10_000;
 
+/// User-supplied content is never a trusted document: no scripts, no
+/// subresources, no same-origin DOM. Kept in force even when a client
+/// ignores the attachment disposition.
+const USER_CONTENT_CSP: &str = "sandbox; default-src 'none'";
+
+/// Types a browser may execute as an active document when served inline.
+fn is_active_content(content_type: &str) -> bool {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        essence.as_str(),
+        "text/html" | "application/xhtml+xml" | "image/svg+xml" | "text/xml" | "application/xml"
+    ) || essence.ends_with("+xml")
+}
+
 /// Routes served under `/dav`, generic over the app state.
 pub fn routes<S>() -> Router<S>
 where
@@ -187,6 +206,7 @@ async fn get(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, head: boo
     let content_type = mime_guess::from_path(&node.name)
         .first_or_octet_stream()
         .to_string();
+    let active_content = is_active_content(&content_type);
 
     // Range handling, subject to `If-Range` (serve the whole entity when the
     // validator does not match the current one).
@@ -203,11 +223,17 @@ async fn get(vfs: &Vfs, user_id: i64, path: &str, headers: &HeaderMap, head: boo
 
     let manifest = std::sync::Arc::new(manifest);
     let base = || {
-        Response::builder()
+        let builder = Response::builder()
             .header(header::CONTENT_TYPE, content_type.clone())
+            .header("content-security-policy", USER_CONTENT_CSP)
             .header(header::ACCEPT_RANGES, "bytes")
             .header(header::ETAG, etag.clone())
-            .header(header::LAST_MODIFIED, cond::http_date(node.modified_at))
+            .header(header::LAST_MODIFIED, cond::http_date(node.modified_at));
+        if active_content {
+            builder.header(header::CONTENT_DISPOSITION, "attachment")
+        } else {
+            builder
+        }
     };
 
     match wanted {

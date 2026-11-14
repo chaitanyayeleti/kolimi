@@ -112,6 +112,26 @@ async fn metrics_cover_requests_logins_and_health() {
 }
 
 #[tokio::test]
+async fn unmatched_paths_share_one_metric_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
+    state
+        .db
+        .create_user("alice", &hash_password(PASS).unwrap())
+        .await
+        .unwrap();
+    let app = build_app(state);
+
+    let (status, _, _) = get(&app, "/random-unique-probe-12345", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, body) = get(&app, "/metrics", Some(&basic("alice", PASS))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("path=\"unmatched\""), "{body}");
+    assert!(!body.contains("random-unique-probe-12345"), "{body}");
+}
+
+#[tokio::test]
 async fn metrics_require_an_admin() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();

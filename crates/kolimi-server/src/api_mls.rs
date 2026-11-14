@@ -50,9 +50,10 @@ pub struct PageQuery {
 pub struct KeyringQuery {
     path: String,
     if_epoch: i64,
-    /// Optimistic revision from the last GET; `0` means "no keyring yet".
-    #[serde(default)]
-    if_revision: Option<i64>,
+    /// Required optimistic revision from the last GET; `0` means "no
+    /// keyring yet". Omitting it is rejected rather than silently
+    /// overwriting a newer keyring.
+    if_revision: i64,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +99,8 @@ pub struct InitGroupRequest {
 
 #[derive(Deserialize)]
 pub struct ConsumeKeyPackagesRequest {
+    /// Group the caller is consuming packages for.
+    path: String,
     ids: Vec<i64>,
 }
 
@@ -286,12 +289,21 @@ pub async fn get_devices(
 /// remove a recipient's device from a group.
 pub async fn get_user_devices(
     State(state): State<AppState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(username): Path<String>,
 ) -> Response {
     let Some(target) = state.db.find_user(&username).await.ok().flatten() else {
         return api::not_found();
     };
+    // Device names and public keys are only for collaborators: the account
+    // itself or someone with an active share relationship.
+    if target.id != user.user_id {
+        match state.db.users_share_access(user.user_id, target.id).await {
+            Ok(true) => {}
+            Ok(false) => return api::not_found(),
+            Err(_) => return api::internal_error(),
+        }
+    }
     match state.db.list_mls_devices(target.id).await {
         Ok(devices) => {
             let devices: Vec<_> = devices
@@ -351,14 +363,54 @@ pub async fn delete_device(
 /// packages it actually put into a commit so no other group reuses them.
 pub async fn consume_key_packages(
     State(state): State<AppState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Json(req): Json<ConsumeKeyPackagesRequest>,
 ) -> Response {
     if req.ids.is_empty() || req.ids.len() > 64 {
         return api::bad_request("ids must contain 1–64 entries");
     }
+    let access = match access(&state, &user, &req.path).await {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
+    if access.perm != Perm::Write {
+        return api::forbidden("write access is required to consume MLS key packages");
+    }
+    // A caller may consume its own packages, or packages of a user who
+    // already has access to this group (the add flow creates the share
+    // first). This stops one account from burning every other account's
+    // enrollment packages by walking the global id space.
+    let owners = match state.db.mls_key_package_owners(&req.ids).await {
+        Ok(owners) => owners,
+        Err(_) => return api::internal_error(),
+    };
+    for (_, owner_id) in owners {
+        if owner_id == user.user_id {
+            continue;
+        }
+        match state
+            .db
+            .user_has_share_access(owner_id, access.node.id)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return api::forbidden("not allowed to consume this key package"),
+            Err(_) => return api::internal_error(),
+        }
+    }
     match state.db.consume_mls_key_packages(&req.ids).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            audit(
+                &state,
+                Some(user.user_id),
+                Some(&user.username),
+                "mls.key_packages_consumed",
+                &req.path,
+                json!({ "count": req.ids.len() }),
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(_) => api::internal_error(),
     }
 }
@@ -502,6 +554,31 @@ pub async fn post_revocation(
     if req.device_id.len() > 64 {
         return api::bad_request("device_id must be at most 64 bytes");
     }
+    // Only the owner may record a revocation for another account's device.
+    // A write recipient may self-revoke a device in its own roster, and only
+    // while no other account claims the same signature key.
+    if access.owner_id != user.user_id {
+        match state
+            .db
+            .mls_device_has_signature(user.user_id, &signature_key)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return api::forbidden("only the owner can revoke another account's device");
+            }
+            Err(_) => return api::internal_error(),
+        }
+        match state
+            .db
+            .mls_signature_claimed_by_other(user.user_id, &signature_key)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => return api::forbidden("signature is claimed by another account"),
+            Err(_) => return api::internal_error(),
+        }
+    }
     match state
         .db
         .revoke_mls_device(
@@ -542,6 +619,9 @@ pub async fn delete_revocation(
     if access.perm != Perm::Write {
         return api::forbidden("write access is required to clear an MLS revocation");
     }
+    if access.owner_id != user.user_id {
+        return api::forbidden("only the owner can clear MLS revocations");
+    }
     let Ok(signature_key) = STANDARD.decode(query.signature_key.as_bytes()) else {
         return api::bad_request("signature_key must be base64");
     };
@@ -579,6 +659,12 @@ pub async fn post_message(
     };
     if access.perm != Perm::Write {
         return api::forbidden("write access is required to send MLS messages");
+    }
+    // Commits and Welcomes must use the atomic endpoint so the epoch bump
+    // and the Welcome row become visible together. The message endpoint is
+    // only for proposals and application messages.
+    if matches!(req.kind.as_str(), "commit" | "welcome") {
+        return api::bad_request("commits and welcomes must use POST /api/mls/commit");
     }
     if req.epoch < 0 {
         return api::bad_request("epoch must be non-negative");

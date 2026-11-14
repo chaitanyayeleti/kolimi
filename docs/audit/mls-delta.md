@@ -51,10 +51,17 @@ Nothing here is a substitute for the review itself.
   in the same transaction. A concurrent committer cannot advance the epoch
   between the two rows and leave a newly added device without a Welcome.
 - The share keyring is one ciphertext per `(node, epoch)` and is accepted
-  only with `if_epoch == group.epoch`, so a concurrent writer loses
+  only with `if_epoch == group.epoch` and a required `if_revision` that
+  matches the stored revision (`0` means "no keyring yet"). Omitting the
+  revision is rejected; a concurrent or stale writer loses with `409`
   instead of overwriting newer keys.
 - Unused key packages get a 30-day expiry; the janitor deletes
   consumed/expired rows after a further seven-day grace period.
+- Key-package consumption is group-scoped: the caller needs write access to
+  the group, and may consume only its own packages or packages of users who
+  already have access to that node. Clients pass the group `path` with the
+  consume request; the share exists before the add, so a new recipient
+  already resolves.
 - The server keeps a `mls_devices` roster: at most 16 active devices per
   account in a 180-day inactivity window, and at most 8 live packages per
   device. Over-limit requests are rejected with `409`; inactive roster entries
@@ -63,10 +70,17 @@ Nothing here is a substitute for the review itself.
   returns the caller's roster and `GET /api/mls/devices/{username}` exposes
   only id/name/signature key for a recipient.
 - `mls_group_revocations` is a **client-asserted** list of removed
-  signatures per group. A writer records an entry before posting the remove
-  commit, and automatic re-add skips matching key packages. An explicit
-  re-share clears it. The server cannot verify that a removal happened; the
-  record is a durable hint for honest clients, not cryptographic proof.
+  signatures per group. The node owner records an entry before posting the
+  remove commit; a non-owner writer may only record a self-revoke for a
+  device in its own roster, and only while no other account claims the same
+  signature. Clearing is owner-only. Automatic re-add skips matching key
+  packages; an explicit re-share clears the entry. The server cannot verify
+  that a removal happened; the record is a durable hint for honest clients,
+  not cryptographic proof.
+- Per-user device rosters are visible to the account itself and to accounts
+  with an active user/group share relationship in either direction. Public
+  key packages stay readable to any authenticated user because they are
+  needed before a share exists.
 - Clients report the last processed epoch per device
   (`mls_member_epochs`). The janitor prunes protocol messages and keyrings
   older than seven days and below the minimum fresh report; reports older
@@ -219,10 +233,13 @@ Nothing here is a substitute for the review itself.
 ## Known limitations
 
 - Key packages are a consumable pool per `(user, device_id)`; clients
-  publish several and consume the ids actually used in a commit. An account
-  that reaches 16 active MLS devices can free a slot by revoking an old
-  device (`--mls-devices` / `--mls-revoke-device`, or the web Settings list),
-  or wait for inactivity pruning.
+  publish several and consume the ids actually used in a commit. Consume is
+  authorized against the group: the caller needs write access, and may
+  consume only its own packages or packages of users who already have access
+  to that node (the share exists before the add). An account that reaches 16
+  active MLS devices can free a slot by revoking an old device
+  (`--mls-devices` / `--mls-revoke-device`, or the web Settings list), or
+  wait for inactivity pruning.
 - A single-device revoke cannot remove a leaf from a read-only received
   share from the device itself; the share owner must do it with
   `--mls-revoke-device <id> --with <user>` (or recreate the share). Roster

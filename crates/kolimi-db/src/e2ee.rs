@@ -50,6 +50,10 @@ impl Db {
         if wrapped_key.is_empty() || wrapped_key.len() > MAX_WRAPPED_KEY_BYTES {
             return Err(DbError::Conflict("wrapped key size".to_string()));
         }
+        // The wrapped blob is a marker for "this node is encrypted", not a
+        // second copy of the file key: a write recipient re-wraps the key
+        // under their own master on every edit, while group members decrypt
+        // through the MLS keyring. Overwriting is therefore expected.
         sqlx::query(
             "INSERT INTO e2ee_file_keys (node_id, user_id, wrapped_key, updated_at)
              VALUES (?, ?, ?, ?)
@@ -126,7 +130,12 @@ impl Db {
         )
     }
 
-    /// Stores (or replaces) a user's X25519 identity.
+    /// Stores a user's X25519 identity.
+    ///
+    /// The identity is created once: a session alone must not be able to
+    /// replace the key that other users wrap file keys to. An identical
+    /// retry is accepted; any other change is a conflict. Rotation needs a
+    /// separate recovery flow that proves possession of the old key.
     pub async fn set_identity(
         &self,
         user_id: i64,
@@ -136,20 +145,40 @@ impl Db {
         if public_key.len() != 32 || wrapped_private.is_empty() || wrapped_private.len() > 1024 {
             return Err(DbError::Conflict("identity size".to_string()));
         }
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO e2ee_identities (user_id, public_key, wrapped_private, created_at)
              VALUES (?, ?, ?, ?)
-             ON CONFLICT(user_id) DO UPDATE SET public_key = excluded.public_key,
-                 wrapped_private = excluded.wrapped_private,
-                 created_at = excluded.created_at",
+             ON CONFLICT(user_id) DO NOTHING",
         )
         .bind(user_id)
         .bind(public_key)
         .bind(wrapped_private)
         .bind(now_millis())
         .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if inserted == 1 {
+            return Ok(());
+        }
+        let existing: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+            "SELECT public_key, wrapped_private FROM e2ee_identities WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(())
+        match existing {
+            Some((stored_public, stored_wrapped))
+                if stored_public == public_key && stored_wrapped == wrapped_private =>
+            {
+                Ok(())
+            }
+            Some(_) => Err(DbError::Conflict(
+                "identity is already set; rotation requires recovery".to_string(),
+            )),
+            None => Err(DbError::Conflict(
+                "identity changed concurrently; retry".to_string(),
+            )),
+        }
     }
 
     /// A user's identity: (public key, wrapped private key).
@@ -313,6 +342,13 @@ mod tests {
             Some(&[1u8, 2, 3][..])
         );
         assert_eq!(db.encrypted_node_ids(user.id).await.unwrap(), vec![file.id]);
+
+        // Write recipients re-wrap the opaque marker on every edit.
+        db.set_file_key(user.id, file.id, &[4, 5, 6]).await.unwrap();
+        assert_eq!(
+            db.file_key(file.id).await.unwrap().as_deref(),
+            Some(&[4u8, 5, 6][..])
+        );
 
         db.delete_node(user.id, file.id).await.unwrap();
         assert!(!db.is_encrypted(file.id).await.unwrap());

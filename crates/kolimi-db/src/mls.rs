@@ -187,6 +187,23 @@ impl Db {
         .await?)
     }
 
+    /// Owners of the given key-package ids, for authorization before a
+    /// consume. Missing ids are omitted: consuming them is a no-op.
+    pub async fn mls_key_package_owners(&self, ids: &[i64]) -> Result<Vec<(i64, i64)>, DbError> {
+        let mut owners = Vec::with_capacity(ids.len());
+        for id in ids {
+            let user_id: Option<(i64,)> =
+                sqlx::query_as("SELECT user_id FROM mls_key_packages WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            if let Some((user_id,)) = user_id {
+                owners.push((*id, user_id));
+            }
+        }
+        Ok(owners)
+    }
+
     /// Records the epoch this device has successfully processed.
     ///
     /// Reports are monotonic: a stale report cannot lower the recorded epoch.
@@ -294,6 +311,42 @@ impl Db {
         .bind(user_id)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// Whether `signature_key` belongs to one of this account's roster
+    /// devices (used to allow a self-revoke by a non-owner writer).
+    pub async fn mls_device_has_signature(
+        &self,
+        user_id: i64,
+        signature_key: &[u8],
+    ) -> Result<bool, DbError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM mls_devices
+             WHERE user_id = ? AND signature_key = ? LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(signature_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Whether another account claims `signature_key` in its roster. A
+    /// non-owner self-revoke is refused while the key is ambiguous.
+    pub async fn mls_signature_claimed_by_other(
+        &self,
+        user_id: i64,
+        signature_key: &[u8],
+    ) -> Result<bool, DbError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM mls_devices
+             WHERE user_id <> ? AND signature_key = ? LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(signature_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
     }
 
     /// Removes one device from the roster and its package pool.
@@ -676,7 +729,7 @@ impl Db {
         payload: &[u8],
         updated_by: i64,
         if_epoch: i64,
-        if_revision: Option<i64>,
+        if_revision: i64,
     ) -> Result<bool, DbError> {
         let Some(group) = self.mls_group(node_id).await? else {
             return Err(DbError::NotFound("mls group".to_string()));
@@ -686,7 +739,7 @@ impl Db {
         }
         let now = now_millis();
         match if_revision {
-            Some(0) => {
+            0 => {
                 // The caller saw no keyring. Insert revision 1 atomically;
                 // a concurrent creator makes this a conflict.
                 let result = sqlx::query(
@@ -704,7 +757,7 @@ impl Db {
                 .await?;
                 Ok(result.rows_affected() == 1)
             }
-            Some(revision) => {
+            revision => {
                 let result = sqlx::query(
                     "UPDATE mls_share_keyrings
                      SET payload = ?, updated_by = ?, updated_at = ?, revision = revision + 1
@@ -716,27 +769,6 @@ impl Db {
                 .bind(node_id)
                 .bind(epoch)
                 .bind(revision)
-                .execute(&self.pool)
-                .await?;
-                Ok(result.rows_affected() == 1)
-            }
-            None => {
-                // Legacy unconditional write (still bumps the revision).
-                let result = sqlx::query(
-                    "INSERT INTO mls_share_keyrings
-                         (node_id, epoch, payload, updated_by, updated_at, revision)
-                     VALUES (?, ?, ?, ?, ?, 1)
-                     ON CONFLICT(node_id, epoch) DO UPDATE SET
-                         payload = excluded.payload,
-                         updated_by = excluded.updated_by,
-                         updated_at = excluded.updated_at,
-                         revision = mls_share_keyrings.revision + 1",
-                )
-                .bind(node_id)
-                .bind(epoch)
-                .bind(payload)
-                .bind(updated_by)
-                .bind(now)
                 .execute(&self.pool)
                 .await?;
                 Ok(result.rows_affected() == 1)

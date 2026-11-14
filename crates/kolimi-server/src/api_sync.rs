@@ -61,12 +61,21 @@ fn vfs_error_response(e: VfsError) -> Response {
         | VfsError::Root
         | VfsError::InvalidPath(_)
         | VfsError::ParentNotCollection => StatusCode::BAD_REQUEST,
-        VfsError::AlreadyExists | VfsError::Conflict(_) => StatusCode::CONFLICT,
+        VfsError::AlreadyExists
+        | VfsError::Conflict(_)
+        | VfsError::Db(kolimi_db::DbError::Conflict(_)) => StatusCode::CONFLICT,
         VfsError::MissingChunk(_) => StatusCode::CONFLICT,
         VfsError::Store(kolimi_store::StoreError::TooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    (status, Json(json!({ "error": e.to_string() }))).into_response()
+    // Do not echo internal storage errors, or confirm whether an opaque id
+    // exists, in the response body.
+    let message = match status {
+        StatusCode::NOT_FOUND => "not found".to_string(),
+        StatusCode::INTERNAL_SERVER_ERROR => "internal server error".to_string(),
+        _ => e.to_string(),
+    };
+    (status, Json(json!({ "error": message }))).into_response()
 }
 
 fn json_response(status: StatusCode, value: Value) -> Response {
@@ -407,6 +416,8 @@ pub async fn get_chunk(
 async fn chunk_owner(state: &AppState, user: &CurrentUser, path: &str) -> Result<i64, Response> {
     let existing = match state.vfs.stat_access(user.user_id, path).await {
         Ok(existing) => existing,
+        Err(VfsError::NotFound) => return Err(not_found()),
+        Err(VfsError::Forbidden) => return Err(forbidden("read access is denied")),
         Err(_) => return Err(internal_error()),
     };
     if let Some(access) = existing
@@ -423,6 +434,8 @@ async fn chunk_owner(state: &AppState, user: &CurrentUser, path: &str) -> Result
     let (access, _name) = match state.vfs.resolve_parent_access(user.user_id, path).await {
         Ok(value) => value,
         Err(VfsError::NotFound) => return Err(not_found()),
+        Err(VfsError::Forbidden) => return Err(forbidden("write access is required")),
+        Err(VfsError::ParentNotCollection) => return Err(bad_request("not a file")),
         Err(_) => return Err(internal_error()),
     };
     if !access.perm.allows(kolimi_vfs::Perm::Write) {

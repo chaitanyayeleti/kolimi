@@ -1034,7 +1034,7 @@ async fn add_recipients_to_group(
         let response = api::send_json(
             "POST",
             "/api/mls/key-packages/consume",
-            &json!({ "ids": consumed }),
+            &json!({ "path": path, "ids": consumed }),
         )
         .await?;
         if response.status != 204 {

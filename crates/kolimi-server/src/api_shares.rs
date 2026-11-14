@@ -461,7 +461,7 @@ pub async fn delete(
                 return StatusCode::NO_CONTENT.into_response();
             }
         }
-        return api::forbidden("not allowed to revoke this share");
+        return api::not_found();
     }
     let mut allowed = share.owner_id == user.user_id;
     if !allowed {
@@ -473,7 +473,7 @@ pub async fn delete(
         };
     }
     if !allowed {
-        return api::forbidden("not allowed to revoke this share");
+        return api::not_found();
     }
     match state.db.delete_share(share_id).await {
         Ok(true) => {
@@ -665,6 +665,11 @@ async fn public_download_inner(
     if let Ok(value) = HeaderValue::from_str(&disposition) {
         headers_out.insert(header::CONTENT_DISPOSITION, value);
     }
+    // Defense in depth: some clients ignore the attachment disposition.
+    headers_out.insert(
+        "content-security-policy",
+        HeaderValue::from_static("sandbox; default-src 'none'"),
+    );
     if let Ok(value) = HeaderValue::from_str(&node.size.to_string()) {
         headers_out.insert(header::CONTENT_LENGTH, value);
     }

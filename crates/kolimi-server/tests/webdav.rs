@@ -13,6 +13,7 @@ use kolimi_auth::{
     passkey::{CreationChallengeResponse, RequestChallengeResponse},
     password::hash_password,
 };
+use kolimi_crypto::Identity;
 use kolimi_server::{AppState, build_app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -522,6 +523,153 @@ async fn put_get_roundtrip_with_conditional_requests() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers.get(header::CONTENT_LENGTH).unwrap(), "11");
     assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn active_content_is_served_as_inert_attachment() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let html = b"<script>fetch('/api/me')</script>";
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/evil.html", &auth, "text/html", html),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, headers, body) =
+        send(&server.app, request("GET", "/dav/evil.html", Some(&auth))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, html);
+    assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "text/html");
+    assert_eq!(
+        headers.get(header::CONTENT_DISPOSITION).unwrap(),
+        "attachment"
+    );
+    assert_eq!(
+        headers.get("content-security-policy").unwrap(),
+        "sandbox; default-src 'none'"
+    );
+
+    // SVG is an active document too.
+    let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/evil.svg", &auth, "image/svg+xml", svg),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, headers, _) =
+        send(&server.app, request("GET", "/dav/evil.svg", Some(&auth))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get(header::CONTENT_DISPOSITION).unwrap(),
+        "attachment"
+    );
+
+    // Ordinary text keeps inline behaviour, but is still sandboxed.
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body("PUT", "/dav/note.txt", &auth, "text/plain", b"hi"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, headers, body) =
+        send(&server.app, request("GET", "/dav/note.txt", Some(&auth))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"hi");
+    assert!(headers.get(header::CONTENT_DISPOSITION).is_none());
+    assert_eq!(
+        headers.get("content-security-policy").unwrap(),
+        "sandbox; default-src 'none'"
+    );
+}
+
+#[tokio::test]
+async fn identity_is_create_once() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let first = Identity::generate().unwrap();
+    let second = Identity::generate().unwrap();
+    let wrapped = STANDARD.encode([7u8; 72]);
+    let payload = |id: &Identity| {
+        json!({
+            "public_key": STANDARD.encode(id.public_key()),
+            "wrapped_private": wrapped,
+        })
+        .to_string()
+        .into_bytes()
+    };
+
+    let put = |body: Vec<u8>| {
+        request_with_body(
+            "PUT",
+            "/api/e2ee/identity",
+            &auth,
+            "application/json",
+            &body,
+        )
+    };
+    let (status, _, _) = send(&server.app, put(payload(&first))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // An identical retry after a lost response is fine.
+    let (status, _, _) = send(&server.app, put(payload(&first))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // A different key would redirect future file-key wraps.
+    let (status, _, _) = send(&server.app, put(payload(&second))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/e2ee/identity", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["public_key"], STANDARD.encode(first.public_key()));
+}
+
+#[tokio::test]
+async fn file_keys_are_rewrapped_on_edit() {
+    let server = setup().await;
+    let auth = basic(USER, PASS);
+    let (status, _, _) = send(
+        &server.app,
+        request_with_body(
+            "PUT",
+            "/dav/k.bin",
+            &auth,
+            "application/octet-stream",
+            b"data",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let put_key = |body: &'static [u8]| {
+        request_with_body(
+            "PUT",
+            "/api/files/key?path=/k.bin",
+            &auth,
+            "application/octet-stream",
+            body,
+        )
+    };
+    let (status, _, _) = send(&server.app, put_key(b"key-one")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // A write recipient re-wraps the marker on every edit, so an update is
+    // expected (the real key lives in the MLS keyring for shared folders).
+    let (status, _, _) = send(&server.app, put_key(b"key-two")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/files/key?path=/k.bin", Some(&auth)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["wrapped_key"], STANDARD.encode(b"key-two"));
 }
 
 #[tokio::test]

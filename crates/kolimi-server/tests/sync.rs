@@ -447,12 +447,16 @@ async fn manifest_endpoints() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let missing = Hash::of(b"never stored");
-    let (status, _, _) = send(
+    let (status, _, body) = send(
         &server.app,
         request("GET", &format!("/api/manifests/{}", missing.to_hex()), None),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({ "error": "not found" })
+    );
 }
 
 #[tokio::test]

@@ -8,12 +8,18 @@ narrative guides see [install.md](install.md) and
 
 `kolimi-server` with no subcommand runs `serve`.
 
+Global option, accepted by every subcommand (before or after the
+subcommand name):
+
+| Flag | Environment | Default |
+| --- | --- | --- |
+| `--data DIR` | `KOLIMI_DATA` | `./kolimi-data` |
+
 ### `serve`
 
 | Flag | Environment | Default |
 | --- | --- | --- |
 | `--bind ADDR` | `KOLIMI_BIND` | `127.0.0.1:8080` |
-| `--data DIR` | `KOLIMI_DATA` | `./kolimi-data` |
 | `--origin URL` | `KOLIMI_ORIGIN` | `http://localhost:8080` |
 | `--tls-cert FILE` | `KOLIMI_TLS_CERT` | — |
 | `--tls-key FILE` | `KOLIMI_TLS_KEY` | — |

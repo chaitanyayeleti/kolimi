@@ -50,6 +50,9 @@ protection; MLS group state/epoch handling.
 5. Wrapped blobs are length-checked (24+32+16 bytes) before use.
 6. Recovery codes are 256 random bits, displayed once, parsed
    tolerantly (grouping/whitespace), never logged.
+7. The account identity public key is create-once. An authenticated
+   session alone cannot replace the key that future file keys are wrapped
+   to; an identical retry is accepted, rotation needs a recovery flow.
 
 ## Attack analysis
 

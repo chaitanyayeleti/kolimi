@@ -310,6 +310,12 @@ pub async fn set_encryption(
     if !access.perm.allows(kolimi_vfs::Perm::Write) {
         return api::forbidden("write access is required");
     }
+    // The encryption flag is a security property of the owner's tree, not
+    // content: a write-share recipient must not be able to downgrade it and
+    // make the owner's clients upload plaintext.
+    if access.owner_id != user.user_id {
+        return api::forbidden("only the owner can change folder encryption");
+    }
     // Mixed folders would let a plaintext client masquerade as ciphertext
     // (or the reverse), so refuse until the subtree is uniform.
     let mut stack = vec![access.node.clone()];

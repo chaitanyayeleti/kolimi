@@ -299,7 +299,8 @@ async fn write_share_and_group_membership() {
     .await;
     assert!(json_body(&body)["mounts"].as_array().unwrap().is_empty());
 
-    // Non-recipients cannot revoke shares.
+    // Non-recipients cannot revoke shares, and the status does not reveal
+    // whether the share id exists.
     let (status, _) = share(&server, ALICE, "/proj", "user", Some(CAROL), "read").await;
     assert_eq!(status, StatusCode::CREATED);
     let share_id = body_share_id(&server, ALICE, "/proj").await;
@@ -308,7 +309,7 @@ async fn write_share_and_group_membership() {
         request("DELETE", &format!("/api/shares/{share_id}"), BOB, None),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 async fn body_share_id(server: &TestServer, owner: &str, path: &str) -> i64 {
@@ -740,6 +741,47 @@ async fn sharing_requires_ownership_and_non_root() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = share(&server, ALICE, "/docs/a.txt", "user", Some(BOB), "read").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn write_recipient_cannot_change_folder_encryption() {
+    let server = setup().await;
+    mkdir(&server, ALICE, "/dav/vault").await;
+    let (status, _, body) = send(
+        &server.app,
+        json_request(
+            "POST",
+            "/api/files/encrypt",
+            ALICE,
+            &json!({ "path": "/vault", "encrypted": true }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", json_body(&body));
+
+    let (status, _) = share(&server, ALICE, "/vault", "user", Some(BOB), "write").await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // A write recipient must not be able to downgrade the owner's folder.
+    let (status, _, _) = send(
+        &server.app,
+        json_request(
+            "POST",
+            "/api/files/encrypt",
+            BOB,
+            &json!({ "path": "/Shared with me/vault", "encrypted": false }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/files/info?path=/vault", ALICE, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_body(&body)["encrypted"], true);
 }
 
 #[tokio::test]

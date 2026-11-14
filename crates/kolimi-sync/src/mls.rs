@@ -861,7 +861,7 @@ impl MlsClient {
                             .discard_pending(self.device())
                             .map_err(SyncError::E2ee)?;
                         self.pending_commits.remove(group_id);
-                        let _ = self.consume_packages(http, &consumed).await;
+                        let _ = self.consume_packages(http, root, &consumed).await;
                         return Ok(AddOutcome::Conflict);
                     }
                     Err(error) => {
@@ -894,7 +894,7 @@ impl MlsClient {
                 consumed.push(package.id);
             }
         }
-        self.consume_packages(http, &consumed).await?;
+        self.consume_packages(http, root, &consumed).await?;
         self.groups_cache.remove(root);
         Ok(AddOutcome::Done)
     }
@@ -921,14 +921,19 @@ impl MlsClient {
         Ok(Some(keyring))
     }
 
-    async fn consume_packages(&self, http: &Http, ids: &[i64]) -> Result<(), SyncError> {
+    async fn consume_packages(
+        &self,
+        http: &Http,
+        server_path: &str,
+        ids: &[i64],
+    ) -> Result<(), SyncError> {
         if ids.is_empty() {
             return Ok(());
         }
         let (status, body) = http
             .post_json(
                 "/api/mls/key-packages/consume",
-                &serde_json::json!({ "ids": ids }),
+                &serde_json::json!({ "path": server_path, "ids": ids }),
             )
             .await?;
         if status != 204 {

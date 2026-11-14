@@ -311,13 +311,17 @@ td.labels { color:var(--muted); word-break:break-word; }
 const HTML_TAIL: &str = "</main></body></html>";
 
 /// Middleware: records request counts and latency by route template.
+///
+/// Unmatched requests (404s) share one fixed label. Labelling them with the
+/// raw request path lets an unauthenticated client create unbounded metric
+/// series (and a matching Prometheus cardinality explosion).
 pub async fn record(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let method = request.method().to_string();
     let path = request
         .extensions()
         .get::<MatchedPath>()
         .map(|matched| matched.as_str().to_string())
-        .unwrap_or_else(|| request.uri().path().to_string());
+        .unwrap_or_else(|| "unmatched".to_string());
     let started = Instant::now();
     let response = next.run(request).await;
     state.metrics.observe(

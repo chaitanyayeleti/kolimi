@@ -841,12 +841,15 @@ async fn copy_tree(src: &Path, dest: &Path) -> Result<u64, StoreError> {
         while let Some(entry) = entries.next_entry().await? {
             let from_path = entry.path();
             let to_path = to.join(entry.file_name());
-            if entry.file_type().await?.is_dir() {
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
                 stack.push((from_path, to_path));
-            } else {
+            } else if file_type.is_file() {
                 tokio::fs::copy(&from_path, &to_path).await?;
                 count += 1;
             }
+            // Symlinks and special files are deliberately skipped: following
+            // them could pull unrelated host files into a backup.
         }
     }
     Ok(count)
@@ -1091,6 +1094,19 @@ mod tests {
         let restored = BlobStore::open(dest.path()).await.unwrap();
         let bytes = restored.read_content(1, &manifest).await.unwrap();
         assert_eq!(bytes, b"backup me");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copy_tree_skips_symlinks() {
+        let (dir, store) = store().await;
+        store.ingest_bytes(1, b"real content").await.unwrap();
+        let link = dir.path().join("users/1/chunks/host-link");
+        std::os::unix::fs::symlink("/etc/hostname", &link).unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        store.copy_tree_to(dest.path()).await.unwrap();
+        assert!(!dest.path().join("users/1/chunks/host-link").exists());
     }
 
     #[tokio::test]
