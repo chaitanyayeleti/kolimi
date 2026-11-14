@@ -1,10 +1,10 @@
 # Known dependency advisories (accepted)
 
-The entries below are accepted, upstream-blocked risks. They are RustSec
-**warnings** (unmaintained / unsound), not exploitable vulnerabilities,
-and `cargo audit` allows them by default. The explicitly ignored ones are
-listed in `.cargo/audit.toml` and `deny.toml` so the acceptance is
-intentional and `cargo deny` stays green.
+The entries below are accepted, upstream-blocked risks. Most are RustSec
+**warnings** (unmaintained / unsound); one (`RUSTSEC-2026-0459`) is a
+local-only vulnerability with no in-range fix. The explicitly ignored
+ones are listed in `.cargo/audit.toml` and `deny.toml` so the acceptance
+is intentional and `cargo deny` stays green.
 
 ## Unmaintained warnings reported by cargo-audit
 
@@ -46,6 +46,28 @@ them visible and revisit when the upstream dependency moves.
   unsound path is not reachable here.
 - **Revisit when:** `tantivy` moves to `lru >= 0.18`, then remove the
   ignore.
+
+## RUSTSEC-2026-0459 — bundled SQLite uninitialized page-cache memory
+
+- **Crate:** `libsqlite3-sys` 0.37.0 · **Via:** `sqlx-sqlite` 0.9.0 →
+  `sqlx` 0.9.0 (all database access).
+- **What it is:** CVE-2026-119375 (CVSS 6.8). SQLite before 3.54.0 can
+  return uninitialized page-cache memory when a process opens a database
+  file together with a sibling `-wal` whose page size differs from the
+  database's. **The vector is local** and requires the victim to open files
+  written by a less trusted party. Fixed by `libsqlite3-sys >= 0.39.0`
+  (SQLite 3.54.0).
+- **Why accepted:** `sqlx 0.9.0` (current release) pins
+  `libsqlite3-sys 0.37`; 0.39 arrives with `rusqlite 0.41` and a future
+  `sqlx` release, neither of which is available in range on 2026-11-14.
+  Packaged deployments run the server with a `0700` data directory
+  (systemd `UMask=0077`, deb/installer `chmod 700`), so a remote user
+  cannot plant the database/WAL pair. The plausible path is restoring an
+  untrusted backup; treat backups as trusted input and restore into a
+  `0700` directory.
+- **Revisit when:** `sqlx` moves to `libsqlite3-sys >= 0.39`, or the data
+  directory is no longer a trusted boundary (multi-tenant local users,
+  untrusted backup imports).
 
 ## Process
 

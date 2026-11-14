@@ -18,6 +18,7 @@ ignore = [
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 timing variability via hpke-rs-rust-crypto (P-256/P-384 HPKE). Kolimi's MLS ciphersuite is X25519/Ed25519/AES128GCM; no P-curve HPKE path is used. No semver fix in elliptic-curve 0.13; revisit when hpke-rs moves to elliptic-curve 0.14/crypto-bigint 0.7." },
     { id = "RUSTSEC-2026-0330", reason = "libcrux-kem 0.0.9 is an optional hpke-rs backend that is not enabled (no libcrux feature) and is absent from the host build graph; lockfile-only. Revisit when openmls/hpke-rs updates or prunes the optional entry." },
     { id = "RUSTSEC-2026-0331", reason = "libcrux-kem 0.0.9 is an optional hpke-rs backend that is not enabled (no libcrux feature) and is absent from the host build graph; lockfile-only. Revisit when openmls/hpke-rs updates or prunes the optional entry." },
+    { id = "RUSTSEC-2026-0459", reason = "Bundled SQLite < 3.54.0 (CVE-2026-119375) can expose uninitialized page-cache memory only when the process opens a database plus a crafted sibling -wal written by a less trusted local party. sqlx 0.9.0 pins libsqlite3-sys 0.37; the fixed 0.39 needs a rusqlite/sqlx upgrade that is not released (2026-11-14). Packaged deployments run with a 0700 data dir (systemd UMask=0077, deb/installer chmod 700), so remote users cannot plant the file pair; the plausible path is an untrusted backup/restore. Revisit when sqlx pulls libsqlite3-sys >= 0.39, or if the data-dir trust boundary changes." },
 ]
 
 [bans]
