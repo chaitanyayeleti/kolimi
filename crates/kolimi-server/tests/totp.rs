@@ -255,6 +255,57 @@ async fn cli_escape_hatch_disables_totp() {
 }
 
 #[tokio::test]
+async fn recovery_code_is_consumed_once_under_concurrency() {
+    let (_dir, state, app) = setup().await;
+    let (_, begin) = post(&app, "/api/totp/begin", &json!({})).await;
+    let secret = TotpSecret::from_base32(begin["secret"].as_str().unwrap()).unwrap();
+    let code = current_code(&secret);
+    let (status, enable) = post(
+        &app,
+        "/api/totp/enable",
+        &json!({ "secret": begin["secret"], "code": code }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{enable}");
+    let recovery = enable["recovery_codes"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Two logins use the same recovery code at the same time. The DELETE
+    // that consumes it is atomic, so exactly one may succeed.
+    let login = login_body(Some(&recovery));
+    let (first, second) = tokio::join!(
+        post(&app, "/api/session", &login),
+        post(&app, "/api/session", &login),
+    );
+    let statuses = [first.0, second.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1,
+        "{statuses:?}"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::UNAUTHORIZED)
+            .count(),
+        1,
+        "{statuses:?}"
+    );
+
+    let alice = state.db.find_user(ALICE).await.unwrap().unwrap();
+    assert_eq!(state.db.count_recovery_codes(alice.id).await.unwrap(), 9);
+}
+
+#[tokio::test]
 async fn totp_cannot_be_re_enrolled_from_a_session() {
     let (_dir, state, app) = setup().await;
     // Create a session while login is still password-only; Basic auth is
