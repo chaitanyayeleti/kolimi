@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Documentation: added deployment-specific `KOLIMI_METRICS_TOKEN` setup for
+  systemd, Docker Compose, Docker run, Helm, and direct binary runs, with
+  verification steps and Prometheus scrape examples.
+
 ## [0.5.1] - 2026-11-15
 
 ### Added

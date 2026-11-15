@@ -274,7 +274,9 @@ hash chain.
 
 ### Scrape metrics
 
-Set `KOLIMI_METRICS_TOKEN` on the server and use it as a bearer token:
+On 0.5.1+, set `KOLIMI_METRICS_TOKEN` in the server environment (systemd
+`/etc/kolimi/kolimi.env`, Compose `.env`, or the Helm
+`metrics.existingSecret` value) and use it as a bearer token:
 
 ```yaml
 scrape_configs:
@@ -287,8 +289,9 @@ scrape_configs:
 
 The token works only on `/metrics`. Alternatively, scrape with an admin
 username and an **app password** over HTTP Basic. The browser shows an HTML
-dashboard; append `?format=text` for Prometheus text. See
-[metrics.md](metrics.md) for the catalog and alert examples.
+dashboard; append `?format=text` for Prometheus text. Setup details are in
+[metrics.md](metrics.md#enable-the-metrics-token); the catalog and alert
+examples are in [metrics.md](metrics.md).
 
 ### Back up and restore
 

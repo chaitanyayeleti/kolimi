@@ -14,6 +14,116 @@ On Kubernetes, set `metrics.token` or preferably
 `metrics.existingSecret`/`metrics.secretKey` in the Helm values; the chart
 passes it to the server as `KOLIMI_METRICS_TOKEN`.
 
+## Enable the metrics token
+
+`KOLIMI_METRICS_TOKEN` is supported by **0.5.1 and later** and is read at
+server startup. Generate a token once:
+
+```sh
+openssl rand -hex 32
+```
+
+Do not reuse an admin password or commit the token to the repository.
+
+### systemd
+
+Add the token to the file referenced by the unit (the packaged unit uses
+`/etc/kolimi/kolimi.env`):
+
+```sh
+sudoedit /etc/kolimi/kolimi.env
+```
+
+```sh
+KOLIMI_METRICS_TOKEN=paste-the-token-here
+```
+
+Then restart the service:
+
+```sh
+sudo systemctl restart kolimi
+```
+
+Check the unit name first if it is not `kolimi`:
+
+```sh
+systemctl list-units --type=service | rg kolimi
+```
+
+### Docker Compose
+
+Put the token in the `.env` file next to your Compose file:
+
+```sh
+KOLIMI_METRICS_TOKEN=paste-the-token-here
+```
+
+The packaged Compose files pass it through. If you use a custom Compose
+file, add the environment entry yourself:
+
+```yaml
+services:
+  kolimi:
+    environment:
+      KOLIMI_METRICS_TOKEN: ${KOLIMI_METRICS_TOKEN}
+```
+
+Recreate the container:
+
+```sh
+docker compose up -d kolimi
+```
+
+### Docker run
+
+Environment variables cannot be added to a running container. Recreate it
+with the token:
+
+```sh
+docker run ... \
+  -e KOLIMI_METRICS_TOKEN=paste-the-token-here \
+  ghcr.io/chaitanyayeleti/kolimi:0.5.1
+```
+
+### Kubernetes / Helm
+
+Prefer a Secret:
+
+```sh
+kubectl create secret generic kolimi-metrics \
+  --from-literal=metrics-token="$(openssl rand -hex 32)"
+```
+
+```yaml
+metrics:
+  existingSecret: kolimi-metrics
+  secretKey: metrics-token
+```
+
+For a quick test, `metrics.token: "…"` also works but keeps the token in
+the values file.
+
+### Run the binary directly
+
+```sh
+KOLIMI_METRICS_TOKEN=paste-the-token-here \
+KOLIMI_DATA=/var/lib/kolimi \
+kolimi-server serve
+```
+
+### Verify
+
+```sh
+TOKEN=paste-the-token-here
+
+curl -fsS -H "Authorization: Bearer $TOKEN" \
+  https://cloud.example.com/metrics | head
+```
+
+The token is accepted on `/metrics` only; it does not create a session or
+grant access to the admin API. The same value also works as
+`X-Kolimi-Metrics-Token`.
+
 ## Metric catalog
 
 ### HTTP

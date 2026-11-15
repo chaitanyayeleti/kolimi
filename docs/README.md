@@ -12,7 +12,7 @@ Current-facing guides are [install.md](install.md), [how-to.md](how-to.md),
 plans, and audit files are design or history: they may describe deferred
 work, a frozen review surface, or an earlier implementation.
 
-Last full verification: **0.5.1** (2026-11-15); desktop client verified
+Last full verification: **0.5.1** (2026-11-16); desktop client verified
 against **0.4.10**.
 
 ## Start here
@@ -38,7 +38,7 @@ against **0.4.10**.
 | [usage.md](usage.md) | Sign-in, mandatory first-login MFA, app passwords, files, sharing, encrypted content, desktop/sync summary, admin quick reference |
 | [clients.md](clients.md) | Canonical client setup: credentials and app passwords, WebDAV/CalDAV/CardDAV URLs and mounts, desktop pairing and encryption/MLS options, `kolimi-sync`, troubleshooting |
 | [operations.md](operations.md) | Users and groups, account recovery, 2FA and app passwords, backup/restore, audit log, metrics/tracing, quotas, hardening, E2EE/MLS operations, client operations, upgrades, troubleshooting |
-| [metrics.md](metrics.md) | `/metrics` catalog, PromQL, alert starting points, scrape credentials, Grafana dashboard |
+| [metrics.md](metrics.md) | `/metrics` catalog, PromQL, alert starting points, scrape credentials and token setup, Grafana dashboard |
 | [reference.md](reference.md) | `kolimi-server` and `kolimi-sync` commands, environment variables, HTTP endpoint groups, data-directory layout |
 
 ## Design and security

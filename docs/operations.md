@@ -316,8 +316,9 @@ scrape_configs:
       - targets: ["cloud.example.com"]
 ```
 
-The full metric catalog, PromQL examples, and alert suggestions are in
-[metrics.md](metrics.md).
+The full metric catalog, PromQL examples, alert suggestions, and
+systemd/Compose/Helm token setup are in
+[metrics.md](metrics.md#enable-the-metrics-token).
 
 ### Storage-usage metrics
 
