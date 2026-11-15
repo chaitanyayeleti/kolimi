@@ -195,6 +195,7 @@ pub async fn limit(State(state): State<AppState>, req: Request, next: Next) -> R
         .rate_limiter
         .allow(&format!("{class}:{ip}"), max, window)
     {
+        state.metrics.rate_limited(class);
         let mut response = (StatusCode::TOO_MANY_REQUESTS, "too many requests\n").into_response();
         response
             .headers_mut()

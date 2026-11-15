@@ -11,6 +11,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use kolimi_auth::{CurrentUser, cache::credential_cache_key, password, token};
+use subtle::ConstantTimeEq;
 
 use crate::{AppState, CSRF_COOKIE, SESSION_COOKIE, hardening};
 
@@ -28,6 +29,21 @@ pub async fn require_auth(
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let headers = req.headers().clone();
+
+    // A read-only metrics token is accepted only by /metrics. It never
+    // authenticates any other route and does not create a session.
+    if path == "/metrics" && metrics_token_ok(&state, &headers) {
+        req.extensions_mut().insert(CurrentUser {
+            user_id: 0,
+            username: "metrics".to_string(),
+            is_admin: true,
+            must_change_password: false,
+            must_setup_mfa: false,
+            session_hash: None,
+        });
+        return Ok(next.run(req).await);
+    }
+
     let ip = hardening::client_ip(
         &headers,
         req.extensions()
@@ -182,6 +198,30 @@ fn forced_mfa_setup_allowed(method: &Method, path: &str) -> bool {
                     | "/api/me/password"
             ))
         || (method == Method::DELETE && path == "/api/session")
+}
+
+/// Whether a request carries the optional read-only metrics token.
+///
+/// `X-Kolimi-Metrics-Token` or `Authorization: Bearer …` is accepted. The
+/// token is only consulted on `/metrics`; it cannot authenticate any other
+/// route.
+fn metrics_token_ok(state: &AppState, headers: &HeaderMap) -> bool {
+    metrics_token_matches(state.metrics_token.as_deref(), headers)
+}
+
+fn metrics_token_matches(expected: Option<&str>, headers: &HeaderMap) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    let provided = headers
+        .get("x-kolimi-metrics-token")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+            let (scheme, rest) = value.split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then_some(rest.trim())
+        });
+    provided.is_some_and(|provided| expected.as_bytes().ct_eq(provided.as_bytes()).into())
 }
 
 async fn authenticate(
@@ -436,6 +476,32 @@ mod tests {
         assert_eq!(cookie_value(&headers, "kolimi_session").unwrap(), "abc123");
         assert_eq!(cookie_value(&headers, "kolimi_csrf").unwrap(), "xyz");
         assert!(cookie_value(&headers, "missing").is_none());
+    }
+
+    #[test]
+    fn metrics_token_accepts_header_or_bearer_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-kolimi-metrics-token",
+            HeaderValue::from_static("metrics-secret"),
+        );
+        assert!(metrics_token_matches(Some("metrics-secret"), &headers));
+        assert!(!metrics_token_matches(Some("other"), &headers));
+        assert!(!metrics_token_matches(None, &headers));
+
+        let mut bearer = HeaderMap::new();
+        bearer.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer metrics-secret"),
+        );
+        assert!(metrics_token_matches(Some("metrics-secret"), &bearer));
+
+        let mut basic = HeaderMap::new();
+        basic.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic bWV0cmljczpzZWNyZXQ="),
+        );
+        assert!(!metrics_token_matches(Some("metrics-secret"), &basic));
     }
 
     #[test]

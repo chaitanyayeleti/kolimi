@@ -158,6 +158,7 @@ Notes:
 | `KOLIMI_USER_QUOTA_BYTES` | Default per-user quota (`0` = unlimited) |
 | `KOLIMI_PREVIEW_ALLOW_NO_LANDLOCK=1` | Permit preview decoding without Landlock (weaker sandbox; older kernels) |
 | `KOLIMI_METRICS_PER_USER=1` | Opt in to per-user usage gauges |
+| `KOLIMI_METRICS_TOKEN` | Read-only bearer token accepted only by `/metrics` |
 | `KOLIMI_AUTH_RATE_LIMIT` | Login/passkey attempts per client per 5 minutes (default 20) |
 | `KOLIMI_TRUST_PROXY=1` | Use `X-Forwarded-For` from a trusted proxy |
 | `KOLIMI_OTEL_ENDPOINT` | OTLP/gRPC traces (requires the `otel` feature) |
@@ -271,7 +272,7 @@ Notes:
 | E2EE v1/v2 | `/api/e2ee/keyring`, `/api/e2ee/identity*`, `/api/files/key`, `/api/e2ee/share-key`, `/api/e2ee/share-name`, `/api/e2ee/enrollments*`, `/api/e2ee/devices*` |
 | MLS | `/api/mls/key-packages`, `/api/mls/key-packages/consume`, `/api/mls/key-packages/{username}`, `/api/mls/devices`, `/api/mls/devices/{username}`, `/api/mls/group`, `/api/mls/commit`, `/api/mls/messages`, `/api/mls/epoch`, `/api/mls/keyring`, `/api/mls/revocations` |
 | WebDAV / CalDAV / CardDAV | `/dav/`, `/dav/principals/{user}/`, `/dav/calendars/{user}/`, `/dav/addressbooks/{user}/`, `/.well-known/{caldav,carddav}` |
-| Operations | `GET /healthz` (public), `GET /version` (authenticated), `GET /metrics` (admin) |
+| Operations | `GET /healthz` (public), `GET /version` (authenticated), `GET /metrics` (admin or `KOLIMI_METRICS_TOKEN`) |
 
 E2EE and MLS request bodies are opaque ciphertext/protocol payloads to the
 server. The server validates sizes, ownership, ACLs and epoch ordering; it

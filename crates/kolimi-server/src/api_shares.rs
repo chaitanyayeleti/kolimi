@@ -638,6 +638,7 @@ async fn public_download_inner(
     };
     // Stream chunk-by-chunk: public links must not buffer multi-gigabyte
     // files in RAM (WebDAV GET already streams this way).
+    state.metrics.download(node.size);
     let stream = state.vfs.store().content_stream(share.owner_id, manifest);
     audit(
         state,

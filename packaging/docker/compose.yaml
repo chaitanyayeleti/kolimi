@@ -12,6 +12,7 @@ services:
       KOLIMI_SECURE_COOKIES: "false"
       KOLIMI_USER_QUOTA_BYTES: ${KOLIMI_USER_QUOTA_BYTES:-0}
       KOLIMI_METRICS_PER_USER: ${KOLIMI_METRICS_PER_USER:-0}
+      KOLIMI_METRICS_TOKEN: ${KOLIMI_METRICS_TOKEN:-}
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - kolimi-data:/data

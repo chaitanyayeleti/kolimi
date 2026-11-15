@@ -5,8 +5,8 @@ overview and quick start; everything below goes deeper.
 
 Current-facing guides are [install.md](install.md), [how-to.md](how-to.md),
 [usage.md](usage.md), [clients.md](clients.md), [operations.md](operations.md),
-[reference.md](reference.md), [architecture.md](architecture.md),
-[threat-model.md](threat-model.md), [crypto-review.md](crypto-review.md),
+[reference.md](reference.md), [metrics.md](metrics.md),
+[architecture.md](architecture.md), [threat-model.md](threat-model.md), [crypto-review.md](crypto-review.md),
 and [known-advisories.md](known-advisories.md). RFCs, decision records,
 plans, and audit files are design or history: they may describe deferred
 work, a frozen review surface, or an earlier implementation.
@@ -37,6 +37,7 @@ against **0.4.10**.
 | [usage.md](usage.md) | Sign-in, mandatory first-login MFA, app passwords, files, sharing, encrypted content, desktop/sync summary, admin quick reference |
 | [clients.md](clients.md) | Canonical client setup: credentials and app passwords, WebDAV/CalDAV/CardDAV URLs and mounts, desktop pairing and encryption/MLS options, `kolimi-sync`, troubleshooting |
 | [operations.md](operations.md) | Users and groups, account recovery, 2FA and app passwords, backup/restore, audit log, metrics/tracing, quotas, hardening, E2EE/MLS operations, client operations, upgrades, troubleshooting |
+| [metrics.md](metrics.md) | `/metrics` catalog, PromQL, alert starting points, scrape credentials |
 | [reference.md](reference.md) | `kolimi-server` and `kolimi-sync` commands, environment variables, HTTP endpoint groups, data-directory layout |
 
 ## Design and security

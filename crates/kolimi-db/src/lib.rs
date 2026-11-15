@@ -9,7 +9,7 @@ use std::{
 
 use serde::Serialize;
 use sqlx::{
-    FromRow, SqliteConnection, SqlitePool,
+    FromRow, Row, SqliteConnection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
@@ -111,6 +111,28 @@ pub struct User {
     /// Bumped on every password change so credential caches can be
     /// invalidated (e.g. after an out-of-process `user recover`).
     pub credentials_version: i64,
+}
+
+/// A point-in-time snapshot of low-cardinality operational counters.
+///
+/// Kept in the database crate so `/metrics` does not need to know table
+/// names or scan whole tables.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetricsSnapshot {
+    /// Live, unexpired sessions.
+    pub sessions_active: i64,
+    /// Stored app passwords.
+    pub app_passwords: i64,
+    /// MLS device-roster entries.
+    pub mls_devices: i64,
+    /// Live (unconsumed) MLS key packages.
+    pub mls_key_packages: i64,
+    /// Live files (excluding trash).
+    pub files: i64,
+    /// Nodes currently in trash.
+    pub trash: i64,
+    /// Stored file versions.
+    pub versions: i64,
 }
 
 /// Sort key for the admin user list (`GET /api/users`).
@@ -689,6 +711,37 @@ impl Db {
                 .fetch_all(&self.pool)
                 .await?,
         )
+    }
+
+    /// One cheap query of low-cardinality operational counters.
+    pub async fn metrics_snapshot(&self) -> Result<MetricsSnapshot, DbError> {
+        let row = sqlx::query(
+            "SELECT
+               (SELECT COUNT(*) FROM sessions WHERE expires_at > ?1) AS sessions_active,
+               (SELECT COUNT(*) FROM app_passwords) AS app_passwords,
+               (SELECT COUNT(*) FROM mls_devices) AS mls_devices,
+               (SELECT COUNT(*) FROM mls_key_packages WHERE consumed_at IS NULL AND (expires_at IS NULL OR expires_at > ?1)) AS mls_key_packages,
+               (SELECT COUNT(*) FROM nodes WHERE kind = 'file' AND trashed_at IS NULL) AS files,
+               (SELECT COUNT(*) FROM nodes WHERE trashed_at IS NOT NULL) AS trash,
+               (SELECT COUNT(*) FROM versions) AS versions",
+        )
+        .bind(now_millis())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(MetricsSnapshot {
+            sessions_active: row.try_get("sessions_active")?,
+            app_passwords: row.try_get("app_passwords")?,
+            mls_devices: row.try_get("mls_devices")?,
+            mls_key_packages: row.try_get("mls_key_packages")?,
+            files: row.try_get("files")?,
+            trash: row.try_get("trash")?,
+            versions: row.try_get("versions")?,
+        })
+    }
+
+    /// Connection-pool saturation counters for `/metrics`.
+    pub fn pool_stats(&self) -> (u32, u32) {
+        (self.pool.size(), self.pool.num_idle() as u32)
     }
 
     /// Removes the password hash, making the account passkey-only.

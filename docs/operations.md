@@ -277,33 +277,47 @@ tokens, and file bytes are never logged.
 
 ## Metrics
 
-`GET /metrics` (Prometheus text format) on the server port:
-request counts and latency histograms by route template, uploads,
-preview outcomes, login failures. Labels never contain paths, file
-names or user identifiers. `/healthz` is the liveness endpoint.
+`GET /metrics` (Prometheus text format) on the server port covers:
+
+- HTTP request counts, latency, in-flight requests, and declared body bytes
+  by route template and status
+- file and chunk upload/download bytes
+- preview outcomes and duration
+- login outcomes and failures, live sessions, and app passwords
+- accounts, quota buckets, storage used, files, trash, and versions
+- SSE connections and rejections, rate-limit rejections
+- MLS commit results
+- SQLite pool usage, janitor passes/events, process RSS/threads/FDs on
+  Linux, build version, and start time
+
+Labels never contain raw request paths, file names, or user identifiers.
+User/quota and database-snapshot gauges are rebuilt at most every 30 seconds;
+per-user gauges are opt-in.
 
 Opening `/metrics` in a browser (which sends `Accept: text/html`) shows a
 read-only **HTML dashboard** instead — metric families as cards, with a
 15-second auto-refresh; append `?format=text` to force the Prometheus
 format. Scrapers (no `text/html` in `Accept`) always get the text format.
+The endpoint sends `Vary: Accept` and `Cache-Control: no-store`.
 
-`/metrics` is **administrators only**. A signed-in admin can open it in
-the browser; a scraper authenticates with HTTP Basic using an admin's
-username and an **app password** (or the account password when TOTP is not
-enrolled). Non-admins get `403`, anonymous requests `401`. TOTP and
-passkey-only admins can create an app password under **Settings → Passkeys**
-for scraping.
+`/metrics` is **administrators only**, or accepts a dedicated read-only
+token. A signed-in admin can open it in the browser; a scraper can use an
+admin app password over HTTP Basic, or set `KOLIMI_METRICS_TOKEN` and send
+it as a bearer token. The metrics token works only on `/metrics` and never
+creates a session or grants API access. TOTP and passkey-only admins can
+create an app password under **Settings → Passkeys** for scraping.
 
 ```yaml
 scrape_configs:
   - job_name: kolimi
     scheme: https
-    basic_auth:
-      username: admin
-      password: <admin app password>
+    bearer_token: <KOLIMI_METRICS_TOKEN>
     static_configs:
       - targets: ["cloud.example.com"]
 ```
+
+The full metric catalog, PromQL examples, and alert suggestions are in
+[metrics.md](metrics.md).
 
 ### Storage-usage metrics
 

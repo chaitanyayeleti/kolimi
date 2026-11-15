@@ -1,11 +1,11 @@
 # AGENTS.md
 
-Kolimi is a single-binary, Rust-first Nextcloud alternative. One Cargo
-workspace (15 crates) holds the server, domain crates, sync client, FFI and
-WASM UI; `apps/kolimi-desktop` (Tauri) and `fuzz` are separate workspaces
-with their own lockfiles. Rust 2024, MSRV 1.96, stable toolchain (nightly
-only for fuzz). Runtime is one process, SQLite and a data directory — no
-Postgres, Redis or external services.
+Kolimi is a single-binary, Rust-first self-hosted server for files,
+calendars, and contacts. One Cargo workspace (15 crates) holds the server,
+domain crates, sync client, FFI and WASM UI; `apps/kolimi-desktop` (Tauri)
+and `fuzz` are separate workspaces with their own lockfiles. Rust 2024,
+MSRV 1.96, stable toolchain (nightly only for fuzz). Runtime is one process,
+SQLite and a data directory — no Postgres, Redis or external services.
 
 ## Hard constraints
 

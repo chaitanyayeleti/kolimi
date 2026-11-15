@@ -1,7 +1,7 @@
 //! Preview generation: classification, the sandboxed worker bridge, and
 //! the `/api/preview` endpoint.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     Extension,
@@ -186,9 +186,10 @@ pub async fn handler(
                 }
                 Err(_) => return StatusCode::NOT_FOUND.into_response(),
             };
+            let started = Instant::now();
             match run_worker(&state, "image", &data, size).await {
                 Ok(png) => {
-                    state.metrics.preview("ok");
+                    state.metrics.preview("ok", started.elapsed().as_secs_f64());
                     let mut response = Response::new(axum::body::Body::from(png));
                     response
                         .headers_mut()
@@ -196,11 +197,15 @@ pub async fn handler(
                     response
                 }
                 Err(WorkerError::TooLarge) => {
-                    state.metrics.preview("unsupported");
+                    state
+                        .metrics
+                        .preview("unsupported", started.elapsed().as_secs_f64());
                     StatusCode::PAYLOAD_TOO_LARGE.into_response()
                 }
                 Err(WorkerError::Failed(_)) => {
-                    state.metrics.preview("error");
+                    state
+                        .metrics
+                        .preview("error", started.elapsed().as_secs_f64());
                     (StatusCode::UNPROCESSABLE_ENTITY, "preview failed").into_response()
                 }
             }

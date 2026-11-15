@@ -1,6 +1,6 @@
 [package]
 name = "kolimi-server"
-description = "Kolimi server — a pure-Rust, single-binary alternative to Nextcloud"
+description = "Kolimi server — a small, self-hosted server for files, calendars, and contacts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -45,6 +45,7 @@ rpassword.workspace = true
 rust-embed = "8"
 serde.workspace = true
 serde_json.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

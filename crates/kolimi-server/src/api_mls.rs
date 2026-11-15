@@ -737,6 +737,7 @@ pub async fn post_commit(
         .await
     {
         Ok((seq, welcome_seq)) => {
+            state.metrics.mls_commit("ok");
             audit(
                 &state,
                 Some(user.user_id),
@@ -749,10 +750,17 @@ pub async fn post_commit(
             Json(json!({ "seq": seq, "welcome_seq": welcome_seq })).into_response()
         }
         Err(kolimi_db::DbError::Conflict(message)) => {
+            state.metrics.mls_commit("conflict");
             (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
         }
-        Err(kolimi_db::DbError::NotFound(_)) => api::not_found(),
-        Err(_) => api::internal_error(),
+        Err(kolimi_db::DbError::NotFound(_)) => {
+            state.metrics.mls_commit("error");
+            api::not_found()
+        }
+        Err(_) => {
+            state.metrics.mls_commit("error");
+            api::internal_error()
+        }
     }
 }
 

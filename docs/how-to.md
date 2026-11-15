@@ -274,22 +274,21 @@ hash chain.
 
 ### Scrape metrics
 
-Point Prometheus at `/metrics` with an admin username and an **app
-password**:
+Set `KOLIMI_METRICS_TOKEN` on the server and use it as a bearer token:
 
 ```yaml
 scrape_configs:
   - job_name: kolimi
     scheme: https
-    basic_auth:
-      username: admin
-      password: <admin app password>
+    bearer_token: <KOLIMI_METRICS_TOKEN>
     static_configs:
       - targets: ["cloud.example.com"]
 ```
 
-TOTP/passkey-only admins can create an app password for this. The browser
-shows an HTML dashboard; append `?format=text` for Prometheus text.
+The token works only on `/metrics`. Alternatively, scrape with an admin
+username and an **app password** over HTTP Basic. The browser shows an HTML
+dashboard; append `?format=text` for Prometheus text. See
+[metrics.md](metrics.md) for the catalog and alert examples.
 
 ### Back up and restore
 

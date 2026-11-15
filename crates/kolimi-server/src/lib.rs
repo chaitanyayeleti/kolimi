@@ -117,6 +117,9 @@ pub struct AppState {
     /// Whether to read the client address from `X-Forwarded-For`
     /// (`KOLIMI_TRUST_PROXY=1` when behind a trusted reverse proxy).
     pub trust_proxy: bool,
+    /// Optional read-only bearer token accepted only by `/metrics`
+    /// (`KOLIMI_METRICS_TOKEN`). Never grants access to other routes.
+    pub metrics_token: Option<String>,
 }
 
 impl AppState {
@@ -169,6 +172,10 @@ impl AppState {
             std::env::var("KOLIMI_TRUST_PROXY").ok().as_deref(),
             Some("1" | "true" | "yes" | "on")
         );
+        let metrics_token = std::env::var("KOLIMI_METRICS_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         Ok(Self {
             db: Arc::new(db),
             vfs,
@@ -191,6 +198,7 @@ impl AppState {
             rate_limiter: Arc::new(hardening::RateLimiter::new()),
             dummy_password_hash,
             trust_proxy,
+            metrics_token,
         })
     }
 }

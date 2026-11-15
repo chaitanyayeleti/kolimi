@@ -10,7 +10,7 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "kolimi-server",
     version,
-    about = "Kolimi server — a pure-Rust, single-binary alternative to Nextcloud"
+    about = "Kolimi server — a small, self-hosted server for files, calendars, and contacts"
 )]
 struct Cli {
     #[command(subcommand)]

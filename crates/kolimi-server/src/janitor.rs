@@ -9,7 +9,7 @@
 //! cursor so every blob is checked regularly; corruption is logged and
 //! audited (single-node installs have no replica to self-heal from).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::AppState;
 
@@ -171,27 +171,72 @@ pub async fn run(state: AppState) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
+        let started = Instant::now();
         match run_once(&state, kolimi_db::now_millis()).await {
-            Ok(report) if report != Report::default() => {
-                tracing::info!(
-                    purged_trash = report.purged_trash,
-                    pruned_versions = report.pruned_versions,
-                    chunks_deleted = report.chunks_deleted,
-                    manifests_deleted = report.manifests_deleted,
-                    expired_link_sessions = report.expired_link_sessions,
-                    expired_enrollments = report.expired_enrollments,
-                    pruned_mls_key_packages = report.pruned_mls_key_packages,
-                    pruned_mls_devices = report.pruned_mls_devices,
-                    pruned_mls_messages = report.pruned_mls_messages,
-                    pruned_mls_keyrings = report.pruned_mls_keyrings,
-                    scrubbed = report.scrubbed,
-                    corrupt = report.corrupt,
-                    reconciled = report.reconciled,
-                    "janitor pass complete"
-                );
+            Ok(report) => {
+                state
+                    .metrics
+                    .janitor_pass("success", started.elapsed().as_secs_f64());
+                state
+                    .metrics
+                    .janitor_event("trash_purged", report.purged_trash);
+                state
+                    .metrics
+                    .janitor_event("versions_pruned", report.pruned_versions);
+                state
+                    .metrics
+                    .janitor_event("chunks_deleted", report.chunks_deleted);
+                state
+                    .metrics
+                    .janitor_event("manifests_deleted", report.manifests_deleted);
+                state
+                    .metrics
+                    .janitor_event("link_sessions_expired", report.expired_link_sessions);
+                state
+                    .metrics
+                    .janitor_event("enrollments_expired", report.expired_enrollments);
+                state
+                    .metrics
+                    .janitor_event("mls_key_packages_pruned", report.pruned_mls_key_packages);
+                state
+                    .metrics
+                    .janitor_event("mls_devices_pruned", report.pruned_mls_devices);
+                state
+                    .metrics
+                    .janitor_event("mls_messages_pruned", report.pruned_mls_messages);
+                state
+                    .metrics
+                    .janitor_event("mls_keyrings_pruned", report.pruned_mls_keyrings);
+                state
+                    .metrics
+                    .janitor_event("scrub_checked", report.scrubbed);
+                state.metrics.janitor_event("scrub_corrupt", report.corrupt);
+                state.metrics.janitor_event("reconciled", report.reconciled);
+                if report != Report::default() {
+                    tracing::info!(
+                        purged_trash = report.purged_trash,
+                        pruned_versions = report.pruned_versions,
+                        chunks_deleted = report.chunks_deleted,
+                        manifests_deleted = report.manifests_deleted,
+                        expired_link_sessions = report.expired_link_sessions,
+                        expired_enrollments = report.expired_enrollments,
+                        pruned_mls_key_packages = report.pruned_mls_key_packages,
+                        pruned_mls_devices = report.pruned_mls_devices,
+                        pruned_mls_messages = report.pruned_mls_messages,
+                        pruned_mls_keyrings = report.pruned_mls_keyrings,
+                        scrubbed = report.scrubbed,
+                        corrupt = report.corrupt,
+                        reconciled = report.reconciled,
+                        "janitor pass complete"
+                    );
+                }
             }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(error = %error, "janitor pass failed"),
+            Err(error) => {
+                state
+                    .metrics
+                    .janitor_pass("error", started.elapsed().as_secs_f64());
+                tracing::warn!(error = %error, "janitor pass failed");
+            }
         }
     }
 }

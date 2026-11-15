@@ -370,6 +370,7 @@ pub async fn login_finish(
     if let Err(response) = complete_assertion(&state, user.id, &req.challenge_id, &credential).await
     {
         state.lockout.record_failure(&lockout_key);
+        state.metrics.login_failure();
         audit(
             &state,
             None,
@@ -383,6 +384,7 @@ pub async fn login_finish(
     }
 
     state.lockout.record_success(&lockout_key);
+    state.metrics.login("passkey");
     audit(
         &state,
         Some(user.id),

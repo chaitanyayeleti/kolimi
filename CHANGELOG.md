@@ -7,6 +7,15 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `/metrics` now covers transfer bytes, in-flight requests, login outcomes,
+  sessions and app passwords, users/quota/storage, MLS commits, SSE
+  pressure, rate limiting, DB pool use, janitor passes/events, process
+  RSS/threads/FDs on Linux, build version, and start time. User/quota gauges
+  refresh at most every 30 seconds instead of scanning all accounts on every
+  scrape.
+- `KOLIMI_METRICS_TOKEN` adds a read-only token accepted only by `/metrics`,
+  so a scraper no longer needs a full admin app password. `/metrics` also
+  sends `Vary: Accept` and `Cache-Control: no-store`.
 - Desktop Accounts & Sync can enable **MLS group shares** per synced folder
   from the add/edit form (or `"mls": true` in `desktop.json`). This publishes
   the desktop as an MLS device and includes it in key-package/epoch handling.
@@ -21,8 +30,9 @@ follow [Semantic Versioning](https://semver.org/).
   the task-first recipe index, refreshed sign-in/MFA/app-password guidance,
   fixed CLI examples to pass a password, corrected stale operations/security
   claims (preview sandbox, metrics scraper auth, Settings locations, RFC 0010
-  status), rewrote the top-level README as a narrative product overview, and
-  removed duplicated desktop setup from the operations guide.
+  status), added [docs/metrics.md](docs/metrics.md), rewrote the top-level
+  README as a narrative product overview, and removed duplicated desktop
+  setup from the operations guide.
 
 ### Fixed
 - Whole-root E2EE sync now marks the remote root folder encrypted (when the

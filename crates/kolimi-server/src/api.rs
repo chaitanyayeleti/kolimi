@@ -141,6 +141,7 @@ pub async fn login(
     };
     if let Some((secret_b32, last_step)) = totp {
         let Some(code) = req.code.as_deref() else {
+            state.metrics.login("totp_required");
             audit(
                 &state,
                 Some(user.id),
@@ -205,6 +206,11 @@ pub async fn login(
             return unauthorized("invalid credentials");
         };
         state.lockout.record_success(&lockout_key);
+        state.metrics.login(if method == "recovery_code" {
+            "recovery"
+        } else {
+            "totp"
+        });
         audit(
             &state,
             Some(user.id),
@@ -218,6 +224,7 @@ pub async fn login(
     }
 
     state.lockout.record_success(&lockout_key);
+    state.metrics.login("password");
     audit(
         &state,
         Some(user.id),

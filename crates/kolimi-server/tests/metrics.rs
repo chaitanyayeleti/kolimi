@@ -105,10 +105,90 @@ async fn metrics_cover_requests_logins_and_health() {
         "failure counter: {body}"
     );
     assert!(
+        body.contains(r#"kolimi_logins_total{outcome="password"} 1"#),
+        "successful login outcome: {body}"
+    );
+    assert!(
+        body.contains(r#"kolimi_logins_total{outcome="failure"} 1"#),
+        "failed login outcome: {body}"
+    );
+    assert!(
         body.contains("kolimi_http_request_duration_seconds_bucket"),
         "latency histogram: {body}"
     );
     assert!(body.contains("path=\"/healthz\""), "{body}");
+    assert!(body.contains("kolimi_build_info"), "build info: {body}");
+    assert!(
+        body.contains("kolimi_http_requests_in_flight"),
+        "in-flight gauge: {body}"
+    );
+    assert!(
+        body.contains("kolimi_sessions_active"),
+        "session gauge: {body}"
+    );
+}
+
+#[tokio::test]
+async fn metrics_set_vary_and_no_store_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
+    state
+        .db
+        .create_user("alice", &hash_password(PASS).unwrap())
+        .await
+        .unwrap();
+    let app = build_app(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .header(header::AUTHORIZATION, basic("alice", PASS))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::VARY).unwrap(),
+        "Accept",
+        "Vary must prevent caches mixing HTML and text"
+    );
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+}
+
+#[tokio::test]
+async fn unknown_http_methods_share_the_other_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
+    state
+        .db
+        .create_user("alice", &hash_password(PASS).unwrap())
+        .await
+        .unwrap();
+    let app = build_app(state);
+
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("FLOOB")
+                .uri("/random-method-probe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let (status, _, body) = get(&app, "/metrics", Some(&basic("alice", PASS))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("method=\"other\""), "{body}");
+    assert!(!body.contains("FLOOB"), "raw method leaked: {body}");
 }
 
 #[tokio::test]

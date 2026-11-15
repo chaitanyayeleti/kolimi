@@ -396,6 +396,7 @@ pub async fn get_chunk(
     }
     match state.vfs.read_chunk(owner_id, &hash).await {
         Ok(bytes) => {
+            state.metrics.chunk_download(bytes.len() as u64);
             let mut response = Response::new(Body::from(bytes));
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
@@ -474,8 +475,14 @@ pub async fn put_chunk(
     };
     let existed = state.vfs.read_chunk(owner_id, &hash).await.is_ok();
     match state.vfs.write_chunk(owner_id, &hash, &bytes).await {
-        Ok(()) if existed => StatusCode::NO_CONTENT.into_response(),
-        Ok(()) => StatusCode::CREATED.into_response(),
+        Ok(()) if existed => {
+            state.metrics.chunk_upload(bytes.len() as u64);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(()) => {
+            state.metrics.chunk_upload(bytes.len() as u64);
+            StatusCode::CREATED.into_response()
+        }
         Err(VfsError::Store(kolimi_store::StoreError::Mismatch { .. })) => {
             bad_request("chunk hash does not match its content")
         }
@@ -598,7 +605,7 @@ pub async fn commit_file(
         .await
     {
         Ok(Some(node)) => {
-            state.metrics.upload();
+            state.metrics.upload(manifest.size);
             let mut response = json_response(
                 StatusCode::OK,
                 json!({
@@ -768,6 +775,7 @@ pub async fn events(
     // Bound the number of live streams and their lifetime so a client
     // cannot exhaust tasks/DB polling with many open connections.
     let Ok(permit) = state.sse_permits.clone().try_acquire_owned() else {
+        state.metrics.sse_rejected();
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "too many event streams\n",
