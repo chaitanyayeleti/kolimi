@@ -69,14 +69,6 @@ them visible and revisit when the upstream dependency moves.
   directory is no longer a trusted boundary (multi-tenant local users,
   untrusted backup imports).
 
-## Process
-
-- CI runs both `cargo audit` (`.cargo/audit.toml`) and
-  `cargo deny check advisories` (`deny.toml`).
-- Every accepted advisory must have a reason and a **revisit condition**.
-- Prefer an actual upgrade or removal; accept only when upstream blocks a
-  fix, and document why the path is unreachable.
-
 ## RUSTSEC-2026-0387 — `crypto-bigint` timing variability
 
 - **Crate:** `crypto-bigint` 0.5.5 · **Via:** `hpke-rs-rust-crypto` 0.7
@@ -101,3 +93,11 @@ them visible and revisit when the upstream dependency moves.
   absent from the host build graph. The RustCrypto backend is used instead.
 - **Revisit when:** `openmls`/`hpke-rs` updates the optional backend or
   Cargo prunes the unused lock entry.
+
+## Process
+
+- CI runs both `cargo audit` (`.cargo/audit.toml`) and
+  `cargo deny check advisories` (`deny.toml`).
+- Every accepted advisory must have a reason and a **revisit condition**.
+- Prefer an actual upgrade or removal; accept only when upstream blocks a
+  fix, and document why the path is unreachable.

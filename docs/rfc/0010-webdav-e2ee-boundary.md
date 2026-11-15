@@ -1,14 +1,16 @@
 # RFC 0010: WebDAV / E2EE boundary — a plaintext-only DAV surface
 
-Status: partially implemented (0.4.5: DAV refuses encrypted nodes;
-marker-based directory boundary deferred) · Last verified: 0.5.0 ·
-Depends on: RFC 0007 (E2EE), RFC 0001 (storage engine),
-RFC 0003 (sharing and permissions), RFC 0009 (E2EE onboarding)
+Status: implemented (0.5.0: DAV refuses encrypted content and enforces
+encrypted-folder ancestry; the folder's encrypted flag is the marker) ·
+Last verified: 0.5.0 · Depends on: RFC 0007 (E2EE), RFC 0001 (storage
+engine), RFC 0003 (sharing and permissions), RFC 0009 (E2EE onboarding)
 
-> **Implementation note (0.3.0):** the basic boundary is enforced — DAV
-> refuses `GET`/`HEAD`/`PUT`/`COPY`/`MOVE` on encrypted nodes. The
-> “current behavior” section below is the pre-RFC baseline; the
-> marker-based directory boundary remains deferred.
+> **Implementation note (0.5.0):** DAV refuses `GET`/`HEAD`/`PUT`/`COPY`/
+> `MOVE` on encrypted content, and `path_is_encrypted` walks ancestors so
+> writes cannot enter an encrypted folder. `DELETE` and `LOCK` remain
+> metadata-only, and `PROPFIND` still lists opaque names. The separate
+> `encrypted_root` column proposed below was not added; a directory's
+> existing `encrypted` flag is the marker.
 
 ## Summary
 
@@ -44,7 +46,8 @@ it undecryptable). Both must be impossible by construction.
 
 ## Goals
 
-- Encrypted content is **invisible** to DAV (not served, not writable).
+- Encrypted content is **inaccessible** to DAV (not served, not writable);
+  opaque names may still be listed.
 - No DAV request can create plaintext inside, or move plaintext into, an
   encrypted subtree.
 - No key material ever enters the DAV path.
@@ -68,42 +71,26 @@ root:
 
 | Method | Behavior |
 | --- | --- |
-| `PROPFIND` | omit encrypted children (or list locked stubs carrying a `kolimi-encrypted` property) |
-| `GET` / `HEAD` / ranges | `403 Forbidden` (preferred) or `404` (to avoid leaking existence) — never serve ciphertext as a file |
-| `PUT` / `MKCOL` | `403` — DAV cannot encrypt, so it must not create plaintext in an E2EE tree |
+| `PROPFIND` | lists entries; encrypted names stay opaque (`k1_…`) and content is not served |
+| `GET` / `HEAD` / ranges | `403 Forbidden` — never serve ciphertext as a file |
+| `PUT` / `PROPPATCH` | `403` — DAV cannot encrypt, so it must not create plaintext in an E2EE tree |
+| `MKCOL` | allowed — creating an empty collection writes no content |
 | `MOVE` / `COPY` | `403` if the operation would cross the boundary in either direction |
-| `DELETE` | allowed (removing ciphertext is safe; optional, may also be refused for uniformity) |
-| `LOCK` / `UNLOCK` | allowed only on plaintext paths |
+| `DELETE` | allowed (removing ciphertext is safe) |
+| `LOCK` / `UNLOCK` | allowed; locks are metadata-only |
 
 `OPTIONS`/capability discovery should advertise the marker so clients can
 render locked entries rather than silently showing garbage.
 
-## Encrypted-root marker (the missing piece)
+## Encrypted-folder marker
 
-The server cannot currently tell that a *directory* is encrypted.
-"Encrypted" is derived per-file from a wrapped key in `e2ee_file_keys`
-(`crates/kolimi-db/src/e2ee.rs:79`); directories carry no flag, and the
-"this subtree is E2EE" policy lives only in the client's `--e2ee-root`
-config.
-
-Add a server-side **encrypted-root marker**:
-
-```sql
--- a directory node flagged as the root of an E2EE subtree
-ALTER TABLE nodes ADD COLUMN encrypted_root INTEGER NOT NULL DEFAULT 0;
-```
-
-- A node is **encrypted** if it is a marked root or has an ancestor that
-  is (ancestry check), or if it has a wrapped file key (files).
-- The client sets the marker when it starts encrypting a tree
-  (`--e2ee-root`), so the boundary no longer depends on client honesty at
-  read time.
-- `browse`, `search`, `preview`, and DAV all consult the same helper
-  (`is_encrypted_subtree(node)`) instead of ad-hoc per-file lookups.
-
-Migration for existing accounts: mark any directory that currently has
-encrypted descendants as an encrypted root (one-time backfill), or keep
-the per-file fallback until the client re-marks.
+Directories carry the existing `encrypted` flag. The web UI and sync clients
+set it through `/api/files/encrypt` when a tree is encrypted, so the server
+can identify an encrypted subtree without a separate `encrypted_root`
+column. A node is inside E2EE when it is a flagged folder, has a flagged
+ancestor, or (for files) has a wrapped key. `path_is_encrypted` in
+`kolimi-vfs` implements the ancestry walk and is shared by browse, search,
+preview, and DAV.
 
 ## Boundary-crossing operations
 
@@ -113,19 +100,19 @@ the per-file fallback until the client re-marks.
 - `COPY` across the boundary: `403`.
 - `MOVE`/`COPY` wholly within one side: allowed (still subject to the
   per-method rules above).
-- Creating a plaintext child under an encrypted root (`PUT`/`MKCOL`):
-  `403`.
+- Creating a plaintext child under an encrypted root with `PUT`: `403`.
+  `MKCOL` is allowed because an empty collection carries no content.
 
-These checks belong in the DAV crate, immediately after path resolution
-and before any store access, alongside the existing lock checks.
+These checks live in `kolimi-webdav`, immediately after path resolution and
+before any store access, alongside the existing lock checks.
 
 ## Scoping "separate"
 
 Three ways to configure the boundary, from least to most isolated:
 
 1. **Per-root (recommended).** Some roots are plaintext (DAV-visible),
-   others encrypted (hidden). Keep a `Public/`/`Shared/` plaintext root
-   for Finder/Office/rclone; `Private/` is invisible to DAV.
+   others encrypted (content-blocked). Keep a `Public/`/`Shared/` plaintext
+   root for Finder/Office/rclone; `Private/` is walled off from DAV content.
 2. **Per-account.** An account is *either* a DAV-plaintext account *or* an
    E2EE account. Simplest mental model; no mixing.
 3. **Dedicated endpoint.** A separate DAV listener (own port/subdomain,
@@ -180,15 +167,15 @@ Seedvault); E2EE = client-only zone for private files.** They never mix.
 
 ## Security considerations
 
-- **Existence leak.** `403` reveals that a path exists; `404` hides it.
-  Default to `404` for encrypted paths on `GET`/`HEAD`/`PUT` (consistent
-  with "invisible"), and omit them from `PROPFIND` unless stub listing is
-  enabled.
+- **Existence leak.** The current implementation returns `403` and lists
+  opaque `k1_…` names; a future hide-existence mode could return `404` and
+  omit entries from `PROPFIND`.
 - **No key material in DAV.** The DAV path must never read `e2ee_*`
   tables; the boundary check uses only the node marker/ancestry.
 - **No plaintext-in-encrypted-tree, ever.** This is the invariant that
-  prevents both leakage and corruption; enforce it on every write path
-  (`PUT`, `MKCOL`, `MOVE`, `COPY`).
+  prevents both leakage and corruption; enforce it on every content write
+  path (`PUT`, `PROPPATCH`, `MOVE`, `COPY`). `MKCOL` is allowed because an
+  empty collection carries no content.
 - **Metadata still leaks** for plaintext nodes (unchanged from RFC 0007).
 - **Backups/restore** operate on ciphertext unchanged; DAV is orthogonal.
 

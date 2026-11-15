@@ -36,9 +36,9 @@ with their own lockfiles.
 | --- | --- | --- |
 | `kolimi-chunk` | FastCDC chunking, manifests, content ids | — |
 | `kolimi-crypto` | E2EE primitives: keyring, file keys, chunk AEAD, X25519 sharing | — |
-| `kolimi-db` | SQLite persistence and migrations (users, tree, shares, DAV, E2EE, MLS, audit) | — |
+| `kolimi-db` | SQLite persistence and migrations (users, app passwords, tree, shares, DAV, E2EE, MLS, audit) | — |
 | `kolimi-store` | Content-addressed blob store, GC, scrub | `chunk` |
-| `kolimi-auth` | Passwords, sessions, passkeys, TOTP, lockout | — |
+| `kolimi-auth` | Passwords, sessions, passkeys, TOTP, app-password tokens, lockout | — |
 | `kolimi-vfs` | Path-safe filesystem + the single permission engine | `chunk`, `db`, `store` |
 | `kolimi-webdav` | WebDAV, CalDAV and CardDAV protocol surfaces | `auth`, `db`, `store`, `vfs` |
 | `kolimi-search` | tantivy full-text index fed from the change feed | — |

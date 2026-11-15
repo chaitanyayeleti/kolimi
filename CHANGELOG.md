@@ -14,6 +14,16 @@ follow [Semantic Versioning](https://semver.org/).
   empty encrypted-root sentinel, so the remote sync root itself is marked
   encrypted instead of looking for a same-named subfolder.
 
+### Changed
+- Documentation: added [docs/clients.md](docs/clients.md) as the canonical
+  client connection guide (app passwords, WebDAV/CalDAV/CardDAV URLs and
+  mounts, desktop pairing, CLI sync) and [docs/how-to.md](docs/how-to.md) as
+  the task-first recipe index, refreshed sign-in/MFA/app-password guidance,
+  fixed CLI examples to pass a password, corrected stale operations/security
+  claims (preview sandbox, metrics scraper auth, Settings locations, RFC 0010
+  status), rewrote the top-level README as a narrative product overview, and
+  removed duplicated desktop setup from the operations guide.
+
 ### Fixed
 - Whole-root E2EE sync now marks the remote root folder encrypted (when the
   remote root is not the account root) and refuses only when that path still

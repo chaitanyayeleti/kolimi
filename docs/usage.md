@@ -4,6 +4,15 @@ Day-to-day guide for the web UI, desktop app, and sync client. Server
 administration lives in [operations.md](operations.md); flags and endpoints
 are in [reference.md](reference.md).
 
+- [Sign in](#sign-in)
+- [Account and security](#account-and-security)
+- [Files and folders](#files-and-folders)
+- [Sharing](#sharing)
+- [Desktop app and sync](#desktop-app-and-sync)
+- [Other apps and the CLI](#other-apps-and-the-cli)
+- [Admin quick reference](#admin-quick-reference)
+- [Troubleshooting](#troubleshooting)
+
 ## Sign in
 
 Open the server's `/app/` URL (for example `https://cloud.example.com/app/`).
@@ -17,6 +26,11 @@ Open the server's `/app/` URL (for example `https://cloud.example.com/app/`).
 - **Forced rotation** — an administrator can mark a temporary password as
   requiring a change. Kolimi shows the change-password screen before the
   file browser until a new password is set.
+- **First sign-in MFA** — accounts created from **Admin → Users** (or the
+  admin API) or through an invite must enroll TOTP or a passkey on the
+  **Secure your account** page before the file browser opens. The choice is
+  required, but either method clears the block. Existing accounts and
+  CLI-created accounts are not forced.
 
 The encryption passphrase is separate from the account password. The login
 password protects the account; the passphrase unlocks encrypted files and is
@@ -32,10 +46,15 @@ Open **Settings** in the sidebar.
   password or a two-factor code and signs out other sessions.
 - **Encryption** — create or unlock the encryption keyring. The recovery
   phrase is shown once; store it offline. Changing the passphrase replaces
-  the account keyring.
+  the account keyring. **Encrypt existing names** renames already-encrypted
+  items in place (contents are not re-uploaded; plaintext files are skipped).
 - **Sharing** — upgrade legacy per-file folder shares to MLS groups.
 - **Devices** — review MLS devices and revoke one that is lost or untrusted.
 - **Passkeys** — register or remove passkeys and enable TOTP/recovery codes.
+- **App passwords** — also under *Settings → Passkeys*: long-lived,
+  per-device credentials for WebDAV, CalDAV/CardDAV, and sync clients. The
+  token is shown once; revoke it here when a device is lost. App passwords
+  work even when TOTP is enabled or the account is passkey-only.
 
 Email is informational only. Kolimi does not send mail or use it to sign in.
 Account recovery through an administrator is separate from losing the
@@ -51,13 +70,21 @@ encryption passphrase; see [operations.md](operations.md#account-recovery).
   move, or trash the selection. Each row’s **Actions** menu has details,
   sharing, rename, versions, and delete.
 - Right-click a file or folder (or use its action buttons) to rename,
-  download, share, delete, or open its version history.
+  download, share, delete, or open its version history and restore an older
+  version.
 - Deleted items go to **Trash** and can be restored or purged.
 - **Shared with me** appears as a mount in the sidebar. Read-only shares
   cannot be changed; write shares can be edited in place.
+- The sidebar storage ring shows used space against your quota (when one is
+  set).
 
 Encrypted content is marked **Encrypted** in the file list. If a folder is
 locked, unlock the keyring first. Encrypted names are decrypted locally.
+Image thumbnails use the sandboxed preview worker; encrypted files have no
+server-side thumbnail, preview, or content search.
+
+Search matches plaintext names and indexed content. For encrypted files,
+names are matched locally after unlock; encrypted content is never indexed.
 
 ## Sharing
 
@@ -65,11 +92,13 @@ Use **Share** on a file or folder:
 
 - **User** — share with one account.
 - **Group** — share with every member of a group.
-- **Public link** — create a URL with an optional password and expiry.
+- **Public link** — create a read-only URL. UI-created links expire after
+  30 days and include a generated password shown once; the API can set a
+  custom `password` (`""` = none) or `expires_in_secs` (`0` = never).
 
-Permissions are **read** or **write**. Write shares work for encrypted
-folders and single files; the web UI can download single-file shares but has
-no inline editor for them.
+User and group permissions are **read** or **write**; public links are always
+read-only. Write shares work for encrypted folders and single files; the web
+UI can download single-file shares but has no inline editor for them.
 
 For encrypted content, the recipient must have unlocked Kolimi at least once
 so their key package exists. Group membership changes update share ACLs and
@@ -81,14 +110,23 @@ advances. Revoking a share cannot erase data a recipient already downloaded.
 
 The desktop app loads the server's web UI in a native window and adds the
 tray menu, background sync, and OS keychain storage. Create a local folder
-pair from **Accounts & Sync**. This native sign-in is separate from the web
-app so sync can run with the window closed; if your account uses TOTP, enter
-the current code (or a recovery code) there, or use **Use current web
-session** after signing in to the main window. The client stores a revocable
-app password in the OS keychain rather than keeping your web session. The
-sidebar **Sync** item and the tray show idle, syncing, paused, error, locked,
-and conflict states; click either to open Accounts & Sync. The status card
-shows the last sync for each folder, and **Pause** / **Resume** controls
+pair from **Accounts & Sync**. Full client setup, including passkey-only
+sign-in and keychain details, is in [clients.md](clients.md#desktop-app).
+
+Background sign-in is separate from the web app so sync can run with the
+window closed. Enter the account password plus the current TOTP code (or a
+recovery code); passkey-only accounts sign in to the main window first and
+then choose **Use current web session**. You can also paste an app password
+created under **Settings → Passkeys**. The client stores a revocable app
+password in the OS keychain rather than keeping your web session.
+
+If the account has no encryption keyring yet, Accounts & Sync can create one
+with **Set up encryption** and shows the 24-word recovery phrase once; a
+locked keyring is unlocked there too.
+
+The sidebar **Sync** item and the tray show idle, syncing, paused, error,
+locked, and conflict states; click either to open Accounts & Sync. The status
+card shows the last sync for each folder, and **Pause** / **Resume** controls
 there match the tray item. If the server is unreachable, the main window
 shows an offline banner with a Retry action, and the Accounts & Sync status
 card keeps the last error and last successful sync visible.
@@ -96,23 +134,37 @@ card keeps the last error and last successful sync visible.
 Encrypted folders are normally relative paths inside the pair (for example
 `Private` means `<local>/Private` ↔ `<remote>/Private`). Enable **Encrypt the
 entire sync folder** when the pair itself should be encrypted; the remote
-root is then marked encrypted. Enable **MLS group shares** on a pair to
-publish this desktop as an MLS device and include it in encrypted group-share
-key packages.
+root is then marked encrypted. Enabling it on a root that still contains
+plaintext is refused, so move those files first. Enable **MLS group shares**
+on a pair to publish this desktop as an MLS device and include it in
+encrypted group-share key packages.
 
-The `kolimi-sync` CLI mirrors a local directory:
+## Other apps and the CLI
+
+WebDAV is served at `https://cloud.example.com/dav/`; CalDAV and CardDAV
+use `/dav/calendars/<user>/` and `/dav/addressbooks/<user>/`. Use an **app
+password** for these clients rather than the account password. Mounting,
+CalDAV/CardDAV setup, and encrypted-folder caveats are in
+[clients.md](clients.md#webdav).
+
+The `kolimi-sync` CLI mirrors a local directory and is one-shot, so run it
+from a timer or watcher. TOTP and passkey-only accounts need an app password;
+the CLI cannot answer an interactive challenge:
 
 ```sh
+export KOLIMI_PASSWORD='app-password-here'
+
 kolimi-sync \
   --server https://cloud.example.com \
   --user alice \
   --local ~/Kolimi \
-  --remote /
+  --remote /Kolimi
 ```
 
-Use `--e2ee-root` for encrypted subtrees and `--e2ee-setup` once to create
-the keyring. The desktop app is available for Linux, Windows, and macOS.
-The Android client is planned but parked; there is no mobile build yet.
+Use `--e2ee-root Private` for encrypted subtrees, `--e2ee-root ''` for the
+whole sync root, and `--e2ee-setup` once to create the keyring. The desktop
+app is available for Linux, Windows, and macOS. The Android client is
+planned but parked; there is no mobile build yet.
 
 ## Admin quick reference
 
@@ -134,6 +186,8 @@ full workflow and recovery rules.
 
 - Login, passkey, quota, sync, and E2EE issues:
   [operations.md#troubleshooting](operations.md#troubleshooting).
+- WebDAV, CalDAV, desktop sign-in, and client connection issues:
+  [clients.md#troubleshooting](clients.md#troubleshooting).
 - Server/CLI flags and environment variables:
   [reference.md](reference.md).
 - Install, TLS, and upgrade paths: [install.md](install.md).

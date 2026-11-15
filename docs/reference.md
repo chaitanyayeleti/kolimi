@@ -1,8 +1,14 @@
 # Reference
 
 Commands, environment variables, HTTP surfaces and on-disk layout. For
-narrative guides see [install.md](install.md), [usage.md](usage.md), and
-[operations.md](operations.md).
+narrative guides see [install.md](install.md), [usage.md](usage.md),
+[clients.md](clients.md), and [operations.md](operations.md).
+
+- [`kolimi-server`](#kolimi-server)
+- [`kolimi-sync`](#kolimi-sync)
+- [Environment variables](#environment-variables)
+- [HTTP API](#http-api)
+- [Data directory](#data-directory)
 
 ## `kolimi-server`
 
@@ -86,16 +92,20 @@ Required for a normal sync:
 | --- | --- | --- |
 | `--server URL` | `KOLIMI_SERVER` | Server base URL |
 | `--user NAME` | `KOLIMI_USER` | Account username (HTTP Basic) |
-| `--password PW` | `KOLIMI_PASSWORD` | Account password |
+| `--password PW` | `KOLIMI_PASSWORD` | Account password or app password (HTTP Basic) |
 | `--local DIR` | — | Local directory to mirror |
 | `--remote PATH` | — | Remote subfolder (default `/`) |
+
+Use an app password for TOTP or passkey-only accounts; the CLI cannot answer
+an interactive TOTP prompt. Pass it through `KOLIMI_PASSWORD` or
+`--password`. See [clients.md](clients.md#kolimi-sync-cli) for examples.
 
 E2EE:
 
 | Flag | Environment | Meaning |
 | --- | --- | --- |
 | `--e2ee-setup` | — | Create/upload the keyring, print the recovery code, exit |
-| `--e2ee-root PATH` | — | Encrypted subtree; repeatable/comma-separated |
+| `--e2ee-root PATH` | — | Encrypted subtree; repeatable/comma-separated. Empty value (`''`) encrypts the whole sync root |
 | `--e2ee-passphrase PW` | `KOLIMI_E2EE_PASSPHRASE` | Unlock passphrase |
 | `--e2ee-recovery CODE` | `KOLIMI_E2EE_RECOVERY` | Recovery-code unlock |
 | `--e2ee-prf HEX` | `KOLIMI_E2EE_PRF` | Platform passkey-PRF output (64 hex chars) |
@@ -146,13 +156,14 @@ Notes:
 | `KOLIMI_TLS_CERT`, `KOLIMI_TLS_KEY` | Direct TLS |
 | `KOLIMI_SECURE_COOKIES` | Secure cookies + HSTS behind TLS |
 | `KOLIMI_USER_QUOTA_BYTES` | Default per-user quota (`0` = unlimited) |
+| `KOLIMI_PREVIEW_ALLOW_NO_LANDLOCK=1` | Permit preview decoding without Landlock (weaker sandbox; older kernels) |
 | `KOLIMI_METRICS_PER_USER=1` | Opt in to per-user usage gauges |
 | `KOLIMI_AUTH_RATE_LIMIT` | Login/passkey attempts per client per 5 minutes (default 20) |
 | `KOLIMI_TRUST_PROXY=1` | Use `X-Forwarded-For` from a trusted proxy |
 | `KOLIMI_OTEL_ENDPOINT` | OTLP/gRPC traces (requires the `otel` feature) |
 | `RUST_LOG` | Log filter (default `info`) |
 
-### Sync / desktop / installer
+### Sync / desktop / packaging
 
 | Variable | Used for |
 | --- | --- |
@@ -161,21 +172,28 @@ Notes:
 | `KOLIMI_MLS_SHARES` | Enable MLS in `kolimi-sync` |
 | `KOLIMI_DEVICE_NAME` | Label shown in the MLS device roster (default: hostname) |
 | `KOLIMI_DESKTOP_CONFIG` | Override `desktop.json` path |
+| `KOLIMI_START_HIDDEN` | Start the desktop app hidden in the tray (same as `--hidden`) |
 | `KOLIMI_ADMIN_PASSWORD` | Non-interactive `install.sh` admin password |
 | `KOLIMI_IMAGE` | Image override for the Compose examples |
+| `KOLIMI_DOMAIN`, `ACME_EMAIL` | Traefik Compose hostname and ACME contact |
 
 ## HTTP API
 
 ### Authentication
 
 - `POST /api/session` with `{"username","password"}` sets the
-  `kolimi_session` and `kolimi_csrf` cookies. Cookie-authenticated
+  `kolimi_session` and `kolimi_csrf` cookies. Include `code` (TOTP or a
+  recovery code) when the account has two-factor enabled; without it the
+  response is `401` with `"totp_required": true`. Cookie-authenticated
   state-changing requests need `X-CSRF-Token` from the CSRF cookie.
 - `DELETE /api/session` signs out. `GET /api/me` is session-only (HTTP
   Basic is deliberately rejected); most other API endpoints and WebDAV
   accept HTTP Basic for scripts and DAV clients.
 - `POST /api/me/password` requires `X-Reauth-Token` from
-  `POST /api/reauth`. It keeps the current session and revokes the others.
+  `POST /api/reauth`. Re-authentication accepts `{"password"}` or a TOTP /
+  recovery `{"code"}` and returns a single-use token valid for five minutes;
+  passkey-only sessions use `/api/reauth/passkey/begin|finish` instead. It
+  keeps the current session and revokes the others.
 - `GET /api/me/sessions` lists the caller's live sessions with creation,
   last-seen, IP, `User-Agent`, and optional label metadata.
   `PATCH /api/me/sessions/{id}` sets or clears `label`;
@@ -187,7 +205,8 @@ Notes:
 - Accounts marked `must_change_password` may only call `GET /api/me`,
   `POST /api/reauth`, `POST /api/me/password`, and `DELETE /api/session`.
   Every other API, WebDAV, and sync request returns `403`.
-- Accounts marked `must_setup_mfa` (admin-created and invited users) may only
+- Accounts marked `must_setup_mfa` (users created through the admin API or
+  an invite) may only
   call the MFA setup surface (`GET /api/me`, `GET /api/totp`,
   `POST /api/totp/begin|enable`, `GET /api/passkeys`,
   `POST /api/passkeys/register/*`, `POST /api/reauth`,
@@ -216,23 +235,42 @@ Notes:
   recomputes the hash chain. Both audit routes are admin-only and omit chain
   hashes.
 - Public links use `/public/{token}` and set a scoped unlock cookie after
-  `POST /public/{token}/unlock`.
+  `POST /public/{token}/unlock`. `POST /api/shares` with `kind: "link"`
+  accepts `password` (omitted = generated, `""` = none) and
+  `expires_in_secs` (omitted = 30 days, `0` = never); public links are
+  read-only.
+
+### WebDAV / CalDAV / CardDAV
+
+- **WebDAV:** `https://host/dav/` is the account root; `/dav/<path>` maps
+  to the file tree. Class 2 (`LOCK`/`UNLOCK`, byte ranges, streamed reads).
+- **CalDAV:** principal at `/dav/principals/{user}/`, calendar home at
+  `/dav/calendars/{user}/`.
+- **CardDAV:** principal at `/dav/principals/{user}/`, address-book home at
+  `/dav/addressbooks/{user}/`.
+- `/.well-known/caldav` and `/.well-known/carddav` redirect to `/dav/`.
+- Authenticate with HTTP Basic using the username and an **app password**.
+  Encrypted subtrees are plaintext-only over DAV: content reads and writes
+  return `403`; `DELETE`/`LOCK` are metadata-only and still work. Encrypted
+  names may appear as `k1_…`. Client setup and mount examples are in
+  [clients.md](clients.md#webdav).
 
 ### Endpoint groups
 
 | Area | Endpoints |
 | --- | --- |
-| Session / account | `POST /api/session`, `DELETE /api/session`, `GET|PATCH /api/me`, `GET /api/me/usage`, `POST /api/me/password`, `GET|DELETE /api/me/sessions`, `PATCH|DELETE /api/me/sessions/{id}`, `GET|POST /api/me/app-passwords`, `DELETE /api/me/app-passwords/{id}`, `DELETE /api/me/app-passwords/current`, `GET /api/users`, `PATCH|DELETE /api/users/{name}`, `/api/users/{name}/usage`, `/api/users/{name}/recover`, `/api/users/{name}/logout`, `/api/users/{name}/sessions` |
+| Session / account | `POST /api/session`, `DELETE /api/session`, `POST /api/reauth`, `GET|PATCH /api/me`, `GET /api/me/usage`, `POST /api/me/password`, `GET|DELETE /api/me/sessions`, `PATCH|DELETE /api/me/sessions/{id}`, `GET|POST /api/me/app-passwords`, `DELETE /api/me/app-passwords/{id}`, `DELETE /api/me/app-passwords/current`, `GET|POST /api/users`, `PATCH|DELETE /api/users/{name}`, `/api/users/{name}/usage`, `/api/users/{name}/recover`, `/api/users/{name}/logout`, `/api/users/{name}/sessions` |
 | Invites | `GET|POST /api/invites`, `DELETE /api/invites/{id}`, `POST /api/invites/lookup`, `POST /api/invites/accept` |
-| Passkeys / TOTP | `/api/passkeys*`, `/api/passkeys/login/*`, `/api/totp*` |
+| Passkeys / TOTP | `/api/passkeys*`, `/api/passkeys/login/*`, `/api/reauth/passkey/*`, `/api/totp*` |
 | Browse / files | `GET /api/browse`, `GET /api/files/info`, `POST /api/files/move`, `POST /api/files/encrypt`, `GET /api/search`, `GET /api/preview` |
 | Trash / versions | `/api/trash*`, `/api/versions*` |
 | Delta sync | `/api/sync/changes`, `/api/sync/tree`, `/api/sync/events`, `/api/sync/shared-tree`, `/api/files/manifest`, `/api/manifests/{id}`, `PUT /api/files`, `/api/chunks*` |
 | Shares | `/api/shares`, `/api/shares/received`, `/api/shares/owned`, `/api/shares/{id}`, `/api/shareable`, `/api/groups/{name}/members` |
 | Groups / audit (admin) | `GET|POST /api/groups`, `DELETE /api/groups/{name}`, `POST|DELETE /api/groups/{name}/members/{username}`, `GET /api/audit`, `GET /api/audit/verify` |
 | Public links | `GET /public/{token}`, `/unlock`, `/list*`, `/download*` |
-| E2EE v1/v2 | `/api/e2ee/keyring`, `/api/e2ee/identity`, `/api/files/key`, `/api/e2ee/share-key`, `/api/e2ee/share-name`, `/api/e2ee/enrollments*`, `/api/e2ee/devices*` |
+| E2EE v1/v2 | `/api/e2ee/keyring`, `/api/e2ee/identity*`, `/api/files/key`, `/api/e2ee/share-key`, `/api/e2ee/share-name`, `/api/e2ee/enrollments*`, `/api/e2ee/devices*` |
 | MLS | `/api/mls/key-packages`, `/api/mls/key-packages/consume`, `/api/mls/key-packages/{username}`, `/api/mls/devices`, `/api/mls/devices/{username}`, `/api/mls/group`, `/api/mls/commit`, `/api/mls/messages`, `/api/mls/epoch`, `/api/mls/keyring`, `/api/mls/revocations` |
+| WebDAV / CalDAV / CardDAV | `/dav/`, `/dav/principals/{user}/`, `/dav/calendars/{user}/`, `/dav/addressbooks/{user}/`, `/.well-known/{caldav,carddav}` |
 | Operations | `GET /healthz` (public), `GET /version` (authenticated), `GET /metrics` (admin) |
 
 E2EE and MLS request bodies are opaque ciphertext/protocol payloads to the

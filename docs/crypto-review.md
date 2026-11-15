@@ -111,7 +111,7 @@ supplement and reports no content.
   reading client uploads.
 - `e2ee_share`, `e2ee_devices`, `e2ee_enroll` and `e2ee_group` cover
   recipient wrapping, device enrollment, revocation and group shares.
-- The WASM UI has wasm-bindgen tests; browser flows are exercised
-  manually (no committed browser E2E suite yet).
+- The WASM UI has wasm-bindgen tests, and `browser-e2e/` (Playwright)
+  exercises the browser flows against a fixture server.
 - Unit tests cover determinism, tamper detection, wrong-key failure,
   keyring JSON round-trips, and length validation.

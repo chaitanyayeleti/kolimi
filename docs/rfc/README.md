@@ -17,7 +17,7 @@ Last full verification: **0.5.0** (2026-11-15).
 | [0007 — E2EE](0007-e2ee.md) | implemented | shipped | v1/v2 per-file keys; group sharing is RFC 0012 |
 | [0008 — Device enrollment](0008-device-enrollment.md) | implemented | shipped | CLI + web Devices panel |
 | [0009 — E2EE onboarding](0009-e2ee-onboarding.md) | draft | partial | Web Vault + encrypt-by-default landed; passkey-PRF browser unlock pending |
-| [0010 — WebDAV / E2EE boundary](0010-webdav-e2ee-boundary.md) | draft | partial | DAV refuses encrypted nodes; marker-based dir boundary deferred |
+| [0010 — WebDAV / E2EE boundary](0010-webdav-e2ee-boundary.md) | implemented | shipped | DAV refuses encrypted content; encrypted-folder ancestry is the marker; names stay opaque |
 | [0011 — Client unlock](0011-e2ee-client-unlock.md) | implemented | shipped (desktop) | `SyncError::Locked`, tray state, keychain unlock |
 | [0012 — MLS groups](0012-mls-groups.md) | implemented | shipped; **audit pending** | Node-scoped groups, epochs, keyring, write shares, device revoke |
 

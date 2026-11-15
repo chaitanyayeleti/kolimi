@@ -4,6 +4,20 @@ Day-2 administration for a running server. For end-user file, sharing, and
 account workflows see [usage.md](usage.md). Commands read `KOLIMI_DATA`
 (default `./kolimi-data`); on systemd hosts that is `/var/lib/kolimi`.
 
+- [Users](#users)
+- [Account recovery](#account-recovery)
+- [Groups and sharing](#groups-and-sharing)
+- [Two-factor, app passwords, and recovery](#two-factor-app-passwords-and-recovery)
+- [Backup and restore](#backup-and-restore)
+- [Audit log](#audit-log)
+- [Metrics](#metrics)
+- [Hardening](#hardening)
+- [E2EE and MLS operations](#e2ee-and-mls-operations)
+- [Recovery secrets](#recovery-secrets)
+- [Clients and integrations](#clients-and-integrations)
+- [Upgrades](#upgrades)
+- [Troubleshooting](#troubleshooting)
+
 ## Users
 
 ```sh
@@ -67,12 +81,13 @@ user with a temporary password and the **Require password change at next
 sign-in** option; the server blocks every other API/WebDAV/sync surface until
 that password is replaced.
 
-Users created by an administrator or through an invite are also required to
-enroll **either TOTP or a passkey on their first sign-in**. Until they do,
-`/api/me` reports `must_setup_mfa`, the web UI shows a **Secure your
-account** page, and every data/API/WebDAV/sync surface is blocked. The flag
-clears automatically when TOTP or a passkey is enrolled. Existing accounts
-are not retroactively forced; administrators can still require a second
+Users created from **Admin → Users** (or the admin API) or through an
+invite are also required to enroll **either TOTP or a passkey on their first
+sign-in**. Until they do, `/api/me` reports `must_setup_mfa`, the web UI
+shows a **Secure your account** page, and every data/API/WebDAV/sync surface
+is blocked. The flag clears automatically when TOTP or a passkey is
+enrolled. Existing accounts and accounts created with the `kolimi-server
+user add` CLI are not forced; administrators can still require a second
 factor by resetting the account (which clears factors) or by using the
 Passkeys panel instructions.
 
@@ -87,11 +102,11 @@ self-lockout.
 Device clients should use an **app password** rather than the account
 password. Create one in **Settings → Passkeys → App passwords**, name it for
 the device, and copy the token shown once. App passwords are long-lived,
-individually revocable, and work with WebDAV/CalDAV and `kolimi-sync` even
-when TOTP is enabled or the account is passkey-only. The server stores only a
-BLAKE3 digest; the last-used time is shown in Settings. Revoke a device's app
-password immediately if it is lost. Desktop Accounts & Sync creates one
-automatically after login and revokes it on sign-out.
+individually revocable, and work with WebDAV/CalDAV/CardDAV and `kolimi-sync`
+even when TOTP is enabled or the account is passkey-only. The server stores
+only a BLAKE3 digest; the last-used time is shown in Settings. Revoke a
+device's app password immediately if it is lost. Desktop Accounts & Sync
+creates one automatically after login and revokes it on sign-out.
 
 ## Account recovery
 
@@ -119,10 +134,13 @@ the user sign in with the new password and re-enrol their passkey and
 two-factor from the **Passkeys** panel.
 
 The same operations are available to an authenticated administrator over
-HTTP (JSON API, `Authorization: Basic` or a session cookie):
+HTTP (JSON API, `Authorization: Basic` with an app password, or a session
+cookie):
 
 Mutation calls need a fresh, single-use re-authentication token. This helper
-fetches one; call it again for every PATCH or DELETE:
+fetches one; call it again for every PATCH or DELETE. Use the admin's
+username with an app password (the `admin:pw` examples are placeholders);
+the account password only works over Basic when TOTP is not enrolled.
 
 ```sh
 reauth() {
@@ -193,13 +211,22 @@ sync client for E2EE content (`kolimi-sync --share … --with bob|--group team`)
 
 The CLI details are in [reference.md](reference.md#kolimi-sync).
 
-## Two-factor and recovery
+## Two-factor, app passwords, and recovery
 
-- TOTP: 6-digit RFC 6238 codes, ten one-time recovery codes shown once
+- **Mandatory first-login MFA:** accounts created from **Admin → Users**
+  (or the admin API) or through an invite must enroll TOTP or a passkey
+  before any data/API/WebDAV/sync surface opens (see Users above). Existing
+  and CLI-created accounts are not forced.
+- **TOTP:** 6-digit RFC 6238 codes, ten one-time recovery codes shown once
   at enrollment. Lost everything? `user totp-disable` (admin).
-- Passkeys: up to 20 per account; lost all of them? An admin
+- **Passkeys:** up to 20 per account; lost all of them? An admin
   can set a password (`user passwd`) and the user registers new ones.
-- E2EE: the keyring has passphrase + recovery code (+ optional passkey
+- **App passwords:** long-lived per-device Basic credentials for WebDAV,
+  CalDAV/CardDAV, `kolimi-sync`, and desktop sync. Create or revoke them under
+  **Settings → Passkeys → App passwords**; the token is shown once and the
+  server stores only a digest. They bypass TOTP by design, so revoke a lost
+  device promptly; admin recovery revokes every app password.
+- **E2EE:** the keyring has passphrase + recovery code (+ optional passkey
   PRF) wraps. Losing **all** wraps means the data is unrecoverable —
   there is no server-side escrow by design.
 
@@ -262,9 +289,10 @@ format. Scrapers (no `text/html` in `Accept`) always get the text format.
 
 `/metrics` is **administrators only**. A signed-in admin can open it in
 the browser; a scraper authenticates with HTTP Basic using an admin's
-username and password. Non-admins get `403`, anonymous requests `401`. A
-passkey-only (passwordless) admin cannot scrape, so point Prometheus at
-an admin account that still has a password.
+username and an **app password** (or the account password when TOTP is not
+enrolled). Non-admins get `403`, anonymous requests `401`. TOTP and
+passkey-only admins can create an app password under **Settings → Passkeys**
+for scraping.
 
 ```yaml
 scrape_configs:
@@ -272,7 +300,7 @@ scrape_configs:
     scheme: https
     basic_auth:
       username: admin
-      password: <admin password>
+      password: <admin app password>
     static_configs:
       - targets: ["cloud.example.com"]
 ```
@@ -312,9 +340,11 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
 ## Hardening
 
 - **Rate limiting.** Login, passkey ceremonies, public-link unlocks,
-  previews and MLS requests are limited per client address (20 auth
-  attempts / 5 min, 30 unlocks / 5 min, 120 previews / min, 600 MLS
-  requests / 5 min), returning `429` with `Retry-After`. Behind a trusted
+  previews, MLS requests, TOTP enable/disable, invite lookup/acceptance,
+  and admin recovery are limited per client address (20 auth attempts /
+  5 min, 30 unlocks / 5 min, 120 previews / min, 600 MLS requests / 5 min,
+  10 TOTP changes / 5 min, 15 invite attempts / 5 min, 10 recovery
+  attempts / 5 min), returning `429` with `Retry-After`. Behind a trusted
   reverse proxy, set `KOLIMI_TRUST_PROXY=1` so the client address comes
   from `X-Forwarded-For` instead of the proxy.
 - **Login lockout** additionally locks an account for 15 minutes after
@@ -344,30 +374,37 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
 
 ### Setup
 
-- **Web:** the first login offers **Set up your Vault** (or open
-  *Settings → Encryption*). The passphrase and recovery phrase are handled
-  locally; the server receives only wrapped key material. `Vault/` is
-  encrypted by default.
+- **Web:** after the mandatory MFA step for new accounts, the first login
+  offers **Set up your Vault** (or open *Settings → Encryption*). The
+  passphrase and recovery phrase are handled locally; the server receives
+  only wrapped key material. `Vault/` is encrypted by default.
 - **CLI:** create the keyring once and store the printed recovery code
   offline:
 
   ```sh
-  KOLIMI_E2EE_PASSPHRASE='…' kolimi-sync \
-    --server https://cloud.example.com --user alice --local ~/Kolimi \
-    --e2ee-setup
+  KOLIMI_PASSWORD='app-password' KOLIMI_E2EE_PASSPHRASE='…' \
+    kolimi-sync --server https://cloud.example.com --user alice \
+    --local ~/Kolimi --e2ee-setup
   ```
 
-- **Desktop:** the **Accounts & Sync** window sets/unlocks the E2EE
-  passphrase; it does not create a new keyring. Use the web or CLI for
-  first-time setup.
+- **Desktop:** the **Accounts & Sync** window can create the account keyring
+  when none exists (**Set up encryption**, which shows the 24-word recovery
+  phrase once), unlock an existing keyring, or store the passphrase for
+  background sync. The passphrase stays on the client.
 
 ### Encrypted content
 
-- Only configured subtrees are encrypted: `--e2ee-root Private` in the
-  CLI, `encrypted_roots` in a desktop sync pair, or `Vault/` in the web UI.
+- Encryption is opt-in per subtree or per pair root: `--e2ee-root Private`
+  in the CLI, `encrypted_roots` in a desktop pair, or `Vault/` in the web UI.
+  An empty `--e2ee-root ''` (CLI) or **Encrypt the entire sync folder**
+  (desktop) encrypts the pair root itself; the remote root is marked
+  encrypted, and sync refuses while that path still contains plaintext.
 - The server stores ciphertext, wrapped per-file keys and an encrypted
   keyring it cannot read. Names can be encrypted (`k1_…`); sizes,
-  timestamps, structure and access patterns remain visible.
+  timestamps, structure and access patterns remain visible. The web UI can
+  encrypt existing names in place (**Settings → Encryption → Encrypt
+  existing names**); plaintext files are skipped and contents are not
+  re-uploaded.
 
 ### Sharing
 
@@ -401,17 +438,19 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   `mls: true` or the Share action, which forces MLS.
 
 - **Migration:** `kolimi-sync ... --mls-migrate` promotes existing
-  encrypted folder shares; the web UI has *Settings → Encryption → Upgrade
+  encrypted folder shares; the web UI has *Settings → Sharing → Upgrade
   shares to MLS*. Legacy per-file wraps stay readable.
 
 ### Unlock and devices
 
-- Unlock with the passphrase, recovery code, or a platform passkey-PRF
-  output. Because a command-line argument is visible in the process list,
-  prefer the environment variable (`KOLIMI_E2EE_PRF`) or pipe the PRF output
-  to `--e2ee-prf-stdin` rather than passing `--e2ee-prf` in a shared shell.
-  The web client keeps sealed MLS state in IndexedDB after unlock; the
-  CLI/desktop use `.kolimi/` and the OS keychain (or `0600` fallback).
+- Unlock with the passphrase or recovery code; the CLI/desktop can also use
+  a platform passkey-PRF output. The browser passkey-PRF key wrap is still
+  pending (RFC 0009). Because a command-line argument is visible in the
+  process list, prefer the environment variable (`KOLIMI_E2EE_PRF`) or pipe
+  the PRF output to `--e2ee-prf-stdin` rather than passing `--e2ee-prf` in a
+  shared shell. The web client keeps sealed MLS state in IndexedDB after
+  unlock; the CLI/desktop use `.kolimi/` and the OS keychain (or `0600`
+  fallback).
 - Enroll another device without re-typing the passphrase:
 
   ```sh
@@ -444,7 +483,7 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   device the share must be recreated. The old device leaf remains until it is
   removed; a removed member keeps any plaintext or keys already downloaded.
 
-  In the browser, use **Settings → Encryption → Reset this browser's MLS
+  In the browser, use **Settings → Sharing → Reset this browser's MLS
   state** (also confirms first). It deletes only this browser's sealed MLS
   slot; the E2EE keyring, recovery phrase and files are untouched. The next
   sync/unlock by a working device on the same account re-adds the browser.
@@ -461,8 +500,7 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   The command removes the device's MLS leaf from every group this client can
   write, rotates each share keyring, and only then deletes the roster row and
   unpublished key packages. The web UI has the same roster under
-  **Settings → Encryption → MLS devices** with a revoke action. A removed
-  device keeps any
+  **Settings → Devices** with a revoke action. A removed device keeps any
   plaintext and file keys it already downloaded; revocation protects future
   epochs only.
 
@@ -522,12 +560,12 @@ Kolimi has **three independent recovery secrets** — don't confuse them:
 | --- | --- | --- |
 | **Login password** | Account access (auth only) | An admin resets it: `kolimi-server user recover <user>`. Sessions are dropped; **no encrypted data is touched**. |
 | **TOTP recovery codes** | Second factor at login | Shown **once** at TOTP enrollment (10 codes, one-time). Enter one in the login **“two-factor or recovery code”** field when you lose your authenticator. Re-enroll TOTP for a fresh set. |
-| **E2EE recovery code** | The E2EE keyring (master key) | Shown **once** at web Vault setup or `kolimi-sync --e2ee-setup`. In the web UI: **Encryption → “Use recovery code”**; on the CLI: `kolimi-sync --e2ee-recovery <code>`. |
+| **E2EE recovery code** | The E2EE keyring (master key) | Shown **once** at web Vault setup or `kolimi-sync --e2ee-setup`. In the web UI: **Encryption → “Use recovery phrase”**; on the CLI: `kolimi-sync --e2ee-recovery <code>`. |
 
 There is **no self-service password reset** — only an administrator can
 reset a login password. If a user loses every credential, an admin runs
-`kolimi-server user recover <user>` (add `--keep-totp` or
-`--remove-passkeys` as needed); the user then re-enrols 2FA.
+`kolimi-server user recover <user>` (add `--keep-totp` or `--keep-passkeys`
+as needed); the user then re-enrols 2FA.
 
 **Important:** losing the E2EE passphrase *and* the E2EE recovery code
 makes the encrypted files unrecoverable — the server holds no keys and
@@ -536,87 +574,28 @@ wrapped under the E2EE keyring, not the login password). MLS device state
 has the same property: if it is lost, re-add the device from another
 member.
 
-## Desktop and mobile clients
+## Clients and integrations
 
-- **Desktop** (`apps/kolimi-desktop`): a native Tauri window loads the
-  server's `/app/` UI, with a tray and background sync. Sign in to one or
-  more accounts and add several synced folders per account from the in-app
-  **Accounts & Sync** window (tray → *Accounts & Sync…*). It writes
-  `desktop.json` under the platform config directory:
-  `~/.config/kolimi/` on Linux, `%APPDATA%\kolimi\` on Windows, and
-  `~/Library/Application Support/kolimi/` on macOS.
+Client connection details live in [clients.md](clients.md): app-password
+creation, WebDAV/CalDAV/CardDAV URLs and mount examples, desktop pairing,
+and `kolimi-sync` usage. Operational notes:
 
-  ```json
-  {
-    "version": 2,
-    "autostart": false,
-    "accounts": [
-      {
-        "server": "https://cloud.example.com",
-        "username": "alice",
-        "auto_approve_devices": true,
-        "pairs": [
-          {
-            "local_dir": "/home/alice/Kolimi",
-            "remote": "/",
-            "encrypted_roots": [],
-            "mls": false
-          }
-        ]
-      }
-    ]
-  }
-  ```
-
-  Each **pair** mirrors one local folder to a remote subfolder (`remote`,
-  default the account root `/`). `encrypted_roots` entries are relative paths
-  inside the pair; the empty string encrypts the entire pair root. Set
-  `"mls": true` to publish this desktop in the MLS device roster and include
-  it in encrypted group shares. Sync runs at startup, every five minutes,
-  and on demand. Closing the window hides it to the tray; *Quit* exits.
-  Autostart launches it hidden (`--hidden`). The autostart checkbox is
-  implemented with XDG autostart on Linux; on Windows/macOS use the OS
-  login-item settings until native integration lands.
-
-  The account password, E2EE passphrase, and the app password used for sync
-  are kept in the **system keychain** (Secret Service via zbus on Linux;
-  Credential Manager / Keychain on Windows/macOS), keyed by
-  `username@server`. If no keychain is running they fall back to the Linux
-  **kernel session keyring** (`keyctl`), session-only and never written to
-  disk. Only when neither is available (headless with no keyutils) do they
-  fall back to the `0600` config file, and the app warns; treat that file like
-  `.netrc`. `KOLIMI_DESKTOP_CONFIG` overrides the path. The config file itself
-  contains no secrets when a keychain or session keyring is available.
-
-  **Signing in for background sync is separate from signing in to the web
-  app.** The native client cannot read the remote webview's session cookie
-  automatically, and needs credentials that work while the window is closed.
-  If the account has TOTP enabled, enter the current code (or a recovery
-  code) in the desktop sign-in form. The client exchanges the login session
-  for a long-lived **app password**, stores it in the keychain, and uses it
-  for sync; the account password remains only for E2EE re-authentication.
-  Signing out or removing the account revokes that app password server-side.
-  For passkey-only accounts, sign in to the main Kolimi window and use
-  **Use current web session** in Accounts & Sync: the native client reads the
-  webview cookie locally and exchanges it for an app password. You can also
-  create an app password in **Settings → Passkeys** and paste it into the
-  desktop sign-in form.
-
-- **CLI** (`kolimi-sync`): one-shot sync; run it from a timer or watcher.
-  `--remote /Docs` mirrors a local folder to a server subfolder; also
-  `--e2ee-setup`, `--share/--unshare`, `--group`, `--mls`, `--write`.
-
+- **App passwords are the normal credential** for desktop sync, the CLI, and
+  DAV clients. They are per-device, revocable, and stored as a BLAKE3 digest.
+  Admin account recovery revokes all of them.
+- **Desktop app:** keeps the sync app password and E2EE passphrase in the OS
+  keychain, with a kernel-session-keyring then warned `0600` file fallback.
+  The non-secret pair configuration is `desktop.json` under the platform
+  config directory. Removing the account or signing out revokes its app
+  password.
+- **`kolimi-sync`:** one-shot, so schedule it from a timer or watcher. TOTP
+  and passkey-only accounts must pass an app password; the CLI cannot answer
+  an interactive challenge.
+- **WebDAV / CalDAV / CardDAV:** served under `/dav/`. WebDAV is plaintext
+  only; encrypted subtrees return `403` to generic DAV clients.
 - **Mobile:** `kolimi-ffi` exposes `sync_once` and E2EE setup/unlock to
-  Kotlin/Swift wrappers; background scheduling is platform code. The
-  Android plan is [plans/android.md](plans/android.md).
-
-- **WebDAV / CalDAV / CardDAV:** any client. WebDAV is class 2: byte
-  ranges, streamed reads and `LOCK`/`UNLOCK` make it usable as a mounted
-  network drive (Windows Explorer, macOS Finder, GNOME Files, davfs2/gvfs,
-  `rclone mount`) and as a backup destination. `quota-used-bytes` /
-  `quota-available-bytes` report free space. CalDAV and CardDAV cover
-  calendars and contacts (Thunderbird, iOS/macOS, DAVx5). Prefer a
-  dedicated account per device until per-device app passwords land.
+  Kotlin/Swift wrappers. No mobile app is shipped; see
+  [plans/android.md](plans/android.md).
 
 ## Upgrades
 
@@ -632,7 +611,7 @@ forward-only; back up first and do not downgrade across a migration.
 | Cookies not sent over HTTPS | Set `KOLIMI_SECURE_COOKIES=true` (and ensure the proxy forwards `https`). |
 | 413 on uploads | The reverse proxy's body limit; set `client_max_body_size 0` (nginx) and `proxy_request_buffering off`. |
 | Upload fails at exactly 60s with `500` | Traefik's default `readTimeout` is 60s. Set `transport.respondingTimeouts.readTimeout: 0` (or a high value) on the HTTPS entrypoint and restart Traefik; `idleTimeout` still drops stalled connections. |
-| Previews fail with 422/415 | Unsupported format, encrypted file (no server-side preview by design), or a kernel without Landlock (the worker still runs under seccomp/rlimits). |
+| Previews fail with 422/415 | Unsupported format, encrypted file (no server-side preview by design), or a kernel without Landlock. The worker fails closed; set `KOLIMI_PREVIEW_ALLOW_NO_LANDLOCK=1` only if you accept the weaker seccomp + rlimits sandbox. |
 | “too many failed attempts” | Login lockout (5 failures / 15 min, keyed on account **and** client address) or per-client rate limiting on auth/link/MLS endpoints; wait it out, then check the audit log for `auth.login_failed` reasons. |
 | Sync reports conflicts | Expected when both sides edited a file: the server version wins and your edit is kept as `name.conflict-<ts>`. |
 | “no MLS key package” / recipient cannot decrypt | The recipient has not unlocked once with MLS enabled. Have them open the web UI or run `kolimi-sync` once; the next owner sync/unlock re-adds their device. |
@@ -640,7 +619,7 @@ forward-only; back up first and do not downgrade across a migration.
 | “still a member of read-only share(s)” | The device is in a received share where this client cannot commit. Ask that share's owner to run `--mls-revoke-device <id> --with <you>`, or recreate the share; then retry the self-revoke. |
 | “MLS key-package limit reached” | One device has 8 live packages, usually because a client is retrying or multiple clients share a device id. Wait for expiry/consumption or use the reset flow to create a fresh device. |
 | MLS keyring 409 / “stayed busy” | Another device updated the same epoch keyring. Retry; the clients already retry a bounded number of times. If it persists, check for two active committers. |
-| MLS state lost after clearing storage | IndexedDB/`.kolimi` is the device's group state; it cannot be reconstructed. Use **Settings → Encryption → Reset this browser's MLS state** (web) or `--mls-reset --yes`, then let a working device sync; if none is online, have a member re-share the folder. |
+| MLS state lost after clearing storage | IndexedDB/`.kolimi` is the device's group state; it cannot be reconstructed. Use **Settings → Sharing → Reset this browser's MLS state** (web) or `--mls-reset --yes`, then let a working device sync; if none is online, have a member re-share the folder. |
 | Server won't start after upgrade | Restore the pre-upgrade backup (migrations are forward-only). |
 | Disk filling on a Docker host | The BuildKit build cache and old images dominate. Inspect with `docker system df -v`; bound with `docker builder prune --keep-storage 6GB` and `docker image prune -a`. App data is the `kolimi-data` volume. |
 

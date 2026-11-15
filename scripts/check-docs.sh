@@ -104,12 +104,31 @@ stale = {
         "v0.1.0",
         "Images are `linux/amd64`",
         "wasm37",
+        "operations.md#desktop-and-mobile-clients",
+        "fall back to seccomp",
     ],
     "docs/operations.md": [
         "Not implemented: MLS",
         "tray.json",
         "Single-file MLS shares are read-only",
         "Write shares are folder-only",
+        "until per-device app passwords land",
+        "## Desktop and mobile clients",
+        "does not create a new keyring",
+        "passkey-only (passwordless) admin cannot scrape",
+        "Settings → Encryption → MLS",
+        "--remove-passkeys",
+    ],
+    "docs/threat-model.md": [
+        "OIDC tokens",
+        "disk/S3",
+    ],
+    "docs/clients.md": [
+        "until per-device app passwords land",
+        "does not create a new keyring",
+    ],
+    "docs/crypto-review.md": [
+        "no committed browser E2E suite yet",
     ],
     "docs/reference.md": [
         "Single-file MLS shares are read-only",

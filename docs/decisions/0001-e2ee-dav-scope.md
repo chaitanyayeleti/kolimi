@@ -62,28 +62,23 @@ encrypt-by-default with plaintext carve-outs, plus B.
 - Effort: ~2–3 weeks. New concepts: many (see RFC 0009). A product
   feature; **not required** for the personal DAV/backup use case.
 
-## Recommendation
+## Decision
 
-**Do A now; defer B and C.** A fixes the security bug cheaply with no new
-concepts. B only if dir-level enforcement is wanted later. C only if
-encrypt-by-default becomes a product goal — the design is already
-recorded in RFC 0009, so no decision is lost by deferring.
-
-RFCs 0009 and 0010 stay in the repo as design docs (no code cost).
+Option **B** was chosen and implemented. A directory's existing `encrypted`
+flag serves as the marker, so no separate `encrypted_root` column was
+needed; `path_is_encrypted` walks ancestors and every DAV content operation
+checks it. Plaintext DAV is unchanged. Option C's encrypt-by-default has
+since shipped for the web `Vault/` tree; browser passkey-PRF unlock remains
+future work (RFC 0009).
 
 ## Consequences
 
-- If A: encrypted files are visible to DAV as ciphertext *only if* the
-  client already created them; new plaintext writes into encrypted dirs
-  remain possible until B. Acceptable for an opt-in, single-operator setup.
-- If B/C are chosen later, the marker and carve-out policy from RFC
-  0010/0009 apply as written.
-
-## Open decision (to confirm)
-
-Pick one: **A** (guard only, opt-in), **B** (add marker + full boundary),
-or **C** (full onboarding + boundary). Until confirmed, no code changes
-are made; the two RFCs and this record remain local drafts.
+- B closed the directory-level gap: DAV refuses content reads and writes
+  inside an encrypted folder. `DELETE` and `LOCK` stay metadata-only.
+- Encrypted paths may still list opaque `k1_…` names; E2EE remains opt-in
+  per tree, and metadata such as sizes and structure stays visible.
+- The encrypt-by-default and passkey-PRF parts of RFC 0009 remain partial;
+  they are tracked there rather than in this decision.
 
 ## References
 

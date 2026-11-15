@@ -66,12 +66,13 @@ check for `.deb`/AppImage.
 - AppImage size → thin bundle, strip.
 - If option B later: design the proxy/CORS boundary early.
 
-## Open questions (to confirm)
+## Resolved questions
 
-1. Architecture: **A** / B / C.
-2. Repo: promote the tray here (vs a separate repo).
-3. Scope: Linux-only for phase 1.
-4. Distribution: `.deb` + AppImage + AUR; auto-update yes/no.
+1. Architecture: **A** chosen; Option B remains a future offline-UI step.
+2. Repo: promoted the tray in-repo as `apps/kolimi-desktop`.
+3. Scope: Linux first; Windows and macOS bundles have since shipped.
+4. Distribution: `.deb`, AppImage, AUR `kolimi-desktop`, plus Windows
+   `.msi`/NSIS and macOS `.dmg`/`.app`; no auto-updater is enabled.
 
 ## References
 

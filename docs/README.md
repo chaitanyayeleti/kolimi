@@ -3,12 +3,23 @@
 This page is the map. The top-level [README](../README.md) is the product
 overview and quick start; everything below goes deeper.
 
-Last full verification: **0.5.0** (2026-11-15).
+Current-facing guides are [install.md](install.md), [how-to.md](how-to.md),
+[usage.md](usage.md), [clients.md](clients.md), [operations.md](operations.md),
+[reference.md](reference.md), [architecture.md](architecture.md),
+[threat-model.md](threat-model.md), [crypto-review.md](crypto-review.md),
+and [known-advisories.md](known-advisories.md). RFCs, decision records,
+plans, and audit files are design or history: they may describe deferred
+work, a frozen review surface, or an earlier implementation.
+
+Last full verification: **0.5.0** (2026-11-15); desktop client verified
+against **0.4.10**.
 
 ## Start here
 
 - **New installation** → [install.md](install.md)
+- **How do I…?** → [how-to.md](how-to.md)
 - **Day-to-day use** → [usage.md](usage.md)
+- **Connecting WebDAV, CalDAV, desktop, or the CLI** → [clients.md](clients.md)
 - **Day-2 administration** → [operations.md](operations.md)
 - **CLI, environment and HTTP API** → [reference.md](reference.md)
 - **How the code is organized** → [architecture.md](architecture.md)
@@ -22,8 +33,10 @@ Last full verification: **0.5.0** (2026-11-15).
 | Document | What it covers |
 | --- | --- |
 | [install.md](install.md) | One-command install, Docker/Podman, Compose + Traefik, Helm, AUR, `.deb`, desktop client, source builds, TLS/reverse proxies, first run, upgrades, uninstall |
-| [usage.md](usage.md) | Sign-in, account security, files, sharing, encrypted content, desktop/sync, and the admin quick reference |
-| [operations.md](operations.md) | Users and groups, account recovery, 2FA, backup/restore, audit log, metrics/tracing, quotas, hardening, E2EE/MLS operations, desktop/mobile clients, upgrades, troubleshooting |
+| [how-to.md](how-to.md) | Task-first recipes: first admin, invites, MFA, app passwords, sharing, encryption, desktop/DAV/CalDAV, quota, backup, upgrades, MLS recovery |
+| [usage.md](usage.md) | Sign-in, mandatory first-login MFA, app passwords, files, sharing, encrypted content, desktop/sync summary, admin quick reference |
+| [clients.md](clients.md) | Canonical client setup: credentials and app passwords, WebDAV/CalDAV/CardDAV URLs and mounts, desktop pairing and encryption/MLS options, `kolimi-sync`, troubleshooting |
+| [operations.md](operations.md) | Users and groups, account recovery, 2FA and app passwords, backup/restore, audit log, metrics/tracing, quotas, hardening, E2EE/MLS operations, client operations, upgrades, troubleshooting |
 | [reference.md](reference.md) | `kolimi-server` and `kolimi-sync` commands, environment variables, HTTP endpoint groups, data-directory layout |
 
 ## Design and security
@@ -78,14 +91,18 @@ the source of truth for what has and has not been reviewed.
     built), `implemented` (the design is what the code follows);
   - *implementation*: `shipped`, `partial`, or `not started`, always with
     the release it was last verified against.
+- **Client setup belongs in [clients.md](clients.md).** Usage and operations
+  summarize behavior and link there instead of repeating URLs, credentials,
+  desktop configuration, or mount commands.
 - Prefer cross-links over duplication. Update the RFC when a design
   changes and add a `CHANGELOG.md` entry when behavior changes.
 
 ## Checks
 
 `scripts/check-docs.sh` (also run in CI) verifies that relative links
-resolve, every RFC appears in the RFC index, and current-facing guides do
-not reintroduce known stale claims. Run it before sending a docs change.
+resolve, every RFC appears in the RFC index, release-facing docs match the
+workspace version, and current-facing guides do not reintroduce known stale
+claims. Run it before sending a docs change.
 
 `browser-e2e/` (Playwright) drives the real web UI against a fixture server
 for account/session controls, admin users/invites/groups/audit, forced

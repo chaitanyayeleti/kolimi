@@ -26,7 +26,7 @@ backlog and the honest list of limitations. Shipped history lives in
 | Delta sync | `kolimi-sync` CLI, desktop app, FFI core; chunk-level deltas, conflicts, shared mounts |
 | E2EE v1/v2 | Per-file keys, encrypted names, sharing, device enrollment, browser/sync/desktop clients |
 | MLS group E2EE | Node-scoped groups, membership add/remove, epoch keyring, folder + single-file write shares, serialized commits, key-package/message janitor, web/desktop/CLI |
-| Auth / accounts | Passwords, passkeys, passwordless accounts, TOTP, sessions, CSRF, lockout, rate limiting; self-service account page; admin users/invites/groups/audit; forced password rotation and session labels; per-device app passwords; mandatory first-login MFA for new accounts |
+| Auth / accounts | Passwords, passkeys, passwordless accounts, TOTP, sessions, CSRF, lockout, rate limiting; self-service account page; admin users/invites/groups/audit; forced password rotation and session labels; per-device app passwords; mandatory first-login MFA for Admin-created and invited accounts |
 | Operations | Backup/verify, hash-chained audit log, Prometheus metrics, OTel traces, quotas, janitor |
 | Packaging | Release tarballs (gnu/musl/aarch64), `.deb`, multi-arch GHCR, Helm, AUR, AppImage; desktop `.deb`/AppImage, Windows `.msi`/NSIS and macOS `.dmg` |
 
@@ -36,8 +36,8 @@ ship-blocker for calling group E2EE production-grade.
 ## Recently completed
 
 - **0.5.0 — auth depth**: per-device app passwords for sync and
-  WebDAV/CalDAV, mandatory first-login TOTP-or-passkey setup for new
-  admin-created/invited accounts, passkey-only desktop linking, and the
+  WebDAV/CalDAV, mandatory first-login TOTP-or-passkey setup for Admin-created
+  and invited accounts, passkey-only desktop linking, and the
   trash/device row alignment fixes. See the [CHANGELOG](CHANGELOG.md).
 - **0.4.9 — UI depth and desktop status**: Phase 1–4 UI work — URL-backed
   navigation, a full Settings page, admin tables, sortable file browser,
@@ -102,6 +102,11 @@ describe MLS as audited before this completes.
 
 ### 4. Documentation and release hygiene
 
+- Keep [clients.md](docs/clients.md) current for app passwords,
+  WebDAV/CalDAV URLs, desktop pairing, and CLI sync; it is the canonical
+  client setup page.
+- Keep [how-to.md](docs/how-to.md) as the task-first index; add a recipe
+  when a feature needs several steps across pages.
 - Keep `scripts/check-docs.sh` in CI. It now checks that release-facing
   docs match the workspace version as well as links and stale claims.
 - Keep the version-bump checklist in

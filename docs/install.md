@@ -29,8 +29,10 @@ matches your host.
   Postgres, Redis, PHP or web server is required.
 - **~50 MB for the binary**, plus your data. The release binary is gated
   below 50 MB in CI.
-- **Landlock 5.13+** gives the strongest preview sandbox; older kernels
-  fall back to seccomp + rlimits.
+- **Landlock 5.13+** is required for server-side previews; the preview
+  worker fails closed without it. Setting
+  `KOLIMI_PREVIEW_ALLOW_NO_LANDLOCK=1` opts into seccomp + rlimits only,
+  which is weaker and should be limited to older kernels.
 - The one-command installer targets systemd hosts. Containers, Helm, AUR
   and `.deb` have their own flows below.
 
@@ -271,10 +273,12 @@ cargo tauri build --bundles app,dmg        # macOS
 ```
 
 On first run the setup window writes `desktop.json` under the platform
-config directory (non-secret fields only); the account password and E2EE
-passphrase go to the system keychain. Linux has a session-keyring and
-warned file fallback; autostart is currently XDG-only on Linux. See
-[operations.md](operations.md#desktop-and-mobile-clients).
+config directory (non-secret fields only); the account password (for E2EE
+re-authentication), sync app password, and E2EE passphrase go to the system
+keychain. Linux has a session-keyring and warned file fallback; autostart is
+currently XDG-only on Linux. See [clients.md](clients.md#desktop-app) for
+sign-in, passkey-only linking, folder pairing, encryption/MLS options, and
+troubleshooting.
 
 ## Manual / from source
 
@@ -382,11 +386,14 @@ limits and login lockout use the real client address from
    - Register a passkey (**Settings → Passkeys**) and optionally run
      `kolimi-server user passkey-only <name>`.
    - Enable TOTP and store the recovery codes.
-   - Point a WebDAV client at `https://cloud.example.com/dav/`, and
-     CalDAV/CardDAV at `/.well-known/caldav` / `/.well-known/carddav`.
+   - Create an app password under **Settings → Passkeys** for DAV clients,
+     then point WebDAV at `https://cloud.example.com/dav/` and
+     CalDAV/CardDAV at `/.well-known/caldav` / `/.well-known/carddav`. See
+     [clients.md](clients.md).
 
 For day-to-day file, sharing, encryption, desktop, and admin workflows see
-[usage.md](usage.md).
+[usage.md](usage.md); for client connection details see
+[clients.md](clients.md).
 
 ## Upgrading
 

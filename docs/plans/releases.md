@@ -92,8 +92,8 @@ Before tagging:
 - [ ] `scripts/check-docs.sh` passes. It verifies that `ROADMAP.md`,
       `CHANGELOG.md`, `docs/README.md`, the RFC index, every RFC's
       “Last verified” line, and the Docker/Helm defaults match
-      `[workspace.package] version`, and that install examples do not pin an
-      old release.
+      `[workspace.package] version`, and that known stale claims stay out of
+      current-facing guides.
 - [ ] A backup/restore and upgrade path was tested for any new migration;
       migrations are forward-only.
 

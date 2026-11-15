@@ -1,13 +1,13 @@
 # Kolimi Threat Model
 
-- **Status:** Living document. Reviewed at every milestone gate.
+- **Status:** Living document. Last reviewed for **0.5.0**.
 - **Related:** RFC 0001 (Storage), RFC 0002 (Sync), ROADMAP safety gates.
 
 ## Assets
 
 1. **File content** — user documents, photos, etc. Highest sensitivity.
 2. **Metadata** — names, sizes, timestamps, folder structure, share graph.
-3. **Credentials** — passwords, passkeys, sessions, OIDC tokens, TOTP seeds.
+3. **Credentials** — passwords, passkeys, sessions, TOTP seeds, app passwords.
 4. **Share links** — capability URLs; anyone with the URL can read the share.
 5. **Audit log** — who did what; integrity matters (append-only).
 6. **Server keys** — TLS keys, at-rest encryption keys (future), signing keys.
@@ -33,7 +33,7 @@ client ──(TLS, untrusted network)──> kolimi-server
                        ┌────────────────┼────────────────┐
                        ▼                ▼                ▼
                   blob store        index DB        audit log
-                  (disk/S3)        (SQLite)        (append-only)
+                  (local disk)      (SQLite)        (append-only)
                                         │
                                         ▼
                                  sandboxed preview worker
@@ -49,28 +49,29 @@ client ──(TLS, untrusted network)──> kolimi-server
 
 | Scenario | Mitigation | Status |
 |---|---|---|
-| A1 credential stuffing | argon2id, rate limits, per-device sessions, lockout, passkeys | M1 |
-| A1 parser exploits (DAV/XML/manifests) | Rust memory safety, `dav-server` + own parser fuzzing, strict size/depth limits | M0–M2 |
-| A2 IDOR / path traversal | single server-side permission engine; every lookup goes through it; `..`/symlink normalization tests | M1–M3 |
-| A2 chunk-existence oracle | chunk endpoint checks visibility, constant 404 for invisible chunks | M2 |
-| A2 hostile uploads (zip bomb, image exploit) | previews in a re-executed worker: rlimits (AS/CPU/FSIZE/NOFILE) → landlock (read the scratch file only) → seccomp allowlist (no network, no exec); wall-clock kill; decoder dimension/allocation limits; fuzzed | M5 |
-| A3 share escalation | shares are capability-scoped, re-checked server-side every request; no client-side trust | M3 |
-| A3 mount traversal | `/Shared with me/<mount>/...` resolution starts at the mount root; ancestors of a share are unreachable | M3 |
-| A3 link token brute force | 128-bit random tokens, exact-match lookup, per-share unlock lockout (5/15min), expiry | M3 |
-| A3 link password guessing | argon2id, same lockout machinery as logins, HttpOnly unlock cookies | M3 |
-| A2 DAV object injection | iCalendar parsed + UID rules enforced; vCards structurally validated; raw payloads stored byte-for-byte (no re-serialization); 10 MiB cap; XML parsers size-capped | M4 |
-| A2 DAV namespace shadowing | `principals`/`calendars`/`addressbooks` reserved at the root; principals/homes are owner-only and 404 for everyone else | M4 |
-| A4 third-party app | Authenticated API/DAV only, per-user permission checks | M7 |
-| A5 operator reads content | optional client-side E2EE (v1/v2 per-file keys; MLS groups in 0.5.0, not externally audited); encrypted names supported, but sizes/timestamps/structure remain visible | 0.5.0 |
-| Operator tampers with or deletes audit records | BLAKE3 hash-chained append-only audit log; `audit verify` detects edits, deletions, and reordering (`audit_log` rows are only ever inserted) | landed (M6) |
-| A6 MITM | rustls, TLS 1.3 only, HSTS, no mixed content in UI | M1 |
-| A7 memory scraping | `zeroize`/`secrecy` for secrets, no keys in logs; full-disk encryption is the operator's responsibility | M1+ |
-| A8 malicious dependency | `cargo-deny`, `cargo-audit`, `cargo-vet`, minimal dep tree, pinned lockfile in CI | M0 |
-| Secrets in memory / swap | `zeroize` on master/file keys and KEK locals; wrapped keys only on disk; internal review in `docs/crypto-review.md` | landed (M6) |
-| Silent bit-rot or tampering in the blob store | background janitor scrubber re-hashes chunks (BLAKE3) and re-derives manifest ids incrementally; corruption is logged and audited | landed (M2/M6) |
-| A8 build/release tampering | tagged CI builds, signed release artifacts and SBOM, cosign keyless signing | 0.5.0 |
-| Replay/CSRF | CSRF double-submit tokens, SameSite=Strict cookies, no state-changing GETs | M1 |
-| Log leakage | never log content or full URLs with tokens; structured logs with redaction | M1 |
+| A1 credential stuffing | argon2id, rate limits, per-device sessions, lockout, passkeys | Implemented |
+| A1 stolen app password | high-entropy per-device token, BLAKE3 digest at rest, per-device revoke; admin recovery revokes all; TLS-only Basic auth | Implemented |
+| A1 parser exploits (DAV/XML/manifests) | Rust memory safety, `dav-server` + own parser fuzzing, strict size/depth limits | Implemented |
+| A2 IDOR / path traversal | single server-side permission engine; every lookup goes through it; `..`/symlink normalization tests | Implemented |
+| A2 chunk-existence oracle | chunk endpoint checks visibility, constant 404 for invisible chunks | Implemented |
+| A2 hostile uploads (zip bomb, image exploit) | previews in a re-executed worker: rlimits (AS/CPU/FSIZE/NOFILE) → landlock (read the scratch file only) → seccomp allowlist (no network, no exec); wall-clock kill; decoder dimension/allocation limits; fuzzed | Implemented |
+| A3 share escalation | shares are capability-scoped, re-checked server-side every request; no client-side trust | Implemented |
+| A3 mount traversal | `/Shared with me/<mount>/...` resolution starts at the mount root; ancestors of a share are unreachable | Implemented |
+| A3 link token brute force | 128-bit random tokens, exact-match lookup, per-share unlock lockout (5/15min), expiry | Implemented |
+| A3 link password guessing | argon2id, same lockout machinery as logins, HttpOnly unlock cookies | Implemented |
+| A2 DAV object injection | iCalendar parsed + UID rules enforced; vCards structurally validated; raw payloads stored byte-for-byte (no re-serialization); 10 MiB cap; XML parsers size-capped | Implemented |
+| A2 DAV namespace shadowing | `principals`/`calendars`/`addressbooks` reserved at the root; principals/homes are owner-only and 404 for everyone else | Implemented |
+| A4 third-party app | Authenticated API/DAV only, per-user permission checks | Implemented |
+| A5 operator reads content | optional client-side E2EE (v1/v2 per-file keys; MLS groups in 0.5.0, not externally audited); encrypted names supported, but sizes/timestamps/structure remain visible | Partial (E2EE alpha) |
+| Operator tampers with or deletes audit records | BLAKE3 hash-chained append-only audit log; `audit verify` detects edits, deletions, and reordering (`audit_log` rows are only ever inserted) | Implemented |
+| A6 MITM | rustls, TLS 1.3 only, HSTS, no mixed content in UI | Implemented |
+| A7 memory scraping | `zeroize`/`secrecy` for secrets, no keys in logs; full-disk encryption is the operator's responsibility | Partial |
+| A8 malicious dependency | `cargo-deny`, `cargo-audit`, `cargo-vet`, minimal dep tree, pinned lockfile in CI | Implemented |
+| Secrets in memory / swap | `zeroize` on master/file keys and KEK locals; wrapped keys only on disk; allocator copies and swap remain outside our control; internal review in `docs/crypto-review.md` | Partial |
+| Silent bit-rot or tampering in the blob store | background janitor scrubber re-hashes chunks (BLAKE3) and re-derives manifest ids incrementally; corruption is logged and audited | Implemented |
+| A8 build/release tampering | tagged CI builds, signed release artifacts and SBOM, cosign keyless signing | Implemented |
+| Replay/CSRF | CSRF double-submit tokens, SameSite=Strict cookies, no state-changing GETs | Implemented |
+| Log leakage | never log content or full URLs with tokens; structured logs with redaction | Implemented |
 
 ## Explicit non-goals / honest limitations
 
