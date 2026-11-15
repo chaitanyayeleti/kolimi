@@ -316,8 +316,9 @@ function renderPair(account, pair, editable) {
     li.classList.remove("editing");
     const roots = pair.encrypted_roots || [];
     const chips = roots.length
-      ? roots.map((root) => el("span", { class: "chip" }, root))
+      ? roots.map((root) => el("span", { class: "chip" }, root || "entire folder"))
       : [el("span", { class: "chip muted" }, "not encrypted")];
+    if (pair.mls) chips.push(el("span", { class: "chip" }, "MLS"));
     const main = el("div", { class: "pair-main" },
       el("span", { class: "pair-icon", html: ICON_FOLDER }),
       el("div", { class: "pair-text" },
@@ -337,14 +338,33 @@ function renderPair(account, pair, editable) {
     const dirInput = el("input", { value: pair.local_dir });
     const remoteInput = el("input", { value: pair.remote });
     const rootsInput = el("input", {
-      value: (pair.encrypted_roots || []).join(", "),
+      value: (pair.encrypted_roots || []).map((root) => root || ".").join(", "),
       placeholder: "e.g. Private, Photos (blank = no encryption)",
+    });
+    const encryptAllInput = el("input", {
+      type: "checkbox",
+      checked: (pair.encrypted_roots || []).includes(""),
+    });
+    const syncRootToggle = () => {
+      rootsInput.disabled = encryptAllInput.checked;
+    };
+    encryptAllInput.addEventListener("change", syncRootToggle);
+    syncRootToggle();
+    const mlsInput = el("input", {
+      type: "checkbox",
+      checked: Boolean(pair.mls),
     });
     li.replaceChildren(
       el("div", { class: "form-grid" },
         field("Local folder", dirInput),
         field("Remote folder", remoteInput),
-        field("Encrypted folders (relative, comma-separated)", rootsInput, "span-2")),
+        field("Encrypted folders (relative, comma-separated)", rootsInput, "span-2"),
+        el("label", { class: "row span-2" },
+          encryptAllInput,
+          " Encrypt the entire sync folder"),
+        el("label", { class: "row span-2" },
+          mlsInput,
+          " Enable MLS group shares for encrypted folders")),
       el("div", { class: "form-actions end" },
         btn("Cancel", "ghost", display),
         btn("Save", "primary", async () => {
@@ -355,7 +375,10 @@ function renderPair(account, pair, editable) {
               dir: pair.local_dir,
               newDir: dirInput.value,
               remote: remoteInput.value || "/",
-              encryptedRoots: rootsInput.value.split(",").map((value) => value.trim()).filter(Boolean),
+              encryptedRoots: encryptAllInput.checked
+                ? ["."]
+                : rootsInput.value.split(",").map((value) => value.trim()).filter(Boolean),
+              mls: mlsInput.checked,
             });
             setMsg("Updated " + dirInput.value, "ok");
             refresh();
@@ -688,6 +711,12 @@ function renderAccount(account, status) {
     const dirInput = el("input", { placeholder: "~/Kolimi" });
     const remoteInput = el("input", { placeholder: "/" });
     const rootsInput = el("input", { placeholder: "e.g. Private, Photos (blank = no encryption)" });
+    const encryptAllInput = el("input", { type: "checkbox" });
+    const syncRootToggle = () => {
+      rootsInput.disabled = encryptAllInput.checked;
+    };
+    encryptAllInput.addEventListener("change", syncRootToggle);
+    const mlsInput = el("input", { type: "checkbox" });
     card.append(el("details", { class: "section" },
       el("summary", {},
         el("span", { class: "section-icon", html: ICON_FOLDER }),
@@ -696,7 +725,13 @@ function renderAccount(account, status) {
         el("div", { class: "form-grid" },
           field("Local folder", dirInput),
           field("Remote folder (optional; default /)", remoteInput),
-          field("Encrypted folders (relative, comma-separated)", rootsInput, "span-2")),
+          field("Encrypted folders (relative, comma-separated)", rootsInput, "span-2"),
+          el("label", { class: "row span-2" },
+            encryptAllInput,
+            " Encrypt the entire sync folder"),
+          el("label", { class: "row span-2" },
+            mlsInput,
+            " Enable MLS group shares for encrypted folders")),
         el("div", { class: "form-actions" },
           btn("Add folder", "primary", async () => {
             try {
@@ -705,7 +740,10 @@ function renderAccount(account, status) {
                 username: account.username,
                 dir: dirInput.value,
                 remote: remoteInput.value || "/",
-                encryptedRoots: rootsInput.value.split(",").map((value) => value.trim()).filter(Boolean),
+                encryptedRoots: encryptAllInput.checked
+                  ? ["."]
+                  : rootsInput.value.split(",").map((value) => value.trim()).filter(Boolean),
+                mls: mlsInput.checked,
               });
               setMsg("Added " + dirInput.value, "ok");
               refresh();

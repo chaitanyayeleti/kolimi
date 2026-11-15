@@ -441,16 +441,19 @@ async fn publish_encrypted_roots(
     };
     for relative in &e2ee.encrypted_roots {
         let relative = relative.trim_matches('/');
-        if relative.is_empty() {
+        // An empty relative path means the whole sync root is encrypted.
+        if relative.is_empty() && root.is_empty() {
             continue;
         }
         // Only an owned local tree. A recipient's configured root normally
         // lives under "Shared with me"; creating a same-named folder in
         // their own namespace would be surprising and useless.
-        if !config.local_dir.join(relative).is_dir() {
+        if !relative.is_empty() && !config.local_dir.join(relative).is_dir() {
             continue;
         }
-        let path = if root.is_empty() {
+        let path = if relative.is_empty() {
+            root.to_string()
+        } else if root.is_empty() {
             format!("/{relative}")
         } else {
             format!("{root}/{relative}")

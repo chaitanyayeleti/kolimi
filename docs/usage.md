@@ -93,6 +93,13 @@ there match the tray item. If the server is unreachable, the main window
 shows an offline banner with a Retry action, and the Accounts & Sync status
 card keeps the last error and last successful sync visible.
 
+Encrypted folders are normally relative paths inside the pair (for example
+`Private` means `<local>/Private` ↔ `<remote>/Private`). Enable **Encrypt the
+entire sync folder** when the pair itself should be encrypted; the remote
+root is then marked encrypted. Enable **MLS group shares** on a pair to
+publish this desktop as an MLS device and include it in encrypted group-share
+key packages.
+
 The `kolimi-sync` CLI mirrors a local directory:
 
 ```sh

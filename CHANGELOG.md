@@ -4,6 +4,22 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Desktop Accounts & Sync can enable **MLS group shares** per synced folder
+  from the add/edit form (or `"mls": true` in `desktop.json`). This publishes
+  the desktop as an MLS device and includes it in key-package/epoch handling.
+- Desktop has an **Encrypt the entire sync folder** option. It stores the
+  empty encrypted-root sentinel, so the remote sync root itself is marked
+  encrypted instead of looking for a same-named subfolder.
+
+### Fixed
+- Whole-root E2EE sync now marks the remote root folder encrypted (when the
+  remote root is not the account root) and refuses only when that path still
+  contains plaintext. This makes `local_dir: ~/kite` with the whole folder
+  encrypted work as expected.
+
 ## [0.5.0] - 2026-11-15
 
 ### Added

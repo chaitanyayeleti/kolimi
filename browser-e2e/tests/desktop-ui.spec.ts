@@ -48,6 +48,7 @@ async function loadDesktop(
             local_dir: "/home/alice/Kolimi",
             remote: "/",
             encrypted_roots: ["Private"],
+            mls: true,
             last_synced_at: now - 120_000,
           },
         ],
@@ -136,6 +137,7 @@ test("desktop Accounts & Sync shows status, timestamps, and pause", async ({
   await expect(page.getByText("alice", { exact: true })).toBeVisible();
   await expect(page.getByText("/home/alice/Kolimi")).toBeVisible();
   await expect(page.getByText("1 folder", { exact: true })).toBeVisible();
+  await expect(page.getByText("MLS", { exact: true })).toBeVisible();
   await expect(page.getByText(/Last synced 2m ago/)).toBeVisible();
   await expect(page.getByText(/Last sync 2m ago/)).toBeVisible();
 

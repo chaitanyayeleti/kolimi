@@ -569,7 +569,10 @@ member.
   ```
 
   Each **pair** mirrors one local folder to a remote subfolder (`remote`,
-  default the account root `/`). Sync runs at startup, every five minutes,
+  default the account root `/`). `encrypted_roots` entries are relative paths
+  inside the pair; the empty string encrypts the entire pair root. Set
+  `"mls": true` to publish this desktop in the MLS device roster and include
+  it in encrypted group shares. Sync runs at startup, every five minutes,
   and on demand. Closing the window hides it to the tray; *Quit* exits.
   Autostart launches it hidden (`--hidden`). The autostart checkbox is
   implemented with XDG autostart on Linux; on Windows/macOS use the OS

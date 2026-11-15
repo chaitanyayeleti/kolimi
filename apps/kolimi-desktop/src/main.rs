@@ -676,8 +676,17 @@ fn normalize_remote(remote: &str) -> String {
 fn normalize_roots(roots: Vec<String>) -> Vec<String> {
     roots
         .into_iter()
-        .map(|root| root.trim().trim_matches('/').to_string())
-        .filter(|root| !root.is_empty())
+        .filter_map(|root| {
+            let root = root.trim().trim_matches('/');
+            // "." is the explicit sentinel for "encrypt the whole sync root".
+            if root == "." {
+                Some(String::new())
+            } else if root.is_empty() {
+                None
+            } else {
+                Some(root.to_string())
+            }
+        })
         .collect()
 }
 
@@ -1591,6 +1600,7 @@ struct PairView {
     local_dir: String,
     remote: String,
     encrypted_roots: Vec<String>,
+    mls: bool,
     last_synced_at: Option<i64>,
 }
 
@@ -1661,6 +1671,7 @@ fn get_settings(app: AppHandle) -> SettingsView {
                         local_dir: pair.local_dir.clone(),
                         remote: pair.remote.clone(),
                         encrypted_roots: pair.encrypted_roots.clone(),
+                        mls: pair.mls,
                         last_synced_at: pair.last_synced_at,
                     })
                     .collect(),
@@ -1927,6 +1938,7 @@ fn add_pair(
     dir: String,
     remote: String,
     encrypted_roots: Vec<String>,
+    mls: Option<bool>,
 ) -> Result<(), String> {
     let local = expand_home(&dir);
     if local.is_empty() {
@@ -1951,7 +1963,7 @@ fn add_pair(
             local_dir: local,
             remote: normalize_remote(&remote),
             encrypted_roots: normalize_roots(encrypted_roots),
-            mls: false,
+            mls: mls.unwrap_or(false),
             last_synced_at: None,
         });
         settings.clone()
@@ -1991,6 +2003,7 @@ fn remove_pair(
 /// Change a synced directory's local path and/or remote subfolder in place
 /// (no remove + re-add).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn update_pair(
     app: AppHandle,
     server: String,
@@ -1999,6 +2012,7 @@ fn update_pair(
     new_dir: String,
     remote: String,
     encrypted_roots: Vec<String>,
+    mls: Option<bool>,
 ) -> Result<(), String> {
     let local = expand_home(&new_dir);
     if local.is_empty() {
@@ -2033,6 +2047,7 @@ fn update_pair(
         pair.local_dir = local.clone();
         pair.remote = normalize_remote(&remote);
         pair.encrypted_roots = normalize_roots(encrypted_roots);
+        pair.mls = mls.unwrap_or(pair.mls);
         // Changing the remote root or local folder invalidates the sync
         // state: the tracked paths belong to the old root. Drop state.json
         // so the next pass re-baselines instead of deleting local files as
@@ -3053,6 +3068,11 @@ mod tests {
         assert_eq!(normalize_remote(""), "/");
         assert_eq!(normalize_remote("Private/"), "/Private");
         assert_eq!(normalize_remote("/a/b"), "/a/b");
+        assert_eq!(
+            normalize_roots(vec![" Private/ ".into(), "/Photos".into(), ".".into()]),
+            vec!["Private".to_string(), "Photos".to_string(), String::new()]
+        );
+        assert!(normalize_roots(vec![" ".into(), "/".into()]).is_empty());
     }
 
     #[test]
