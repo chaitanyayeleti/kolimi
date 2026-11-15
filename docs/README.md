@@ -3,7 +3,7 @@
 This page is the map. The top-level [README](../README.md) is the product
 overview and quick start; everything below goes deeper.
 
-Last full verification: **0.4.9** (2026-11-15).
+Last full verification: **0.5.0** (2026-11-15).
 
 ## Start here
 

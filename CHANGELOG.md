@@ -4,7 +4,7 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] - 2026-11-15
 
 ### Added
 - **App passwords** for sync and WebDAV/CalDAV. `GET|POST
@@ -22,6 +22,9 @@ follow [Semantic Versioning](https://semver.org/).
   asking for a password again. This is the passkey-only path: the native
   client reads the signed-in webview session cookie locally, exchanges it for
   an app password, and never stores the session cookie.
+- Database migrations `0030_app_passwords.sql` and
+  `0031_mfa_onboarding.sql` add app-password storage and the first-login MFA
+  flag. Migrations are forward-only; back up before upgrading.
 
 ### Fixed
 - Trash rows and Settings → Devices rows (including pending enrollments and
