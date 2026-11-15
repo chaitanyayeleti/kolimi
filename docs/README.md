@@ -6,12 +6,13 @@ overview and quick start; everything below goes deeper.
 Current-facing guides are [install.md](install.md), [how-to.md](how-to.md),
 [usage.md](usage.md), [clients.md](clients.md), [operations.md](operations.md),
 [reference.md](reference.md), [metrics.md](metrics.md),
-[architecture.md](architecture.md), [threat-model.md](threat-model.md), [crypto-review.md](crypto-review.md),
-and [known-advisories.md](known-advisories.md). RFCs, decision records,
+[architecture.md](architecture.md), [threat-model.md](threat-model.md),
+[crypto-review.md](crypto-review.md), and
+[known-advisories.md](known-advisories.md). RFCs, decision records,
 plans, and audit files are design or history: they may describe deferred
 work, a frozen review surface, or an earlier implementation.
 
-Last full verification: **0.5.0** (2026-11-15); desktop client verified
+Last full verification: **0.5.1** (2026-11-15); desktop client verified
 against **0.4.10**.
 
 ## Start here

@@ -6,16 +6,24 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-15
+
 ### Added
 - `/metrics` now covers transfer bytes, in-flight requests, login outcomes,
   sessions and app passwords, users/quota/storage, MLS commits, SSE
   pressure, rate limiting, DB pool use, janitor passes/events, process
-  RSS/threads/FDs on Linux, build version, and start time. User/quota gauges
-  refresh at most every 30 seconds instead of scanning all accounts on every
-  scrape.
+  RSS/CPU/threads/FDs on Linux, build version, and start time. User/quota
+  gauges refresh at most every 30 seconds instead of scanning all accounts
+  on every scrape.
 - `KOLIMI_METRICS_TOKEN` adds a read-only token accepted only by `/metrics`,
   so a scraper no longer needs a full admin app password. `/metrics` also
   sends `Vary: Accept` and `Cache-Control: no-store`.
+- Added `docs/grafana/kolimi.json`, an importable Grafana dashboard for the
+  request, transfer, auth, quota, SSE, SQLite, janitor, and process metrics.
+- Added Linux process CPU time plus cumulative SQLite error and
+  `SQLITE_BUSY`/`SQLITE_LOCKED` counters.
+- The Helm chart accepts a first-class metrics token through
+  `metrics.token` or `metrics.existingSecret`/`metrics.secretKey`.
 - Desktop Accounts & Sync can enable **MLS group shares** per synced folder
   from the add/edit form (or `"mls": true` in `desktop.json`). This publishes
   the desktop as an MLS device and includes it in key-package/epoch handling.
