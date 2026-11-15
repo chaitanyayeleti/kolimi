@@ -46,7 +46,7 @@ pub fn now_millis() -> i64 {
 pub enum DbError {
     /// Underlying SQL error.
     #[error("sql error: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    Sqlx(sqlx::Error),
     /// Migration failure.
     #[error("migration error: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
@@ -59,6 +59,33 @@ pub enum DbError {
     /// The username is not acceptable.
     #[error("invalid username: {0}")]
     InvalidUsername(String),
+}
+
+static SQLITE_ERRORS: AtomicU64 = AtomicU64::new(0);
+static SQLITE_BUSY_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+impl From<sqlx::Error> for DbError {
+    fn from(error: sqlx::Error) -> Self {
+        SQLITE_ERRORS.fetch_add(1, Ordering::Relaxed);
+        if let sqlx::Error::Database(database) = &error
+            && let Some(code) = database.code()
+            && let Ok(code) = code.parse::<u32>()
+            && matches!(code & 0xff, 5 | 6)
+        {
+            SQLITE_BUSY_ERRORS.fetch_add(1, Ordering::Relaxed);
+        }
+        DbError::Sqlx(error)
+    }
+}
+
+/// Cumulative SQLite query errors observed by this process.
+pub fn sqlite_errors() -> u64 {
+    SQLITE_ERRORS.load(Ordering::Relaxed)
+}
+
+/// Cumulative SQLite `SQLITE_BUSY` / `SQLITE_LOCKED` errors.
+pub fn sqlite_busy_errors() -> u64 {
+    SQLITE_BUSY_ERRORS.load(Ordering::Relaxed)
 }
 
 /// Folders every new account starts with: `(name, encrypted)`.

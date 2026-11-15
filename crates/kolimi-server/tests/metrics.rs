@@ -126,6 +126,14 @@ async fn metrics_cover_requests_logins_and_health() {
         body.contains("kolimi_sessions_active"),
         "session gauge: {body}"
     );
+    assert!(
+        body.contains("kolimi_process_cpu_seconds_total"),
+        "process CPU: {body}"
+    );
+    assert!(
+        body.contains("kolimi_db_busy_errors_total"),
+        "SQLite busy counter: {body}"
+    );
 }
 
 #[tokio::test]

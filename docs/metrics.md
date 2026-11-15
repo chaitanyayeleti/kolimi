@@ -5,6 +5,15 @@ metric families and gives useful queries and alert starting points. Client
 setup, authentication, and the HTML dashboard are covered in
 [operations.md](operations.md#metrics).
 
+A ready-to-import Grafana dashboard is in
+[`grafana/kolimi.json`](grafana/kolimi.json). In Grafana, choose
+**Dashboards → New → Import**, upload the file, and select your Prometheus
+datasource.
+
+On Kubernetes, set `metrics.token` or preferably
+`metrics.existingSecret`/`metrics.secretKey` in the Helm values; the chart
+passes it to the server as `KOLIMI_METRICS_TOKEN`.
+
 ## Metric catalog
 
 ### HTTP
@@ -79,6 +88,8 @@ are rebuilt at most every 30 seconds, not on every scrape.
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `kolimi_db_pool_connections` | gauge | `state` | SQLite pool `in_use` / `idle` |
+| `kolimi_db_errors_total` | counter | — | Cumulative SQLite query errors |
+| `kolimi_db_busy_errors_total` | counter | — | Cumulative `SQLITE_BUSY` / `SQLITE_LOCKED` errors |
 | `kolimi_janitor_runs_total` | counter | `result` | `success` / `error` |
 | `kolimi_janitor_duration_seconds` | histogram | `result` | Pass duration |
 | `kolimi_janitor_events_total` | counter | `kind` | Objects processed |
@@ -86,6 +97,7 @@ are rebuilt at most every 30 seconds, not on every scrape.
 | `kolimi_process_resident_memory_bytes` | gauge | — | RSS (Linux) |
 | `kolimi_process_threads` | gauge | — | Thread count (Linux) |
 | `kolimi_process_open_fds` | gauge | — | Open file descriptors (Linux) |
+| `kolimi_process_cpu_seconds_total` | counter | — | Cumulative process CPU time (Linux) |
 | `kolimi_build_info` | gauge | `version` | Build version (value `1`) |
 | `kolimi_start_time_seconds` | gauge | — | Process start time |
 
@@ -158,6 +170,8 @@ increase(kolimi_janitor_events_total{kind="scrub_corrupt"}[1h])
 
 ```promql
 kolimi_db_pool_connections{state="in_use"}
+sum(rate(kolimi_db_errors_total[5m]))
+sum(rate(kolimi_db_busy_errors_total[5m]))
 ```
 
 **Version**
@@ -179,6 +193,7 @@ kolimi_build_info
 | SSE rejections | `sum(rate(kolimi_sse_connections_rejected_total[5m])) > 0` |
 | Preview failure spike | `sum(rate(kolimi_preview_runs_total{outcome="error"}[5m])) > 0.1` |
 | DB pool saturation | `kolimi_db_pool_connections{state="in_use"} >= 8` |
+| SQLite contention | `sum(rate(kolimi_db_busy_errors_total[5m])) > 0` for 10m |
 
 Tune thresholds for your traffic. The built-in HTML dashboard is for a quick
 look; use Prometheus and Grafana for history and alerting.

@@ -17,8 +17,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
-    Registry, TextEncoder,
+    Counter, Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use serde::Deserialize;
 
@@ -69,6 +69,12 @@ pub struct Metrics {
     process_rss: IntGauge,
     process_threads: IntGauge,
     process_fds: IntGauge,
+    process_cpu: Counter,
+    db_errors: IntCounter,
+    db_busy_errors: IntCounter,
+    last_db_errors: Arc<Mutex<u64>>,
+    last_db_busy_errors: Arc<Mutex<u64>>,
+    last_process_cpu: Arc<Mutex<f64>>,
     per_user_usage: bool,
     last_usage_refresh: Arc<Mutex<Option<Instant>>>,
     usage_refreshing: Arc<AtomicBool>,
@@ -260,6 +266,18 @@ impl Metrics {
             "kolimi_process_open_fds",
             "Open file descriptors in the server process (Linux)",
         )?;
+        let process_cpu = Counter::new(
+            "kolimi_process_cpu_seconds_total",
+            "Cumulative CPU time used by the server process (Linux)",
+        )?;
+        let db_errors = IntCounter::new(
+            "kolimi_db_errors_total",
+            "Cumulative SQLite query errors observed by this process",
+        )?;
+        let db_busy_errors = IntCounter::new(
+            "kolimi_db_busy_errors_total",
+            "Cumulative SQLite SQLITE_BUSY or SQLITE_LOCKED errors",
+        )?;
         let start_time = IntGauge::new(
             "kolimi_start_time_seconds",
             "Unix time when this server process started",
@@ -306,6 +324,9 @@ impl Metrics {
         registry.register(Box::new(process_rss.clone()))?;
         registry.register(Box::new(process_threads.clone()))?;
         registry.register(Box::new(process_fds.clone()))?;
+        registry.register(Box::new(process_cpu.clone()))?;
+        registry.register(Box::new(db_errors.clone()))?;
+        registry.register(Box::new(db_busy_errors.clone()))?;
         registry.register(Box::new(start_time.clone()))?;
         registry.register(Box::new(build_info.clone()))?;
         build_info
@@ -352,6 +373,12 @@ impl Metrics {
             process_rss,
             process_threads,
             process_fds,
+            process_cpu,
+            db_errors,
+            db_busy_errors,
+            last_db_errors: Arc::new(Mutex::new(0)),
+            last_db_busy_errors: Arc::new(Mutex::new(0)),
+            last_process_cpu: Arc::new(Mutex::new(0.0)),
             per_user_usage: std::env::var("KOLIMI_METRICS_PER_USER")
                 .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
             last_usage_refresh: Arc::new(Mutex::new(None)),
@@ -483,6 +510,38 @@ impl Metrics {
         self.db_pool.with_label_values(&["idle"]).set(idle);
     }
 
+    /// Updates cumulative SQLite error counters from the database layer.
+    pub fn set_db_counters(&self, errors: u64, busy: u64) {
+        fn bump(counter: &IntCounter, last: &Mutex<u64>, value: u64) {
+            let mut last = last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let delta = if value >= *last { value - *last } else { value };
+            if delta > 0 {
+                counter.inc_by(delta);
+            }
+            *last = value;
+        }
+        bump(&self.db_errors, &self.last_db_errors, errors);
+        bump(&self.db_busy_errors, &self.last_db_busy_errors, busy);
+    }
+
+    fn set_process_cpu(&self, seconds: f64) {
+        let mut last = self
+            .last_process_cpu
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let delta = if seconds >= *last {
+            seconds - *last
+        } else {
+            seconds
+        };
+        if delta > 0.0 {
+            self.process_cpu.inc_by(delta);
+        }
+        *last = seconds;
+    }
+
     /// Updates the active SSE-stream gauge from the semaphore.
     pub fn set_sse_active(&self, active: usize) {
         self.sse_active.set(active as i64);
@@ -600,6 +659,9 @@ impl Metrics {
         if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
             self.process_fds.set(entries.count() as i64);
         }
+        if let Some(seconds) = process_cpu_seconds() {
+            self.set_process_cpu(seconds);
+        }
     }
 
     fn try_render(&self) -> Result<String, String> {
@@ -678,6 +740,18 @@ fn proc_status_value(name: &str) -> Option<i64> {
         }
         value.split_whitespace().next()?.parse().ok()
     })
+}
+
+/// Linux reports CPU time in `USER_HZ` ticks, which is 100 on normal
+/// configurations. This is a metrics-only approximation; it never drives
+/// scheduling or billing.
+fn process_cpu_seconds() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let user: f64 = fields.get(11)?.parse().ok()?;
+    let system: f64 = fields.get(12)?.parse().ok()?;
+    Some((user + system) / 100.0)
 }
 
 /// Renders one metric family as an HTML card.
@@ -869,6 +943,9 @@ pub async fn handler(
     );
     let (size, idle) = state.db.pool_stats();
     state.metrics.set_pool_stats(size, idle);
+    state
+        .metrics
+        .set_db_counters(kolimi_db::sqlite_errors(), kolimi_db::sqlite_busy_errors());
     if state.metrics.try_begin_usage_refresh() {
         match state.db.list_users().await {
             Ok(users) => {

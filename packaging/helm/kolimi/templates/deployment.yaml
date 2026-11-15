@@ -34,6 +34,16 @@ spec:
               value: {{ .Values.origin | quote }}
             - name: KOLIMI_SECURE_COOKIES
               value: {{ .Values.secureCookies | quote }}
+            {{- if .Values.metrics.existingSecret }}
+            - name: KOLIMI_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.metrics.existingSecret | quote }}
+                  key: {{ .Values.metrics.secretKey | quote }}
+            {{- else if .Values.metrics.token }}
+            - name: KOLIMI_METRICS_TOKEN
+              value: {{ .Values.metrics.token | quote }}
+            {{- end }}
             {{- range .Values.extraEnv }}
             - name: {{ .name }}
               value: {{ .value | quote }}

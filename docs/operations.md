@@ -287,8 +287,8 @@ tokens, and file bytes are never logged.
 - accounts, quota buckets, storage used, files, trash, and versions
 - SSE connections and rejections, rate-limit rejections
 - MLS commit results
-- SQLite pool usage, janitor passes/events, process RSS/threads/FDs on
-  Linux, build version, and start time
+- SQLite pool usage plus busy/error counters, janitor passes/events,
+  process RSS/CPU/threads/FDs on Linux, build version, and start time
 
 Labels never contain raw request paths, file names, or user identifiers.
 User/quota and database-snapshot gauges are rebuilt at most every 30 seconds;

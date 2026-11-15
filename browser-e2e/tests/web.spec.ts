@@ -954,3 +954,29 @@ test("web migration upgrades a legacy folder share and reset clears state", asyn
     settings.getByText(/MLS state cleared|had no stored/),
   ).toBeVisible();
 });
+
+test("metrics HTML dashboard renders for admins", async ({ page, request }) => {
+  await login(page);
+
+  const response = await page.goto(`${BASE}/metrics`);
+  expect(response?.status()).toBe(200);
+  expect(response?.headers()["content-type"]).toContain("text/html");
+  expect(response?.headers()["vary"]).toContain("Accept");
+  expect(response?.headers()["cache-control"]).toBe("no-store");
+
+  await expect(
+    page.getByRole("heading", { name: "Kolimi metrics", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".metric h2", { hasText: "kolimi_build_info" }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".metric h2", { hasText: "kolimi_http_requests_total" }),
+  ).toBeVisible();
+
+  const text = await request.get(`${BASE}/metrics?format=text`, {
+    headers: AUTH,
+  });
+  expect(text.status()).toBe(200);
+  expect(await text.text()).toContain("kolimi_db_pool_connections");
+});

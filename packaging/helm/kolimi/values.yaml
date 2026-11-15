@@ -11,6 +11,13 @@ origin: http://localhost:8080
 # Set true when the ingress terminates TLS.
 secureCookies: false
 
+# Read-only token accepted only by /metrics. Prefer existingSecret for
+# production; token is convenient for local/testing installs.
+metrics:
+  token: ""
+  existingSecret: ""
+  secretKey: metrics-token
+
 service:
   type: ClusterIP
   port: 8080

@@ -37,7 +37,7 @@ against **0.4.10**.
 | [usage.md](usage.md) | Sign-in, mandatory first-login MFA, app passwords, files, sharing, encrypted content, desktop/sync summary, admin quick reference |
 | [clients.md](clients.md) | Canonical client setup: credentials and app passwords, WebDAV/CalDAV/CardDAV URLs and mounts, desktop pairing and encryption/MLS options, `kolimi-sync`, troubleshooting |
 | [operations.md](operations.md) | Users and groups, account recovery, 2FA and app passwords, backup/restore, audit log, metrics/tracing, quotas, hardening, E2EE/MLS operations, client operations, upgrades, troubleshooting |
-| [metrics.md](metrics.md) | `/metrics` catalog, PromQL, alert starting points, scrape credentials |
+| [metrics.md](metrics.md) | `/metrics` catalog, PromQL, alert starting points, scrape credentials, Grafana dashboard |
 | [reference.md](reference.md) | `kolimi-server` and `kolimi-sync` commands, environment variables, HTTP endpoint groups, data-directory layout |
 
 ## Design and security
