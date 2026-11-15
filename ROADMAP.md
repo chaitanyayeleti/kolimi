@@ -35,6 +35,10 @@ ship-blocker for calling group E2EE production-grade.
 
 ## Recently completed
 
+- **Post-0.4.9 — auth depth**: per-device app passwords for sync and
+  WebDAV/CalDAV, mandatory first-login TOTP-or-passkey setup for new
+  admin-created/invited accounts, passkey-only desktop linking, and the
+  trash/device row alignment fixes. See the [CHANGELOG](CHANGELOG.md).
 - **0.4.9 — UI depth and desktop status**: Phase 1–4 UI work — URL-backed
   navigation, a full Settings page, admin tables, sortable file browser,
   richer file-type icons, a split login layout, shared design tokens, and
@@ -95,8 +99,6 @@ describe MLS as audited before this completes.
   keystore with a `0600` fallback; the web client still keeps enrollment
   and unlocked state only for the tab session. Needs a WebAuthn PRF
   ceremony, a browser E2E test and review.
-- Per-device app passwords for WebDAV/CalDAV clients (today a device uses
-  the account password or a passkey session).
 
 ### 4. Documentation and release hygiene
 

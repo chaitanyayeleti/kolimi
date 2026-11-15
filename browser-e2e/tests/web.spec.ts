@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHmac } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
 
 const PASS = "browser-e2e-pass-123";
@@ -29,7 +30,7 @@ test.beforeAll(async ({ request }) => {
   throw new Error("browser-e2e fixture did not create the legacy share");
 });
 
-async function login(
+async function submitLogin(
   page: Page,
   username = "alice",
   password = PASS,
@@ -38,6 +39,14 @@ async function login(
   await page.getByLabel("Username", { exact: true }).fill(username);
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
+}
+
+async function login(
+  page: Page,
+  username = "alice",
+  password = PASS,
+) {
+  await submitLogin(page, username, password);
   // The first-login Vault suggestion is independent of the keyring state;
   // dismiss it and let the Settings flow decide whether encryption exists.
   await page
@@ -59,6 +68,52 @@ async function unlock(page: Page) {
     settings.getByText("Keyring unlocked for this browser."),
   ).toBeVisible();
   await settings.getByRole("button", { name: "Back to files" }).click();
+}
+
+function base32Decode(input: string): Buffer {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+  for (const character of input.toUpperCase().replace(/=+$/, "")) {
+    const index = alphabet.indexOf(character);
+    if (index < 0) continue;
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+function totp(secret: string): string {
+  const key = base32Decode(secret);
+  const counter = Math.floor(Date.now() / 30_000);
+  const message = Buffer.alloc(8);
+  message.writeBigUInt64BE(BigInt(counter));
+  const digest = createHmac("sha1", key).update(message).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary =
+    ((digest[offset] & 0x7f) << 24) |
+    ((digest[offset + 1] & 0xff) << 16) |
+    ((digest[offset + 2] & 0xff) << 8) |
+    (digest[offset + 3] & 0xff);
+  return String(binary % 1_000_000).padStart(6, "0");
+}
+
+async function completeMfa(page: Page) {
+  await expect(
+    page.getByRole("heading", { name: "Secure your account", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Set up authenticator", exact: true }).click();
+  const secret = await page.locator(".totp-enroll code").textContent();
+  expect(secret).toBeTruthy();
+  await page.getByLabel("Code from the app", { exact: true }).fill(totp(secret!));
+  await page.getByRole("button", { name: "Confirm and enable", exact: true }).click();
+  await expect(page.getByText(/Recovery codes/)).toBeVisible();
+  await page.getByRole("button", { name: "Continue to Kolimi", exact: true }).click();
 }
 
 async function openFolder(page: Page, name: string) {
@@ -269,6 +324,93 @@ test("web file list sorts, filters, selects, and shows details", async ({
   await request.delete(`${BASE}/dav/${folder}`, { headers: AUTH });
 });
 
+test("web trash rows keep the file body and actions aligned", async ({
+  page,
+}) => {
+  await login(page);
+  const name = `trash-${Date.now()}.txt`;
+  await upload(page, name, "send me to trash");
+
+  await (await row(page, name))
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Move to trash", exact: true }).click();
+  await page.getByRole("button", { name: "Trash", exact: true }).click();
+
+  const trashRow = page.locator("li.file.simple", { hasText: name }).first();
+  await expect(trashRow).toBeVisible();
+  await expect(
+    trashRow.getByRole("button", { name: "Restore", exact: true }),
+  ).toBeVisible();
+  await expect(
+    trashRow.getByRole("button", { name: "Delete forever", exact: true }),
+  ).toBeVisible();
+
+  const rowBox = await trashRow.boundingBox();
+  const nameBox = await trashRow.locator(".file-name").boundingBox();
+  const actionsBox = await trashRow.locator(".file-actions").boundingBox();
+  expect(rowBox).not.toBeNull();
+  expect(nameBox).not.toBeNull();
+  expect(actionsBox).not.toBeNull();
+  expect(nameBox!.width).toBeGreaterThan(150);
+  expect(actionsBox!.x).toBeGreaterThan(nameBox!.x + 150);
+  expect(actionsBox!.x + actionsBox!.width).toBeLessThanOrEqual(
+    rowBox!.x + rowBox!.width + 1,
+  );
+  const columns = await trashRow.evaluate(
+    (element) => getComputedStyle(element).gridTemplateColumns.split(" ").length,
+  );
+  expect(columns).toBe(2);
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await trashRow
+    .getByRole("button", { name: "Delete forever", exact: true })
+    .dispatchEvent("click");
+  await expect(trashRow).toHaveCount(0);
+});
+
+test("web app passwords can be created and revoked", async ({
+  page,
+  request,
+}) => {
+  await login(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.locator(".settings-page");
+  await settings.getByRole("tab", { name: "Passkeys", exact: true }).click();
+
+  const name = `e2e-app-${Date.now()}`;
+  await settings
+    .getByPlaceholder("e.g. Laptop sync")
+    .fill(name);
+  await settings
+    .getByRole("button", { name: "Create app password", exact: true })
+    .click();
+  await settings
+    .getByLabel("Account password", { exact: true })
+    .fill(PASS);
+  await settings.getByRole("button", { name: "Confirm", exact: true }).click();
+
+  await expect(
+    settings.getByText("Copy this app password now", { exact: false }),
+  ).toBeVisible();
+  const token = (await settings.locator(".created code").last().textContent())!.trim();
+  expect(token).toMatch(/^[0-9a-f]{64}$/);
+
+  const auth = {
+    Authorization: "Basic " + Buffer.from(`alice:${token}`).toString("base64"),
+  };
+  expect((await request.get(`${BASE}/api/me/usage`, { headers: auth })).status()).toBe(200);
+  expect(
+    (
+      await request.delete(`${BASE}/api/me/app-passwords/current`, {
+        headers: auth,
+      })
+    ).status(),
+  ).toBe(204);
+  expect((await request.get(`${BASE}/api/me/usage`, { headers: auth })).status()).toBe(401);
+});
+
 test("web admin page lists and inspects users", async ({ page }) => {
   await login(page);
   await page.getByRole("button", { name: "Admin", exact: true }).click();
@@ -375,7 +517,8 @@ test("web invite onboarding creates an account", async ({ page }) => {
     page.getByRole("heading", { name: "Sign in to Kolimi", exact: true }),
   ).toBeVisible();
 
-  await login(page, username, password);
+  await submitLogin(page, username, password);
+  await completeMfa(page);
   await expect(
     page.getByRole("button", { name: "Files", exact: true }),
   ).toBeVisible();
@@ -416,6 +559,7 @@ test("web forces a temporary password change", async ({ page }) => {
   await page.getByLabel("Confirm new password", { exact: true }).fill(replacement);
   await page.getByRole("button", { name: "Change password", exact: true }).click();
 
+  await completeMfa(page);
   await expect(
     page.getByRole("button", { name: "Files", exact: true }),
   ).toBeVisible();
@@ -779,6 +923,16 @@ test("web migration upgrades a legacy folder share and reset clears state", asyn
     settings.getByRole("heading", { name: "MLS devices", exact: true }),
   ).toBeVisible();
   await expect(settings.getByText("this device", { exact: true })).toBeVisible();
+
+  const mlsRow = settings.locator(".mls-device").first();
+  const mlsBox = await mlsRow.boundingBox();
+  expect(mlsBox).not.toBeNull();
+  expect(mlsBox!.width).toBeGreaterThan(500);
+  expect(
+    await mlsRow.evaluate(
+      (element) => getComputedStyle(element).gridTemplateColumns.split(" ").length,
+    ),
+  ).toBe(2);
 
   await settings.getByRole("tab", { name: "Sharing", exact: true }).click();
   await settings

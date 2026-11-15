@@ -298,6 +298,9 @@ pub async fn accept_invite(
         Err(DbError::InvalidUsername(_)) => return api::bad_request("invalid username"),
         Err(_) => return api::internal_error(),
     };
+    if state.db.set_must_setup_mfa(user.id, true).await.is_err() {
+        return api::internal_error();
+    }
     audit(
         &state,
         None,

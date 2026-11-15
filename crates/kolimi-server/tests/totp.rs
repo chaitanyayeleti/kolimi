@@ -381,3 +381,60 @@ async fn totp_cannot_be_re_enrolled_from_a_session() {
     let (stored, _) = state.db.totp_secret(alice.id).await.unwrap().unwrap();
     assert_eq!(stored, first_secret);
 }
+
+#[tokio::test]
+async fn totp_session_token_authenticates_bearer_requests() {
+    let (_dir, state, app) = setup().await;
+    let alice = state.db.find_user(ALICE).await.unwrap().unwrap();
+    let secret = TotpSecret::generate().unwrap();
+    state
+        .db
+        .set_totp_secret(alice.id, &secret.to_base32())
+        .await
+        .unwrap();
+
+    // A desktop client without a code learns that a second factor is needed.
+    let (status, body) = post(&app, "/api/session", &login_body(None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["totp_required"], true);
+
+    // A code produces a session cookie; the desktop client uses its raw
+    // value as a bearer token for background sync.
+    let code = current_code(&secret);
+    let (status, cookies) = login_session(&app, Some(&code)).await;
+    assert_eq!(status, StatusCode::OK);
+    let token = cookies
+        .iter()
+        .find_map(|cookie| cookie.strip_prefix("kolimi_session="))
+        .expect("login must set a session cookie");
+    assert_eq!(token.len(), 64);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/me/usage")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The account password alone still cannot satisfy Basic when TOTP is on.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/me/usage")
+                .header(header::AUTHORIZATION, basic())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

@@ -3,7 +3,7 @@ use leptos::task::spawn_local;
 use serde_json::{Value, json};
 
 use crate::api;
-use crate::app::plural;
+use crate::app::{plural, relative_time};
 use crate::components::{ErrorText, Icon, sanitize_svg};
 
 /// A credential change waiting for re-authentication.
@@ -11,23 +11,58 @@ use crate::components::{ErrorText, Icon, sanitize_svg};
 enum PendingAction {
     Add(String),
     Remove(i64),
+    AddAppPassword(String),
+    RemoveAppPassword(i64),
 }
 
-/// Applies a pending change with a fresh re-authentication token.
-async fn apply_action(action: PendingAction, token: &str) -> Result<(), String> {
+/// Applies a pending change with a fresh re-authentication token. Returns the
+/// new app-password token when one was created.
+async fn apply_action(action: PendingAction, token: &str) -> Result<Option<String>, String> {
     match action {
-        PendingAction::Add(name) => crate::passkey::register(&name, token).await,
-        PendingAction::Remove(id) => {
-            match api::delete_with(
-                &format!("/api/passkeys/{id}"),
+        PendingAction::Add(name) => crate::passkey::register(&name, token).await.map(|()| None),
+        PendingAction::Remove(id) => match api::delete_with(
+            &format!("/api/passkeys/{id}"),
+            Some(("x-reauth-token", token)),
+        )
+        .await
+        {
+            Ok(response) if response.status == 204 => Ok(None),
+            Ok(response) => Err(response
+                .error()
+                .unwrap_or("Could not remove passkey")
+                .to_string()),
+            Err(error) => Err(error),
+        },
+        PendingAction::AddAppPassword(name) => {
+            match api::send_json_with(
+                "POST",
+                "/api/me/app-passwords",
+                &json!({ "name": name }),
                 Some(("x-reauth-token", token)),
             )
             .await
             {
-                Ok(response) if response.status == 204 => Ok(()),
+                Ok(response) if response.status == 201 => {
+                    Ok(response.body["token"].as_str().map(str::to_string))
+                }
                 Ok(response) => Err(response
                     .error()
-                    .unwrap_or("Could not remove passkey")
+                    .unwrap_or("Could not create app password")
+                    .to_string()),
+                Err(error) => Err(error),
+            }
+        }
+        PendingAction::RemoveAppPassword(id) => {
+            match api::delete_with(
+                &format!("/api/me/app-passwords/{id}"),
+                Some(("x-reauth-token", token)),
+            )
+            .await
+            {
+                Ok(response) if response.status == 204 => Ok(None),
+                Ok(response) => Err(response
+                    .error()
+                    .unwrap_or("Could not revoke app password")
                     .to_string()),
                 Err(error) => Err(error),
             }
@@ -48,6 +83,9 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
     let pending = RwSignal::new(Option::<PendingAction>::None);
     let reauth_password = RwSignal::new(String::new());
     let reauth_code = RwSignal::new(String::new());
+    let app_passwords = RwSignal::new(Vec::<Value>::new());
+    let new_app_name = RwSignal::new(String::new());
+    let new_app_password = RwSignal::new(Option::<String>::None);
 
     let load = Callback::new(move |_: ()| {
         spawn_local(async move {
@@ -60,6 +98,16 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                 && r.status == 200
             {
                 totp.set(r.body);
+            }
+            if let Ok(r) = api::get("/api/me/app-passwords").await
+                && r.status == 200
+            {
+                app_passwords.set(
+                    r.body["app_passwords"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                );
             }
         });
     });
@@ -151,6 +199,21 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
         pending.set(Some(PendingAction::Remove(id)));
     };
 
+    let add_app_password = move |_| {
+        let name = new_app_name.get_untracked().trim().to_string();
+        if name.is_empty() {
+            error.set("Name this app password (e.g. \"Laptop sync\")".to_string());
+            return;
+        }
+        error.set(String::new());
+        pending.set(Some(PendingAction::AddAppPassword(name)));
+    };
+
+    let remove_app_password = move |id: i64| {
+        error.set(String::new());
+        pending.set(Some(PendingAction::RemoveAppPassword(id)));
+    };
+
     let confirm = move |_| {
         let Some(action) = pending.get_untracked() else {
             return;
@@ -168,8 +231,12 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                 Err(message) => Err(message),
             };
             match result {
-                Ok(()) => {
+                Ok(token) => {
                     error.set(String::new());
+                    if token.is_some() {
+                        new_app_password.set(token);
+                        new_app_name.set(String::new());
+                    }
                     load.run(());
                 }
                 Err(message) => error.set(message),
@@ -192,8 +259,12 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                 Err(message) => Err(message),
             };
             match result {
-                Ok(()) => {
+                Ok(token) => {
                     error.set(String::new());
+                    if token.is_some() {
+                        new_app_password.set(token);
+                        new_app_name.set(String::new());
+                    }
                     load.run(());
                 }
                 Err(message) => error.set(message),
@@ -262,6 +333,88 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                     </button>
                 </div>
 
+                <h3>"App passwords"</h3>
+                <p class="muted">
+                    "Long-lived passwords for desktop sync, WebDAV/CalDAV, and other clients that cannot complete an interactive sign-in. Revoke a device here if it is lost."
+                </p>
+                <Show when=move || new_app_password.get().is_some()>
+                    <div class="created">
+                        <strong>"Copy this app password now — it is shown once:"</strong>
+                        <code>{move || new_app_password.get().unwrap_or_default()}</code>
+                        <div class="row-actions">
+                            <button
+                                class="ghost"
+                                on:click=move |_| new_app_password.set(None)
+                            >
+                                "I saved it"
+                            </button>
+                        </div>
+                    </div>
+                </Show>
+                <ul class="shares">
+                    <For
+                        each=move || app_passwords.get()
+                        key=|password| password["id"].as_i64().unwrap_or(0)
+                        children=move |password| {
+                            let id = password["id"].as_i64().unwrap_or(0);
+                            let name = password["name"].as_str().unwrap_or_default().to_string();
+                            let created = relative_time(
+                                password["created_at"].as_i64().unwrap_or(0),
+                            );
+                            let last_used = password["last_used_at"]
+                                .as_i64()
+                                .map(relative_time)
+                                .unwrap_or_else(|| "never used".to_string());
+                            view! {
+                                <li class="row">
+                                    <span class="name">
+                                        <span class="lead-icon">
+                                            <Icon name="key"/>
+                                        </span>
+                                        <span>
+                                            <strong>{name}</strong>
+                                            <span class="muted">
+                                                {format!(" · created {created} · last used {last_used}")}
+                                            </span>
+                                        </span>
+                                    </span>
+                                    <span class="row-actions">
+                                        <button
+                                            class="danger"
+                                            disabled=move || busy.get() || pending.get().is_some()
+                                            on:click=move |_| remove_app_password(id)
+                                        >
+                                            <Icon name="trash"/>
+                                            "Revoke"
+                                        </button>
+                                    </span>
+                                </li>
+                            }
+                        }
+                    />
+                    <Show when=move || app_passwords.get().is_empty()>
+                        <li class="row muted">"No app passwords yet."</li>
+                    </Show>
+                </ul>
+                <div class="share-form">
+                    <label>
+                        "Name"
+                        <input
+                            type="text"
+                            placeholder="e.g. Laptop sync"
+                            prop:value=move || new_app_name.get()
+                            on:input=move |ev| new_app_name.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <button
+                        disabled=move || busy.get() || pending.get().is_some()
+                        on:click=add_app_password
+                    >
+                        <Icon name="key"/>
+                        "Create app password"
+                    </button>
+                </div>
+
                 {move || {
                     pending
                         .get()
@@ -269,6 +422,12 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                             let description = match &action {
                                 PendingAction::Add(name) => format!("add “{name}”"),
                                 PendingAction::Remove(_) => "remove this passkey".to_string(),
+                                PendingAction::AddAppPassword(name) => {
+                                    format!("create the app password “{name}”")
+                                }
+                                PendingAction::RemoveAppPassword(_) => {
+                                    "revoke this app password".to_string()
+                                }
                             };
                             view! {
                                 <div class="reauth">

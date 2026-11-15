@@ -63,6 +63,16 @@
             <small>Connect another Kolimi server</small>
           </span>
         </summary>
+        <div class="web-session">
+          <button class="btn" id="link-web-session" type="button">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
+            <span>Use current web session</span>
+          </button>
+          <p class="muted">
+            Already signed in in the Kolimi window? Link it here — useful for
+            passkey-only accounts. This creates a revocable app password for sync.
+          </p>
+        </div>
         <form id="signin-form" class="form-grid" autocomplete="on">
           <label class="field span-2">
             <span>Server URL</span>
@@ -73,9 +83,18 @@
             <input id="new-username" autocomplete="username" required>
           </label>
           <label class="field">
-            <span>Password</span>
+            <span>Password or app password</span>
             <input id="new-password" type="password" autocomplete="current-password" required>
           </label>
+          <label class="field span-2">
+            <span>Two-factor / recovery code (if enabled)</span>
+            <input id="new-code" autocomplete="one-time-code">
+          </label>
+          <p class="muted span-2">
+            Background sync signs in separately from the web app so it can keep
+            running when the window is closed. Enter a current code if your
+            account has two-factor authentication.
+          </p>
           <div class="form-actions span-2">
             <button class="btn primary" type="submit">Sign in</button>
           </div>

@@ -809,6 +809,15 @@ textarea:focus {
   box-shadow: var(--shadow-sm);
 }
 
+/* Rows without checkbox/size/time columns: trash, devices, enrollments. */
+.file.simple {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.file.simple .file-actions {
+  flex-wrap: wrap;
+}
+
 .file-check {
   width: 16px;
   height: 16px;
@@ -1523,6 +1532,29 @@ textarea:focus {
   width: 100%;
 }
 
+.mfa-card {
+  max-width: 34rem;
+}
+
+.mfa-method {
+  padding: 1rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.mfa-method h3 {
+  margin: 0 0 0.25rem;
+  font-size: var(--text-md);
+}
+
+.mfa-method .muted {
+  margin: 0 0 0.65rem;
+}
+
+.mfa-method label {
+  display: block;
+  margin-bottom: 0.6rem;
+}
+
 .login .error {
   margin: 0;
 }
@@ -2042,6 +2074,14 @@ textarea:focus {
 @media (max-width: 640px) {
   .hide-sm {
     display: none;
+  }
+
+  .file.simple {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .file.simple .file-actions {
+    justify-self: stretch;
   }
 
   .row-actions select {

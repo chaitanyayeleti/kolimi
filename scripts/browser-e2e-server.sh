@@ -41,6 +41,7 @@ SYNC=./target/debug/kolimi-sync
 [ -x "$SYNC" ] || fail "missing $SYNC (run: cargo build -p kolimi-server -p kolimi-sync)"
 
 KOLIMI_DATA="$DATA" KOLIMI_ORIGIN="$BASE" KOLIMI_SECURE_COOKIES=false \
+    KOLIMI_AUTH_RATE_LIMIT=200 \
     "$SERVER" serve --bind "127.0.0.1:$PORT" >"$LOG" 2>&1 &
 SERVER_PID=$!
 

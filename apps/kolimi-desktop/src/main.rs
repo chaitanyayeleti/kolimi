@@ -265,7 +265,7 @@ fn pair_sync_config(
     kolimi_sync::SyncConfig {
         server: account.server.clone(),
         username: account.username.clone(),
-        password: secrets.password.clone(),
+        password: secrets.sync_password().to_string(),
         token: None,
         local_dir: PathBuf::from(&pair.local_dir),
         e2ee: (!pair.encrypted_roots.is_empty()).then(|| kolimi_sync::E2eeOptions {
@@ -306,6 +306,19 @@ struct Secrets {
     password: String,
     #[serde(default)]
     e2ee_passphrase: Option<String>,
+    /// Long-lived per-device app password used for background sync.
+    #[serde(default)]
+    app_password: Option<String>,
+}
+
+impl Secrets {
+    fn signed_in(&self) -> bool {
+        !self.password.is_empty() || self.app_password.is_some()
+    }
+
+    fn sync_password(&self) -> &str {
+        self.app_password.as_deref().unwrap_or(&self.password)
+    }
 }
 
 /// Keychain service name for secret entries.
@@ -357,6 +370,7 @@ fn forget_password(key: &str) {
         return;
     }
     secrets.password.clear();
+    secrets.app_password = None;
     store_secrets(key, &secrets);
 }
 
@@ -701,6 +715,7 @@ fn migrate_v1(v1: V1Config) -> Settings {
         (!v1.password.is_empty()).then(|| Secrets {
             password: v1.password.clone(),
             e2ee_passphrase: v1.e2ee_passphrase.clone(),
+            app_password: None,
         })
     });
     if let Some(secrets) = secrets {
@@ -969,10 +984,118 @@ fn looks_offline(errors: &[String]) -> bool {
     })
 }
 
-/// Validate credentials against the server (any authenticated endpoint).
-async fn validate_login(server: &str, username: &str, password: &str) -> Result<(), String> {
+fn looks_unauthorized(errors: &[String]) -> bool {
+    errors.iter().any(|error| {
+        error.contains("server error: 401")
+            || error.contains("HTTP 401")
+            || error.contains("401 for")
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct SignInResult {
+    totp_required: bool,
+}
+
+enum SessionLogin {
+    Success(String),
+    TotpRequired,
+    MfaSetupRequired,
+}
+
+/// Extract the session token from the login response's `Set-Cookie` headers.
+fn session_token(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    for value in headers.get_all(reqwest::header::SET_COOKIE) {
+        let Ok(cookie) = value.to_str() else {
+            continue;
+        };
+        let Some((name, rest)) = cookie.split_once('=') else {
+            continue;
+        };
+        if name.trim() != "kolimi_session" {
+            continue;
+        }
+        let token = rest.split(';').next().unwrap_or("").trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+/// Authenticate with the same endpoint as the web UI, so TOTP and recovery
+/// codes are supported. The returned session token is used as a bearer
+/// credential by the background sync client.
+async fn session_login(
+    server: &str,
+    username: &str,
+    password: &str,
+    code: &str,
+) -> Result<SessionLogin, String> {
+    let url = format!("{}/api/session", server.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Kolimi Desktop/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut payload = serde_json::json!({
+        "username": username,
+        "password": password,
+    });
+    if !code.is_empty() {
+        payload["code"] = serde_json::Value::String(code.to_string());
+    }
+    let response = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("cannot reach server: {error}"))?;
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+    match status {
+        200..=299 => {
+            if body["must_setup_mfa"].as_bool() == Some(true) {
+                return Ok(SessionLogin::MfaSetupRequired);
+            }
+            let token = session_token(&headers)
+                .ok_or_else(|| "server did not return a session token".to_string())?;
+            Ok(SessionLogin::Success(token))
+        }
+        401 if body["totp_required"].as_bool() == Some(true) => Ok(SessionLogin::TotpRequired),
+        401 | 403 => Err("invalid username, password, or two-factor code".to_string()),
+        429 => Err("too many attempts — wait a minute, then try again.".to_string()),
+        code => Err(format!("server returned HTTP {code}")),
+    }
+}
+
+async fn revoke_session(server: &str, token: &str) {
+    let url = format!("{}/api/session", server.trim_end_matches('/'));
+    let client = match reqwest::Client::builder()
+        .user_agent(format!("Kolimi Desktop/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("kolimi-desktop: could not build session client: {error}");
+            return;
+        }
+    };
+    if let Err(error) = client.delete(&url).bearer_auth(token).send().await {
+        eprintln!("kolimi-desktop: could not revoke sync session: {error}");
+    }
+}
+
+/// Check whether a password is a valid Basic credential. Used as a fallback
+/// for manually supplied app passwords (including passkey-only accounts).
+async fn validate_basic_login(
+    server: &str,
+    username: &str,
+    password: &str,
+) -> Result<bool, String> {
     let url = format!("{}/api/me/usage", server.trim_end_matches('/'));
     let client = reqwest::Client::builder()
+        .user_agent(format!("Kolimi Desktop/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -982,9 +1105,75 @@ async fn validate_login(server: &str, username: &str, password: &str) -> Result<
         .await
         .map_err(|error| format!("cannot reach server: {error}"))?;
     match response.status().as_u16() {
-        200..=299 => Ok(()),
-        401 | 403 => Err("invalid username or password".to_string()),
+        200..=299 => Ok(true),
+        401 | 403 => Ok(false),
         code => Err(format!("server returned HTTP {code}")),
+    }
+}
+
+fn device_label() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "this device".to_string())
+}
+
+/// Exchange a fresh login session for a long-lived, revocable app password.
+async fn create_app_password(
+    server: &str,
+    session_token: &str,
+    name: &str,
+) -> Result<String, String> {
+    let url = format!("{}/api/me/app-passwords", server.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Kolimi Desktop/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post(&url)
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .map_err(|error| format!("cannot reach server: {error}"))?;
+    let status = response.status().as_u16();
+    let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+    if status != 201 {
+        return Err(body["error"]
+            .as_str()
+            .unwrap_or("could not create a sync app password")
+            .to_string());
+    }
+    let token = body["token"]
+        .as_str()
+        .ok_or_else(|| "server returned no app password".to_string())?;
+    Ok(token.to_string())
+}
+
+/// Revoke the app password this device authenticated with.
+async fn revoke_app_password(server: &str, username: &str, password: &str) {
+    let url = format!(
+        "{}/api/me/app-passwords/current",
+        server.trim_end_matches('/')
+    );
+    let client = match reqwest::Client::builder()
+        .user_agent(format!("Kolimi Desktop/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("kolimi-desktop: could not build app-password client: {error}");
+            return;
+        }
+    };
+    if let Err(error) = client
+        .delete(&url)
+        .basic_auth(username, Some(password))
+        .send()
+        .await
+    {
+        eprintln!("kolimi-desktop: could not revoke app password: {error}");
     }
 }
 
@@ -1156,9 +1345,8 @@ fn run_sync(app: AppHandle) {
     let mut startup_errors: Vec<String> = Vec::new();
     for account in &settings.accounts {
         // An entry with an empty password means "signed out, passphrase kept".
-        let signed_in = keyring_get(&account_key(&account.server, &account.username))
-            .filter(|secrets| !secrets.password.is_empty());
-        let Some(secrets) = signed_in else {
+        let secrets = keyring_get(&account_key(&account.server, &account.username));
+        let Some(secrets) = secrets.as_ref().filter(|secrets| secrets.signed_in()) else {
             startup_errors.push(format!(
                 "{}@{}: not signed in",
                 account.username,
@@ -1176,7 +1364,7 @@ fn run_sync(app: AppHandle) {
                 pair.local_dir.clone(),
                 pair.remote.clone(),
                 short_dir(&pair.local_dir),
-                pair_sync_config(account, pair, &secrets),
+                pair_sync_config(account, pair, secrets),
             ));
         }
     }
@@ -1251,7 +1439,7 @@ fn run_sync(app: AppHandle) {
                 continue;
             }
             let Some(secrets) = keyring_get(&account_key(&account.server, &account.username))
-                .filter(|secrets| !secrets.password.is_empty())
+                .filter(Secrets::signed_in)
             else {
                 continue;
             };
@@ -1308,19 +1496,25 @@ fn run_sync(app: AppHandle) {
         if !errors.is_empty() {
             let first = errors.first().cloned().unwrap_or_default();
             let offline = looks_offline(&errors);
+            let detail = if looks_unauthorized(&errors) {
+                "Sync sign-in expired or was revoked — open Accounts & Sync and sign in again."
+                    .to_string()
+            } else {
+                first.clone()
+            };
             let errors_text = errors.join("\n");
             set_sync_status(
                 &app_handle,
                 SyncStatus {
                     state: "error".to_string(),
-                    detail: first.clone(),
+                    detail: detail.clone(),
                     conflicts,
                     errors,
                     offline,
                     ..Default::default()
                 },
             );
-            if previous.state != "error" || previous.detail != first {
+            if previous.state != "error" || previous.detail != detail {
                 notify_user("Kolimi sync problem", &errors_text);
             }
         } else if !locked.is_empty() {
@@ -1449,9 +1643,7 @@ fn get_settings(app: AppHandle) -> SettingsView {
         .map(|account| {
             let secrets = keyring_get(&account_key(&account.server, &account.username));
             AccountView {
-                signed_in: secrets
-                    .as_ref()
-                    .is_some_and(|secrets| !secrets.password.is_empty()),
+                signed_in: secrets.as_ref().is_some_and(Secrets::signed_in),
                 has_e2ee: account
                     .pairs
                     .iter()
@@ -1481,29 +1673,78 @@ fn get_settings(app: AppHandle) -> SettingsView {
     }
 }
 
-/// Sign in (or re-authenticate) an account; stores the password and kicks off
-/// a sync.
+/// Sign in (or re-authenticate) an account. TOTP accounts return
+/// `totp_required` on the first attempt, then exchange a code for a session
+/// and create a long-lived app password for background sync.
 #[tauri::command]
 async fn sign_in(
     app: AppHandle,
     server: String,
     username: String,
     password: String,
-) -> Result<(), String> {
+    code: Option<String>,
+) -> Result<SignInResult, String> {
     let server = normalize_server(&server);
     if server.is_empty() || username.is_empty() {
         return Err("server and username are required".to_string());
     }
-    validate_login(&server, &username, &password).await?;
+    let code = code.unwrap_or_default();
+    let code = code.trim();
+    let (account_password, app_password) = match session_login(&server, &username, &password, code)
+        .await
+    {
+        Ok(SessionLogin::TotpRequired) => {
+            return Ok(SignInResult {
+                totp_required: true,
+            });
+        }
+        Ok(SessionLogin::MfaSetupRequired) => {
+            return Err("finish two-factor or passkey setup in the web app first".to_string());
+        }
+        Ok(SessionLogin::Success(token)) => {
+            let app_name = format!("Kolimi Desktop on {}", device_label());
+            let app_password = match create_app_password(&server, &token, &app_name).await {
+                Ok(password) => Some(password),
+                Err(error) if code.is_empty() => {
+                    // Non-TOTP accounts can still sync with the account password.
+                    eprintln!("kolimi-desktop: app-password creation failed: {error}");
+                    None
+                }
+                Err(error) => {
+                    revoke_session(&server, &token).await;
+                    return Err(format!("could not create a sync app password: {error}"));
+                }
+            };
+            revoke_session(&server, &token).await;
+            (password, app_password)
+        }
+        Err(_)
+            if code.is_empty() && validate_basic_login(&server, &username, &password).await? =>
+        {
+            // A passkey-only account can paste an app password created in
+            // the web UI; it authenticates with Basic, not /api/session.
+            (String::new(), Some(password))
+        }
+        Err(error) => return Err(error),
+    };
     // Re-authenticating must not drop the E2EE passphrase the user already
     // stored for this account.
     let key = account_key(&server, &username);
-    let e2ee_passphrase = keyring_get(&key).and_then(|secrets| secrets.e2ee_passphrase);
+    let previous = keyring_get(&key);
+    if let Some(old) = previous
+        .as_ref()
+        .and_then(|secrets| secrets.app_password.as_deref())
+        && Some(old) != app_password.as_deref()
+    {
+        revoke_app_password(&server, &username, old).await;
+    }
+    let e2ee_passphrase = previous.and_then(|secrets| secrets.e2ee_passphrase);
     store_secrets(
         &key,
         &Secrets {
-            password,
+            password: account_password,
             e2ee_passphrase,
+            app_password,
         },
     );
     let settings = {
@@ -1528,20 +1769,139 @@ async fn sign_in(
     };
     save_settings_file(&settings)?;
     run_sync(app);
-    Ok(())
+    Ok(SignInResult {
+        totp_required: false,
+    })
 }
 
 /// Forget an account's password (keeps its configuration and E2EE passphrase).
 #[tauri::command]
-fn sign_out(app: AppHandle, server: String, username: String) {
-    forget_password(&account_key(&server, &username));
+async fn sign_out(app: AppHandle, server: String, username: String) {
+    let key = account_key(&server, &username);
+    if let Some(secrets) = keyring_get(&key)
+        && let Some(password) = secrets.app_password.as_deref()
+    {
+        revoke_app_password(&server, &username, password).await;
+    }
+    forget_password(&key);
     run_sync(app);
+}
+
+#[derive(Debug, Serialize)]
+struct LinkResult {
+    server: String,
+    username: String,
+}
+
+/// Link the signed-in server webview to the native sync client. Works for
+/// passkey-only accounts, where the local Accounts & Sync window cannot run a
+/// WebAuthn ceremony. The webview session is exchanged for an app password;
+/// the session cookie is never stored.
+#[tauri::command]
+async fn link_web_session(app: AppHandle) -> Result<LinkResult, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "open the Kolimi window and sign in first".to_string())?;
+    let url = window
+        .url()
+        .map_err(|error| format!("cannot read the Kolimi window URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("the Kolimi window is not on a server URL".to_string());
+    }
+    let cookies = window
+        .cookies_for_url(url.clone())
+        .map_err(|error| format!("cannot read the web session: {error}"))?;
+    let session = cookies
+        .iter()
+        .find(|cookie| cookie.name() == "kolimi_session")
+        .map(|cookie| cookie.value().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "sign in to the Kolimi window first, then try again".to_string())?;
+    let server = url.origin().ascii_serialization();
+    let me_url = format!("{}/api/me", server.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Kolimi Desktop/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .get(&me_url)
+        .bearer_auth(&session)
+        .send()
+        .await
+        .map_err(|error| format!("cannot reach server: {error}"))?;
+    let status = response.status().as_u16();
+    let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+    if status != 200 {
+        return Err(body["error"]
+            .as_str()
+            .unwrap_or("the web session is not valid")
+            .to_string());
+    }
+    let username = body["username"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "server returned no username".to_string())?
+        .to_string();
+    if body["must_setup_mfa"].as_bool() == Some(true) {
+        return Err("finish two-factor or passkey setup in the web app first".to_string());
+    }
+    let app_name = format!("Kolimi Desktop on {}", device_label());
+    let app_password = create_app_password(&server, &session, &app_name).await?;
+    let key = account_key(&server, &username);
+    let previous = keyring_get(&key);
+    if let Some(old) = previous
+        .as_ref()
+        .and_then(|secrets| secrets.app_password.as_deref())
+    {
+        revoke_app_password(&server, &username, old).await;
+    }
+    let e2ee_passphrase = previous
+        .as_ref()
+        .and_then(|secrets| secrets.e2ee_passphrase.clone());
+    let password = previous.map(|secrets| secrets.password).unwrap_or_default();
+    store_secrets(
+        &key,
+        &Secrets {
+            password,
+            e2ee_passphrase,
+            app_password: Some(app_password),
+        },
+    );
+    let settings = {
+        let state = app.state::<DesktopState>();
+        let mut settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !settings
+            .accounts
+            .iter()
+            .any(|account| account.server == server && account.username == username)
+        {
+            settings.accounts.push(Account {
+                server: server.clone(),
+                username: username.clone(),
+                pairs: Vec::new(),
+                auto_approve_devices: true,
+            });
+        }
+        settings.clone()
+    };
+    save_settings_file(&settings)?;
+    run_sync(app);
+    Ok(LinkResult { server, username })
 }
 
 /// Remove an account entirely (configuration + password).
 #[tauri::command]
-fn remove_account(app: AppHandle, server: String, username: String) -> Result<(), String> {
-    delete_secrets(&account_key(&server, &username));
+async fn remove_account(app: AppHandle, server: String, username: String) -> Result<(), String> {
+    let key = account_key(&server, &username);
+    if let Some(secrets) = keyring_get(&key)
+        && let Some(password) = secrets.app_password.as_deref()
+    {
+        revoke_app_password(&server, &username, password).await;
+    }
+    delete_secrets(&key);
     let settings = {
         let state = app.state::<DesktopState>();
         let mut settings = state
@@ -1757,7 +2117,7 @@ async fn e2ee_status(app: AppHandle, server: String, username: String) -> Result
     let Some(secrets) = keyring_get(&account_key(&server, &username)) else {
         return Ok("signed_out".to_string());
     };
-    if secrets.password.is_empty() {
+    if !secrets.signed_in() {
         return Ok("signed_out".to_string());
     }
     let local = account
@@ -2033,7 +2393,7 @@ fn account_config(
     kolimi_sync::SyncConfig {
         server: account.server.clone(),
         username: account.username.clone(),
-        password: secrets.password.clone(),
+        password: secrets.sync_password().to_string(),
         token: None,
         local_dir,
         e2ee: Some(kolimi_sync::E2eeOptions {
@@ -2298,6 +2658,7 @@ fn main() {
             get_sync_status,
             set_sync_paused,
             sign_in,
+            link_web_session,
             sign_out,
             remove_account,
             add_pair,
@@ -2515,6 +2876,12 @@ mod tests {
         assert!(!looks_offline(&[
             "alice@example: invalid password".to_string()
         ]));
+        assert!(looks_unauthorized(&[
+            "alice@example: server error: 401 for /api/sync/manifest".to_string()
+        ]));
+        assert!(!looks_unauthorized(&[
+            "alice@example: server error: 500 for /api/sync/manifest".to_string()
+        ]));
     }
 
     #[test]
@@ -2523,6 +2890,121 @@ mod tests {
         assert!(DESKTOP_INIT_JS.contains("kolimi-offline-banner"));
         assert!(DESKTOP_INIT_JS.contains("__kolimiDesktopSync"));
         assert!(!DESKTOP_INIT_JS.contains("Sync folders"));
+    }
+
+    #[test]
+    fn session_token_reads_the_login_cookie() {
+        use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
+
+        let mut headers = HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("kolimi_csrf=csrf-value; Path=/; HttpOnly"),
+        );
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("kolimi_session=deadbeef; Path=/; HttpOnly"),
+        );
+        assert_eq!(session_token(&headers).as_deref(), Some("deadbeef"));
+
+        let empty = HeaderMap::new();
+        assert_eq!(session_token(&empty), None);
+    }
+
+    fn login_server(
+        status: &'static str,
+        body: &'static str,
+        cookie: Option<&'static str>,
+    ) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let mut response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                body.len()
+            );
+            if let Some(cookie) = cookie {
+                response.push_str(&format!("Set-Cookie: {cookie}\r\n"));
+            }
+            response.push_str("\r\n");
+            response.push_str(body);
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    #[test]
+    fn session_login_supports_totp_and_returns_the_cookie_token() {
+        let server = login_server(
+            "200 OK",
+            r#"{"expires_at": 4102444800000}"#,
+            Some("kolimi_session=feedface; Path=/; HttpOnly"),
+        );
+        match tauri::async_runtime::block_on(session_login(&server, "alice", "pw", "123456"))
+            .unwrap()
+        {
+            SessionLogin::Success(token) => assert_eq!(token, "feedface"),
+            SessionLogin::TotpRequired => panic!("expected a session"),
+            SessionLogin::MfaSetupRequired => panic!("expected a session"),
+        }
+
+        let server = login_server(
+            "401 Unauthorized",
+            r#"{"error":"two-factor code required","totp_required":true}"#,
+            None,
+        );
+        assert!(matches!(
+            tauri::async_runtime::block_on(session_login(&server, "alice", "pw", "")).unwrap(),
+            SessionLogin::TotpRequired
+        ));
+    }
+
+    #[test]
+    fn app_password_creation_reads_the_one_time_token() {
+        let server = login_server(
+            "201 Created",
+            r#"{"id":7,"name":"Kolimi Desktop","token":"one-time-token"}"#,
+            None,
+        );
+        let token = tauri::async_runtime::block_on(create_app_password(
+            &server,
+            "session-token",
+            "Kolimi Desktop",
+        ))
+        .unwrap();
+        assert_eq!(token, "one-time-token");
+    }
+
+    #[test]
+    fn secrets_accept_an_app_password_without_a_password() {
+        let app_only = Secrets {
+            password: String::new(),
+            e2ee_passphrase: None,
+            app_password: Some("app-password".to_string()),
+        };
+        assert!(app_only.signed_in());
+        assert_eq!(app_only.sync_password(), "app-password");
+
+        let password_only = Secrets {
+            password: "account-password".to_string(),
+            e2ee_passphrase: None,
+            app_password: None,
+        };
+        assert!(password_only.signed_in());
+        assert_eq!(password_only.sync_password(), "account-password");
+
+        let signed_out = Secrets {
+            password: String::new(),
+            e2ee_passphrase: Some("pp".to_string()),
+            app_password: None,
+        };
+        assert!(!signed_out.signed_in());
     }
 
     #[test]

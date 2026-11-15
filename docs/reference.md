@@ -147,6 +147,7 @@ Notes:
 | `KOLIMI_SECURE_COOKIES` | Secure cookies + HSTS behind TLS |
 | `KOLIMI_USER_QUOTA_BYTES` | Default per-user quota (`0` = unlimited) |
 | `KOLIMI_METRICS_PER_USER=1` | Opt in to per-user usage gauges |
+| `KOLIMI_AUTH_RATE_LIMIT` | Login/passkey attempts per client per 5 minutes (default 20) |
 | `KOLIMI_TRUST_PROXY=1` | Use `X-Forwarded-For` from a trusted proxy |
 | `KOLIMI_OTEL_ENDPOINT` | OTLP/gRPC traces (requires the `otel` feature) |
 | `RUST_LOG` | Log filter (default `info`) |
@@ -186,6 +187,18 @@ Notes:
 - Accounts marked `must_change_password` may only call `GET /api/me`,
   `POST /api/reauth`, `POST /api/me/password`, and `DELETE /api/session`.
   Every other API, WebDAV, and sync request returns `403`.
+- Accounts marked `must_setup_mfa` (admin-created and invited users) may only
+  call the MFA setup surface (`GET /api/me`, `GET /api/totp`,
+  `POST /api/totp/begin|enable`, `GET /api/passkeys`,
+  `POST /api/passkeys/register/*`, `POST /api/reauth`,
+  `POST /api/me/password`, `DELETE /api/session`) until TOTP or a passkey is
+  enrolled.
+- App passwords: `GET|POST /api/me/app-passwords` lists or creates tokens
+  (the plaintext token is returned once), `DELETE /api/me/app-passwords/{id}`
+  revokes one, and `DELETE /api/me/app-passwords/current` lets a device revoke
+  the token it authenticated with. Creation/revocation accept a fresh
+  `X-Reauth-Token`, or a session created within the last five minutes.
+  HTTP Basic accepts an app password even when the account has TOTP.
 - Invite links use `/invite#token=…`; the fragment never reaches the server.
   `POST /api/invites/lookup` and `POST /api/invites/accept` take the token in
   JSON, and acceptance creates the account. Admin routes are
@@ -209,7 +222,7 @@ Notes:
 
 | Area | Endpoints |
 | --- | --- |
-| Session / account | `POST /api/session`, `DELETE /api/session`, `GET|PATCH /api/me`, `GET /api/me/usage`, `POST /api/me/password`, `GET|DELETE /api/me/sessions`, `PATCH|DELETE /api/me/sessions/{id}`, `GET /api/users`, `PATCH|DELETE /api/users/{name}`, `/api/users/{name}/usage`, `/api/users/{name}/recover`, `/api/users/{name}/logout`, `/api/users/{name}/sessions` |
+| Session / account | `POST /api/session`, `DELETE /api/session`, `GET|PATCH /api/me`, `GET /api/me/usage`, `POST /api/me/password`, `GET|DELETE /api/me/sessions`, `PATCH|DELETE /api/me/sessions/{id}`, `GET|POST /api/me/app-passwords`, `DELETE /api/me/app-passwords/{id}`, `DELETE /api/me/app-passwords/current`, `GET /api/users`, `PATCH|DELETE /api/users/{name}`, `/api/users/{name}/usage`, `/api/users/{name}/recover`, `/api/users/{name}/logout`, `/api/users/{name}/sessions` |
 | Invites | `GET|POST /api/invites`, `DELETE /api/invites/{id}`, `POST /api/invites/lookup`, `POST /api/invites/accept` |
 | Passkeys / TOTP | `/api/passkeys*`, `/api/passkeys/login/*`, `/api/totp*` |
 | Browse / files | `GET /api/browse`, `GET /api/files/info`, `POST /api/files/move`, `POST /api/files/encrypt`, `GET /api/search`, `GET /api/preview` |

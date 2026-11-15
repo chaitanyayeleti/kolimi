@@ -406,29 +406,42 @@ function renderAccount(account, status) {
   if (!account.signed_in) {
     const password = el("input", {
       type: "password",
-      placeholder: "Password",
+      placeholder: "Password or app password",
       autocomplete: "current-password",
+    });
+    const code = el("input", {
+      placeholder: "Two-factor / recovery code (if enabled)",
+      autocomplete: "one-time-code",
     });
     const form = el("form", {
       class: "inline-form",
       onsubmit: async (event) => {
         event.preventDefault();
         try {
-          await invoke("sign_in", {
+          const result = await invoke("sign_in", {
             server: account.server,
             username: account.username,
             password: password.value,
+            code: code.value,
           });
+          if (result && result.totp_required) {
+            setMsg("Enter the two-factor or recovery code for " + account.username, "err");
+            code.focus();
+            return;
+          }
           setMsg("Signed in to " + account.username, "ok");
           refresh();
         } catch (error) {
           setMsg(String(error), "err");
         }
       },
-    }, password, el("button", { class: "btn primary", type: "submit" }, "Sign in"));
+    }, password, code, el("button", { class: "btn primary", type: "submit" }, "Sign in"));
     card.append(el("div", { class: "signed-out" },
-      el("p", { class: "muted" }, "Sign in again to resume sync and manage encryption."),
-      form));
+      el("p", { class: "muted" }, "Sign in again to resume background sync and manage encryption. This is separate from the web app so sync works while the window is closed."),
+      form,
+      el("div", { class: "row-actions" },
+        btn("Use current web session", "ghost", (event) =>
+          linkWebSession(event.currentTarget)))));
   }
 
   const count = account.pairs.length;
@@ -783,15 +796,46 @@ function applyTheme(theme) {
   updateThemeButton();
 }
 
+async function linkWebSession(button) {
+  button.disabled = true;
+  setMsg("Linking the current web session…");
+  try {
+    const result = await invoke("link_web_session");
+    setMsg("Linked " + result.username + " on " + result.server, "ok");
+    $("add-account").open = false;
+    refresh();
+  } catch (error) {
+    setMsg(String(error), "err");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("link-web-session").addEventListener("click", (event) =>
+  linkWebSession(event.currentTarget),
+);
+
 $("signin-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const server = $("new-server").value;
   const username = $("new-username").value;
   const password = $("new-password").value;
+  const codeInput = $("new-code");
   setMsg("Signing in…");
   try {
-    await invoke("sign_in", { server, username, password });
+    const result = await invoke("sign_in", {
+      server,
+      username,
+      password,
+      code: codeInput.value,
+    });
+    if (result && result.totp_required) {
+      setMsg("Enter the two-factor or recovery code for " + username, "err");
+      codeInput.focus();
+      return;
+    }
     $("new-password").value = "";
+    codeInput.value = "";
     setMsg("Signed in to " + username, "ok");
     $("add-account").open = false;
     refresh();
@@ -799,7 +843,6 @@ $("signin-form").addEventListener("submit", async (event) => {
     setMsg(String(error), "err");
   }
 });
-
 $("autostart").addEventListener("change", async (event) => {
   try {
     await invoke("set_autostart_enabled", { enabled: event.target.checked });

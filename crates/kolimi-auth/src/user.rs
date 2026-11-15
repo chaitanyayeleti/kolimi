@@ -10,6 +10,9 @@ pub struct CurrentUser {
     /// Whether the account must change its password before using the rest
     /// of the API.
     pub must_change_password: bool,
+    /// Whether the account must enroll TOTP or a passkey before using the
+    /// rest of the API.
+    pub must_setup_mfa: bool,
     /// Hash of the session token, when the request was authenticated
     /// with a session (bearer token or cookie) rather than Basic auth.
     pub session_hash: Option<[u8; 32]>,

@@ -271,6 +271,7 @@ pub(crate) async fn start_session(
             "display_name": user.display_name,
             "email": user.email,
             "must_change_password": user.must_change_password,
+            "must_setup_mfa": user.must_setup_mfa,
             "expires_at": expires_at,
         }))
         .into_response(),
@@ -414,6 +415,7 @@ pub async fn me(
             "created_at": account.created_at,
             "password_login": !account.password_hash.is_empty(),
             "must_change_password": account.must_change_password,
+            "must_setup_mfa": account.must_setup_mfa,
         }))
         .into_response(),
         Ok(None) => unauthorized("invalid credentials"),
@@ -857,6 +859,9 @@ pub async fn create_user(
             {
                 return db_error(error);
             }
+            if let Err(error) = state.db.set_must_setup_mfa(created.id, true).await {
+                return db_error(error);
+            }
             audit(
                 &state,
                 Some(user.user_id),
@@ -868,6 +873,7 @@ pub async fn create_user(
                     "admin": req.admin,
                     "quota_bytes": req.quota_bytes,
                     "must_change_password": req.must_change_password,
+                    "must_setup_mfa": true,
                 }),
             )
             .await;
@@ -1144,6 +1150,7 @@ pub async fn recover_user(
         "password": generated.then_some(password),
         "sessions_dropped": report.sessions_dropped,
         "passkeys_removed": report.passkeys_removed,
+        "app_passwords_revoked": report.app_passwords_revoked,
         "totp_disabled": report.totp_disabled,
     }))
     .into_response();

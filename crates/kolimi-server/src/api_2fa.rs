@@ -217,6 +217,7 @@ pub async fn enable(
     {
         return api::internal_error();
     }
+    let _ = state.db.set_must_setup_mfa(user.user_id, false).await;
     audit(
         &state,
         Some(user.user_id),

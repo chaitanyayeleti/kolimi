@@ -669,7 +669,7 @@ pub(crate) fn SettingsPage(
                             let verify = RwSignal::new(false);
                             let k = key.clone();
                             view! {
-                                <li class="file">
+                                <li class="file simple">
                                     <span class="file-body">
                                         <span class="file-name">{name}</span>
                                         <Show when=move || verify.get()>
@@ -725,7 +725,7 @@ pub(crate) fn SettingsPage(
                             let name =
                                 device["name"].as_str().unwrap_or_default().to_string();
                             view! {
-                                <li class="file">
+                                <li class="file simple">
                                     <span class="file-body">
                                         <span class="file-name">{name}</span>
                                     </span>

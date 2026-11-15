@@ -1754,6 +1754,13 @@ async fn admin_users_list_sorts_filters_and_warns_on_quota() {
         );
         let (status, _, _) = send(&server.app, create).await;
         assert_eq!(status, StatusCode::CREATED);
+        let user = server.state.db.find_user(name).await.unwrap().unwrap();
+        server
+            .state
+            .db
+            .set_must_setup_mfa(user.id, false)
+            .await
+            .unwrap();
     }
 
     // Give both a small quota.

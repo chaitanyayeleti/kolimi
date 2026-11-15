@@ -66,6 +66,17 @@ pub async fn require_auth(
             .into_response());
     }
 
+    if user.must_setup_mfa && !forced_mfa_setup_allowed(&method, &path) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "two-factor or passkey setup required",
+                "must_setup_mfa": true,
+            })),
+        )
+            .into_response());
+    }
+
     // Cookie-authenticated state-changing requests must carry the
     // double-submit CSRF token on every surface (API, WebDAV, plugins), not
     // just `/api/*`. Covers WebDAV mutating methods too.
@@ -156,6 +167,23 @@ fn forced_password_change_allowed(method: &Method, path: &str) -> bool {
         || (method == Method::DELETE && path == "/api/session")
 }
 
+/// Endpoints a user with `must_setup_mfa` may still call: enough to enroll
+/// TOTP or a passkey, confirm presence, and sign out.
+fn forced_mfa_setup_allowed(method: &Method, path: &str) -> bool {
+    (method == Method::GET && matches!(path, "/api/me" | "/api/totp" | "/api/passkeys"))
+        || (method == Method::POST
+            && matches!(
+                path,
+                "/api/totp/begin"
+                    | "/api/totp/enable"
+                    | "/api/passkeys/register/begin"
+                    | "/api/passkeys/register/finish"
+                    | "/api/reauth"
+                    | "/api/me/password"
+            ))
+        || (method == Method::DELETE && path == "/api/session")
+}
+
 async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
@@ -184,6 +212,31 @@ async fn authenticate_basic(
     password: &str,
     ip: &str,
 ) -> Result<CurrentUser, Response> {
+    // App passwords are high-entropy device credentials. They are checked
+    // before the account password and intentionally bypass TOTP: the token
+    // already represents a second, revocable credential for one device.
+    let app_hash = token::hash_token(password);
+    if let Ok(Some(app)) = state.db.find_app_password(username, &app_hash).await {
+        let Ok(Some(user)) = state.db.get_user(app.user_id).await else {
+            return Err(unauthorized());
+        };
+        if user.disabled {
+            return Err(unauthorized());
+        }
+        let _ = state
+            .db
+            .touch_app_password(app.id, kolimi_db::now_millis())
+            .await;
+        return Ok(CurrentUser {
+            user_id: user.id,
+            username: user.username,
+            is_admin: user.is_admin,
+            must_change_password: user.must_change_password,
+            must_setup_mfa: user.must_setup_mfa,
+            session_hash: None,
+        });
+    }
+
     // Keying the lockout on (account, source) means a flood from one
     // client cannot lock the account out for everyone else.
     // Lowercase the account: SQLite matches usernames `COLLATE NOCASE`,
@@ -248,6 +301,7 @@ async fn authenticate_basic(
                     username: user.username,
                     is_admin: user.is_admin,
                     must_change_password: user.must_change_password,
+                    must_setup_mfa: user.must_setup_mfa,
                     session_hash: None,
                 }),
                 Err(_) => Err(unauthorized()),
@@ -281,6 +335,7 @@ async fn authenticate_token(state: &AppState, raw_token: &str) -> Result<Current
         username: user.username,
         is_admin: user.is_admin,
         must_change_password: user.must_change_password,
+        must_setup_mfa: user.must_setup_mfa,
         session_hash: Some(hash),
     })
 }

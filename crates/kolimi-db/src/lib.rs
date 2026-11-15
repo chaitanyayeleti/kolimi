@@ -13,6 +13,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
+mod app_passwords;
 mod audit;
 mod dav;
 mod devices;
@@ -22,6 +23,7 @@ mod mls;
 mod search_state;
 mod sharing;
 
+pub use app_passwords::AppPassword;
 pub use audit::{AuditEntry, AuditPageQuery, AuditVerify};
 pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
 pub use devices::{Device, Enrollment, MAX_DEVICE_KEY_BYTES};
@@ -97,6 +99,9 @@ pub struct User {
     /// Whether the next sign-in must change the password before using the
     /// rest of the API.
     pub must_change_password: bool,
+    /// Whether the account must enroll TOTP or a passkey before using the
+    /// rest of the API.
+    pub must_setup_mfa: bool,
     /// Per-user storage quota in bytes (`None` = server default, `0` = unlimited).
     pub quota_bytes: Option<i64>,
     /// Used storage bytes, maintained incrementally and reconciled by the janitor.
@@ -749,6 +754,19 @@ impl Db {
         required: bool,
     ) -> Result<(), DbError> {
         let result = sqlx::query("UPDATE users SET must_change_password = ? WHERE id = ?")
+            .bind(i64::from(required))
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("user {user_id}")));
+        }
+        Ok(())
+    }
+
+    /// Sets or clears the forced MFA-enrollment flag.
+    pub async fn set_must_setup_mfa(&self, user_id: i64, required: bool) -> Result<(), DbError> {
+        let result = sqlx::query("UPDATE users SET must_setup_mfa = ? WHERE id = ?")
             .bind(i64::from(required))
             .bind(user_id)
             .execute(&self.pool)

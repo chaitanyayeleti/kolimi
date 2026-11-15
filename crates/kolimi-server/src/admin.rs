@@ -21,6 +21,8 @@ pub struct Recovery {
     pub passkeys_removed: u64,
     /// Number of live sessions dropped.
     pub sessions_dropped: u64,
+    /// Number of app passwords revoked.
+    pub app_passwords_revoked: u64,
 }
 
 /// Restores access to `username`.
@@ -79,6 +81,7 @@ pub async fn recover_user_by(
     }
 
     let sessions_dropped = db.delete_user_sessions(user.id).await?;
+    let app_passwords_revoked = db.delete_user_app_passwords(user.id).await?;
 
     db.audit_append(
         actor_id,
@@ -89,6 +92,7 @@ pub async fn recover_user_by(
             "totp_disabled": !keep_totp,
             "passkeys_removed": passkeys_removed,
             "sessions_dropped": sessions_dropped,
+            "app_passwords_revoked": app_passwords_revoked,
         }),
     )
     .await?;
@@ -97,5 +101,6 @@ pub async fn recover_user_by(
         totp_disabled: !keep_totp,
         passkeys_removed,
         sessions_dropped,
+        app_passwords_revoked,
     })
 }

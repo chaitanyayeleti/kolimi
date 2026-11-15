@@ -4,6 +4,40 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **App passwords** for sync and WebDAV/CalDAV. `GET|POST
+  /api/me/app-passwords` creates, lists, and revokes long-lived per-device
+  tokens; only a BLAKE3 digest is stored, and the token is shown once. Basic
+  auth accepts an app password even when TOTP is enabled, so background sync
+  no longer depends on a web session. The desktop client creates one after
+  login, stores it in the OS keychain, and revokes it on sign-out. Settings →
+  Passkeys lists app passwords with creation/last-used times and revokes them.
+- **First-login MFA enrollment** for admin-created and invited users. New
+  accounts get `must_setup_mfa`, which blocks data/API/WebDAV/sync access
+  until the user enrolls TOTP or a passkey; `/api/me` exposes the flag and the
+  web UI shows a mandatory **Secure your account** page with both options.
+- Desktop Accounts & Sync can **link the current web session** instead of
+  asking for a password again. This is the passkey-only path: the native
+  client reads the signed-in webview session cookie locally, exchanges it for
+  an app password, and never stores the session cookie.
+
+### Fixed
+- Trash rows and Settings → Devices rows (including pending enrollments and
+  MLS devices) now use a two-column layout, so the file name/body fills the
+  row and the Restore/Delete/Revoke actions stay at the right edge instead of
+  being squeezed into the file-list columns.
+- Desktop Accounts & Sync now supports TOTP. The sign-in form has an optional
+  two-factor/recovery-code field; the client authenticates through
+  `/api/session` and then creates a long-lived app password for background
+  sync. Non-TOTP accounts keep the same flow, and the old misleading “invalid
+  username or password” error now distinguishes a missing second factor.
+  Users who have not finished mandatory MFA setup are told to complete it in
+  the web app first.
+- Admin recovery now revokes app passwords along with sessions, passkeys and
+  TOTP.
+
 ## [0.4.9] - 2026-11-15
 
 ### Changed

@@ -9,12 +9,14 @@ use serde_json::json;
 use crate::api;
 use crate::browser::Browser;
 use crate::components::{ErrorText, Icon};
+use crate::dialogs::MfaSetup;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum View {
     Loading,
     Login,
     PasswordChange,
+    MfaSetup,
     Invite,
     Browser,
 }
@@ -37,12 +39,14 @@ fn invite_token() -> Option<String> {
 fn view_for_me(body: &serde_json::Value) -> View {
     if body["must_change_password"].as_bool() == Some(true) {
         View::PasswordChange
+    } else if body["must_setup_mfa"].as_bool() == Some(true) {
+        View::MfaSetup
     } else {
         View::Browser
     }
 }
 
-async fn signed_in_view() -> View {
+pub(crate) async fn signed_in_view() -> View {
     match api::get("/api/me").await {
         Ok(response) if response.status == 200 => view_for_me(&response.body),
         _ => View::Login,
@@ -183,6 +187,7 @@ pub fn App() -> impl IntoView {
                 .into_any(),
             View::Login => view! { <Login view=view/> }.into_any(),
             View::PasswordChange => view! { <PasswordChange view=view/> }.into_any(),
+            View::MfaSetup => view! { <MfaSetup view=view/> }.into_any(),
             View::Invite => view! { <InvitePage/> }.into_any(),
             View::Browser => view! { <Browser view=view/> }.into_any(),
         }}
@@ -427,7 +432,7 @@ fn PasswordChange(view: RwSignal<View>) -> impl IntoView {
             }
             .await;
             match result {
-                Ok(()) => view.set(View::Browser),
+                Ok(()) => view.set(signed_in_view().await),
                 Err(message) => error.set(message),
             }
             busy.set(false);

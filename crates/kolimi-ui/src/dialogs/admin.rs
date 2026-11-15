@@ -576,6 +576,9 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
                 />
                 "Require password change at next sign-in"
             </label>
+            <p class="muted">
+                "New users must also set up an authenticator app or a passkey on their first sign-in."
+            </p>
             <ErrorText message=error/>
             <div class="row-actions">
                 <button class="primary" on:click=submit disabled=move || busy.get()>

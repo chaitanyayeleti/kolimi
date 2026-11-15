@@ -204,6 +204,7 @@ async fn listing_and_creation_are_admin_only() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["username"], "carol");
     assert_eq!(body["is_admin"], false);
+    assert_eq!(body["must_setup_mfa"], true);
 
     // A PATCH or DELETE without fresh re-authentication is refused even for
     // an administrator; the same routes are exercised with a token below.
@@ -517,6 +518,8 @@ async fn delete_removes_the_user_and_cascades() {
         Some(json!({ "username": "carol", "password": "pw123456" })),
     )
     .await;
+    let carol = state.db.find_user("carol").await.unwrap().unwrap();
+    state.db.set_must_setup_mfa(carol.id, false).await.unwrap();
     let (status, _) = admin_mutation(
         &app,
         "PATCH",

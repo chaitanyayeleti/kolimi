@@ -67,6 +67,15 @@ user with a temporary password and the **Require password change at next
 sign-in** option; the server blocks every other API/WebDAV/sync surface until
 that password is replaced.
 
+Users created by an administrator or through an invite are also required to
+enroll **either TOTP or a passkey on their first sign-in**. Until they do,
+`/api/me` reports `must_setup_mfa`, the web UI shows a **Secure your
+account** page, and every data/API/WebDAV/sync surface is blocked. The flag
+clears automatically when TOTP or a passkey is enrolled. Existing accounts
+are not retroactively forced; administrators can still require a second
+factor by resetting the account (which clears factors) or by using the
+Passkeys panel instructions.
+
 Passkeys are registered in the web UI (**Settings → Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is rejected
 (and audited). Adding or removing a passkey asks for the account password
@@ -74,6 +83,15 @@ passkey-only account signs in through WebAuthn; password login is rejected
 replacing the keyring use the same short-lived re-authentication proof.
 Removing the last passkey on a passwordless account is refused to prevent
 self-lockout.
+
+Device clients should use an **app password** rather than the account
+password. Create one in **Settings → Passkeys → App passwords**, name it for
+the device, and copy the token shown once. App passwords are long-lived,
+individually revocable, and work with WebDAV/CalDAV and `kolimi-sync` even
+when TOTP is enabled or the account is passkey-only. The server stores only a
+BLAKE3 digest; the last-used time is shown in Settings. Revoke a device's app
+password immediately if it is lost. Desktop Accounts & Sync creates one
+automatically after login and revokes it on sign-out.
 
 ## Account recovery
 
@@ -88,9 +106,9 @@ kolimi-server user recover alice             # prompts for a new password
 
 `user recover` sets a new password, drops all of the account's live
 sessions (so a lost or compromised credential cannot keep a session
-alive), **clears TOTP**, and **removes every registered passkey** so the
-new password alone works and a credential added by an attacker cannot
-survive. Options:
+alive), **revokes every app password**, **clears TOTP**, and **removes every
+registered passkey** so the new password alone works and a credential added
+by an attacker cannot survive. Options:
 
 - `--keep-totp` — keep two-factor enabled (the user must still have codes).
 - `--keep-passkeys` — keep registered passkeys (only when the devices are
@@ -557,15 +575,29 @@ member.
   implemented with XDG autostart on Linux; on Windows/macOS use the OS
   login-item settings until native integration lands.
 
-  The account password and E2EE passphrase are kept in the **system
-  keychain** (Secret Service via zbus on Linux; Credential Manager /
-  Keychain on Windows/macOS), keyed by `username@server`. If no keychain is
-  running they fall back to the Linux **kernel session keyring** (`keyctl`),
-  session-only and never written to disk. Only when neither is available
-  (headless with no keyutils) do they fall back to the `0600` config file,
-  and the app warns; treat that file like `.netrc`. `KOLIMI_DESKTOP_CONFIG`
-  overrides the path. The config file itself contains no secrets when a
-  keychain or session keyring is available.
+  The account password, E2EE passphrase, and the app password used for sync
+  are kept in the **system keychain** (Secret Service via zbus on Linux;
+  Credential Manager / Keychain on Windows/macOS), keyed by
+  `username@server`. If no keychain is running they fall back to the Linux
+  **kernel session keyring** (`keyctl`), session-only and never written to
+  disk. Only when neither is available (headless with no keyutils) do they
+  fall back to the `0600` config file, and the app warns; treat that file like
+  `.netrc`. `KOLIMI_DESKTOP_CONFIG` overrides the path. The config file itself
+  contains no secrets when a keychain or session keyring is available.
+
+  **Signing in for background sync is separate from signing in to the web
+  app.** The native client cannot read the remote webview's session cookie
+  automatically, and needs credentials that work while the window is closed.
+  If the account has TOTP enabled, enter the current code (or a recovery
+  code) in the desktop sign-in form. The client exchanges the login session
+  for a long-lived **app password**, stores it in the keychain, and uses it
+  for sync; the account password remains only for E2EE re-authentication.
+  Signing out or removing the account revokes that app password server-side.
+  For passkey-only accounts, sign in to the main Kolimi window and use
+  **Use current web session** in Accounts & Sync: the native client reads the
+  webview cookie locally and exchanges it for an app password. You can also
+  create an app password in **Settings → Passkeys** and paste it into the
+  desktop sign-in form.
 
 - **CLI** (`kolimi-sync`): one-shot sync; run it from a timer or watcher.
   `--remote /Docs` mirrors a local folder to a server subfolder; also

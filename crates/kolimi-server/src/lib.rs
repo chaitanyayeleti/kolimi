@@ -7,6 +7,7 @@ pub mod admin;
 pub mod api;
 pub mod api_2fa;
 pub mod api_admin;
+pub mod api_app_passwords;
 pub mod api_browse;
 pub mod api_e2ee;
 pub mod api_invites;
@@ -208,6 +209,18 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             "/api/me/sessions/{id}",
             delete(api::revoke_my_session).patch(api::set_my_session_label),
+        )
+        .route(
+            "/api/me/app-passwords",
+            get(api_app_passwords::list).post(api_app_passwords::create),
+        )
+        .route(
+            "/api/me/app-passwords/current",
+            delete(api_app_passwords::revoke_current),
+        )
+        .route(
+            "/api/me/app-passwords/{id}",
+            delete(api_app_passwords::revoke),
         )
         .route("/api/session", delete(api::logout))
         .route("/api/users", get(api::list_users).post(api::create_user))

@@ -567,11 +567,12 @@ button:disabled {
 .inline-form {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .inline-form input {
-  flex: 1;
+  flex: 1 1 10rem;
   min-width: 0;
 }
 
@@ -1058,6 +1059,21 @@ input:focus {
 
 .add-account-card .form-grid {
   padding: 16px;
+}
+
+.web-session {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px 0;
+}
+
+.web-session .muted {
+  flex: 1 1 18rem;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .settings-card {

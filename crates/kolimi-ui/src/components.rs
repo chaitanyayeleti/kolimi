@@ -416,7 +416,7 @@ pub fn MlsDevicesPanel(
                     let signature = device_signature_label(&device);
                     let groups = device_groups_label(&device);
                     view! {
-                        <li class="file mls-device">
+                        <li class="file simple mls-device">
                             <span class="file-body">
                                 <span class="file-name">
                                     {name}

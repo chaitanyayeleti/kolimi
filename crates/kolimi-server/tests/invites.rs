@@ -10,6 +10,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use kolimi_auth::password::hash_password;
+use kolimi_auth::totp::TotpSecret;
 use kolimi_server::{AppState, build_app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -460,19 +461,35 @@ async fn forced_password_change_blocks_the_api_until_replaced() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let cookie = cookie.split(';').next().unwrap().to_string();
 
     let (status, me) = request_cookie(&app, "GET", "/api/me", &cookie, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(me["must_change_password"], false);
-    let (status, _) = request(
+    assert_eq!(me["must_setup_mfa"], true);
+
+    // Data surfaces stay blocked until the user enrolls a second factor.
+    let (status, _) = request_cookie(&app, "GET", "/api/me/usage", &cookie, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, begin) =
+        request_cookie(&app, "POST", "/api/totp/begin", &cookie, Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{begin}");
+    let secret = TotpSecret::from_base32(begin["secret"].as_str().unwrap()).unwrap();
+    let code = secret.code_at((kolimi_db::now_millis() / 1000) as u64);
+    let (status, enabled) = request_cookie(
         &app,
-        "GET",
-        "/api/me/usage",
-        Some(&basic("bob", NEW_PASS)),
-        None,
+        "POST",
+        "/api/totp/enable",
+        &cookie,
+        Some(json!({ "secret": begin["secret"], "code": code })),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+
+    let (status, me) = request_cookie(&app, "GET", "/api/me", &cookie, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["must_setup_mfa"], false);
+    let (status, _) = request_cookie(&app, "GET", "/api/me/usage", &cookie, None).await;
     assert_eq!(status, StatusCode::OK);
 
     // The old temporary password no longer works.

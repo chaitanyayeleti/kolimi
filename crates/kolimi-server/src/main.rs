@@ -427,8 +427,9 @@ async fn user_command(command: UserCommand, data: PathBuf) -> Result<(), Box<dyn
             )
             .await?;
             println!(
-                "recovered {username}: password set, {} session(s) dropped, TOTP {}, {} passkey(s) removed",
+                "recovered {username}: password set, {} session(s) and {} app password(s) dropped, TOTP {}, {} passkey(s) removed",
                 report.sessions_dropped,
+                report.app_passwords_revoked,
                 if report.totp_disabled {
                     "disabled"
                 } else {

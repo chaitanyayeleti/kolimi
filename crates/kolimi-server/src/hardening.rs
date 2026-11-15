@@ -21,6 +21,17 @@ use crate::AppState;
 pub const AUTH_LIMIT: u32 = 20;
 /// Window for [`AUTH_LIMIT`].
 pub const AUTH_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// Operator override for [`AUTH_LIMIT`] (`KOLIMI_AUTH_RATE_LIMIT`). The
+/// browser/desktop fixture raises it so a long serial test run does not trip
+/// the production default.
+fn auth_limit() -> u32 {
+    std::env::var("KOLIMI_AUTH_RATE_LIMIT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(AUTH_LIMIT)
+}
 /// Public-link unlock attempts allowed per window, per client.
 pub const LINK_LIMIT: u32 = 30;
 /// Window for [`LINK_LIMIT`].
@@ -156,7 +167,7 @@ pub async fn limit(State(state): State<AppState>, req: Request, next: Next) -> R
     let is_recovery =
         method == Method::POST && path.starts_with("/api/users/") && path.ends_with("/recover");
     let (class, max, window) = if is_auth {
-        ("auth", AUTH_LIMIT, AUTH_WINDOW)
+        ("auth", auth_limit(), AUTH_WINDOW)
     } else if is_totp {
         ("totp", TOTP_LIMIT, TOTP_WINDOW)
     } else if is_invite {

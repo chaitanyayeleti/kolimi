@@ -399,6 +399,7 @@ mod tests {
             display_name: None,
             email: None,
             must_change_password: false,
+            must_setup_mfa: false,
             quota_bytes: quota,
             used_bytes: used,
             usage_updated_at: None,

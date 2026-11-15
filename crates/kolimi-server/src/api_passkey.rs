@@ -147,6 +147,7 @@ pub async fn register_finish(
         .await
     {
         Ok(row) => {
+            let _ = state.db.set_must_setup_mfa(user.user_id, false).await;
             audit(
                 &state,
                 Some(user.user_id),

@@ -81,13 +81,17 @@ advances. Revoking a share cannot erase data a recipient already downloaded.
 
 The desktop app loads the server's web UI in a native window and adds the
 tray menu, background sync, and OS keychain storage. Create a local folder
-pair from **Accounts & Sync**. The sidebar **Sync** item and the tray show
-idle, syncing, paused, error, locked, and conflict states; click either to
-open Accounts & Sync. The status card shows the last sync for each folder,
-and **Pause** / **Resume** controls there match the tray item. If the server
-is unreachable, the main window shows an offline banner with a Retry action,
-and the Accounts & Sync status card keeps the last error and last successful
-sync visible.
+pair from **Accounts & Sync**. This native sign-in is separate from the web
+app so sync can run with the window closed; if your account uses TOTP, enter
+the current code (or a recovery code) there, or use **Use current web
+session** after signing in to the main window. The client stores a revocable
+app password in the OS keychain rather than keeping your web session. The
+sidebar **Sync** item and the tray show idle, syncing, paused, error, locked,
+and conflict states; click either to open Accounts & Sync. The status card
+shows the last sync for each folder, and **Pause** / **Resume** controls
+there match the tray item. If the server is unreachable, the main window
+shows an offline banner with a Retry action, and the Accounts & Sync status
+card keeps the last error and last successful sync visible.
 
 The `kolimi-sync` CLI mirrors a local directory:
 

@@ -3,6 +3,7 @@
 mod account;
 mod admin;
 mod enrollment;
+mod mfa;
 mod passkeys;
 mod settings;
 mod share;
@@ -10,6 +11,7 @@ mod vault;
 mod versions;
 
 pub(crate) use admin::AdminPage;
+pub(crate) use mfa::MfaSetup;
 pub(crate) use settings::{SettingsPage, SettingsTab};
 pub(crate) use share::ShareDialog;
 pub(crate) use vault::VaultSetupDialog;

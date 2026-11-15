@@ -826,7 +826,7 @@ fn TrashRow(
     let original = item.original_path.clone().unwrap_or_default();
     let size = human_size(item.size);
     view! {
-        <li class="file">
+        <li class="file simple">
             <div class="file-open">
                 <span class="file-icon">
                     <Icon name="trash"/>
