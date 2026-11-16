@@ -75,6 +75,7 @@ the source of truth for what has and has not been reviewed.
 | [plans/android.md](plans/android.md) | Android/F-Droid client plan |
 | [plans/user-management.md](plans/user-management.md) | Completed admin/self-service account plan and security decisions |
 | [plans/ui.md](plans/ui.md) | Web UI improvement plan: asset performance, sharing surfaces, favorites/recents, notifications, PWA |
+| [plans/future.md](plans/future.md) | Unscheduled future core ideas and deferred work; not a commitment |
 | [plans/releases.md](plans/releases.md) | Release channels, tag pipeline, version-bump checklist |
 | [../CHANGELOG.md](../CHANGELOG.md) | What shipped in each release |
 

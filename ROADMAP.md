@@ -127,6 +127,9 @@ describe MLS as audited before this completes.
 
 ## Deferred / non-goals
 
+- **Future core ideas.** See [docs/plans/future.md](docs/plans/future.md)
+  for an unscheduled backlog of sharing, calendar, portability, reliability,
+  and security ideas. Nothing there is a commitment.
 - **Plugin host.** The old wasmtime/WIT host was removed in 0.1.26; do not
   resurrect it without a concrete hook design and a signature story.
 - **Postgres backend.** SQLite is the deployment story. The repository API
