@@ -99,10 +99,11 @@ describe MLS as audited before this completes.
 
 ### 3. Clients
 
-- **Android / F-Droid is parked** until desktop signing and mobile
-  resourcing are settled: [docs/plans/android.md](docs/plans/android.md) and
-  [docs/plans/clients.md](docs/plans/clients.md). The FFI core exists;
-  background scheduling and the Compose/SwiftUI shells remain.
+- **Android / F-Droid is planned but not started**: the refreshed plan is
+  [docs/plans/android.md](docs/plans/android.md). The FFI core already
+  exposes token auth, enrollment, E2EE options and `Locked`; the
+  Kotlin/Compose shell, NDK build, Keystore integration and F-Droid recipe
+  remain.
 - Desktop Windows/macOS signing/notarization and native autostart glue
   (bundles and OS keychain storage are in place).
 - **Browser passkey-PRF key wrap** (issue #16): the CLI already uses the OS
