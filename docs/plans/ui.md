@@ -1,6 +1,6 @@
 # Web UI — improvement plan
 
-Status: **phase 1–2 implemented; 0.5.2 release pending** · Date: 2026-11-16
+Status: **phase 1–2 released in 0.5.2** · Date: 2026-11-16
 Target: **0.5.2** (speed and polish), **0.6.0** (sharing and discovery)
 Builds on: [architecture.md](../architecture.md), [clients.md](../clients.md),
 [releases.md](releases.md)

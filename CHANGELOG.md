@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-16
+
 ### Added
 - The web UI now ships Brotli and gzip variants of its static assets, serves
   strong `ETag`s with `304 Not Modified`, and paints a static loading shell

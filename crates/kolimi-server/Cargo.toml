@@ -55,7 +55,7 @@ tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-kolimi-mls = { path = "../kolimi-mls", version = "0.5.1" }
+kolimi-mls = { path = "../kolimi-mls", version = "0.5.2" }
 base64.workspace = true
 http-body-util.workspace = true
 image.workspace = true

@@ -13,7 +13,7 @@ rust-version = "1.96"
 
 [dependencies]
 keyring = { version = "4", features = ["apple-native-keyring-store"] }
-kolimi-sync = { version = "0.5.1", path = "../../crates/kolimi-sync", features = ["keystore"] }
+kolimi-sync = { version = "0.5.2", path = "../../crates/kolimi-sync", features = ["keystore"] }
 libc = "0.2"
 notify-rust = "4"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "rustls-native-certs", "http2"] }
