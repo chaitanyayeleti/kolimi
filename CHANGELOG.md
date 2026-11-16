@@ -6,10 +6,36 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- The web UI now ships Brotli and gzip variants of its static assets, serves
+  strong `ETag`s with `304 Not Modified`, and paints a static loading shell
+  before the WASM bundle finishes. `app_bg.wasm` is about 5.2 MB raw and
+  1.1 MB over Brotli, instead of being sent uncompressed on every load.
+- Grid/list, sort direction, sort field, and file filter preferences persist
+  in `localStorage`.
+- The file list is keyboard-operable: `/` focuses search, arrow keys move
+  between rows, `Ctrl/Cmd+A` selects visible entries, `Delete` trashes the
+  selection, and `Escape` clears search or selection.
+- Mobile file lists hide selection checkboxes until **Select** is pressed;
+  the drawer has a visible close button and the bulk bar wraps.
+- Settings → Sharing and Settings → Devices now offer an **Unlock
+  encryption** action instead of a dead-end message.
+- A Playwright axe check covers the login, Files, Settings, and Admin pages.
+
 ### Changed
 - Documentation: added deployment-specific `KOLIMI_METRICS_TOKEN` setup for
   systemd, Docker Compose, Docker run, Helm, and direct binary runs, with
   verification steps and Prometheus scrape examples.
+- The theme button now cycles System → Light → Dark and shows the current
+  choice.
+
+### Fixed
+- Manual dark mode now sets `color-scheme`, so native checkboxes and other
+  controls match the theme.
+- An unlimited quota shows “Unlimited” instead of `0%`.
+- Light-theme muted text, status badges, and the login divider meet WCAG AA
+  contrast; the app shell has a main landmark and heading.
+- Settings and Admin tabs expose `aria-selected` as `"true"`/`"false"`.
 
 ## [0.5.1] - 2026-11-15
 

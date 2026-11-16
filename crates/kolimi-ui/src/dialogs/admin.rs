@@ -93,7 +93,7 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
         <div class="segmented settings-tabs" role="tablist">
             <button
                 role="tab"
-                aria-selected=move || tab.get() == AdminTab::Users
+                aria-selected=move || if tab.get() == AdminTab::Users { "true" } else { "false" }
                 class:active=move || tab.get() == AdminTab::Users
                 on:click=move |_| tab.set(AdminTab::Users)
             >
@@ -101,7 +101,7 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
             </button>
             <button
                 role="tab"
-                aria-selected=move || tab.get() == AdminTab::Invites
+                aria-selected=move || if tab.get() == AdminTab::Invites { "true" } else { "false" }
                 class:active=move || tab.get() == AdminTab::Invites
                 on:click=move |_| tab.set(AdminTab::Invites)
             >
@@ -109,7 +109,7 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
             </button>
             <button
                 role="tab"
-                aria-selected=move || tab.get() == AdminTab::Groups
+                aria-selected=move || if tab.get() == AdminTab::Groups { "true" } else { "false" }
                 class:active=move || tab.get() == AdminTab::Groups
                 on:click=move |_| tab.set(AdminTab::Groups)
             >
@@ -117,7 +117,7 @@ pub(crate) fn AdminPage(current_username: RwSignal<String>) -> impl IntoView {
             </button>
             <button
                 role="tab"
-                aria-selected=move || tab.get() == AdminTab::Audit
+                aria-selected=move || if tab.get() == AdminTab::Audit { "true" } else { "false" }
                 class:active=move || tab.get() == AdminTab::Audit
                 on:click=move |_| tab.set(AdminTab::Audit)
             >

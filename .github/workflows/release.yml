@@ -27,7 +27,7 @@ jobs:
             # 24.04). `ubuntu-latest` moves to 26.04 in late 2026, which
             # would silently raise that requirement again.
             runs-on: ubuntu-24.04
-            deps: cmake libssl-dev
+            deps: cmake libssl-dev brotli
             deb: true
             container: true
             arch: amd64
@@ -37,14 +37,14 @@ jobs:
             sync_features: --features kolimi-sync/keystore
           - target: x86_64-unknown-linux-musl
             runs-on: ubuntu-24.04
-            deps: cmake musl-tools
+            deps: cmake musl-tools brotli
             cc: musl-gcc
             deb: false
             container: false
             sync_features: ""
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-24.04-arm
-            deps: cmake libssl-dev
+            deps: cmake libssl-dev brotli
             deb: false
             container: true
             arch: arm64

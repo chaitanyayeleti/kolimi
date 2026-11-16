@@ -17,11 +17,11 @@ use self::sharing::SharingContext;
 use self::shell::{Sidebar, Topbar};
 use self::types::{
     Entry, FileFilter, FileSort, SearchHit, Tab, TrashItem, UploadItem, is_image_name,
-    is_text_name, parent_of, parse_entries, parse_results, parse_trash,
+    is_text_name, parent_of, parse_entries, parse_results, parse_trash, view_entries,
 };
 use self::uploads::UploadContext;
 use crate::api;
-use crate::app::{View as AppView, encode, encode_path, mark_session_expired, toggle_theme};
+use crate::app::{View as AppView, encode, encode_path, mark_session_expired};
 use crate::components::Icon;
 use crate::dialogs::{AdminPage, SettingsPage, SettingsTab};
 
@@ -79,6 +79,65 @@ fn set_route_hash(route: &str) {
     }
 }
 
+/// Reads a browser-local view preference. These are cosmetic and never
+/// contain file names or keys.
+fn view_pref(key: &str) -> Option<String> {
+    web_sys::window()?
+        .local_storage()
+        .ok()
+        .flatten()?
+        .get_item(key)
+        .ok()
+        .flatten()
+}
+
+fn set_view_pref(key: &str, value: &str) {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    {
+        let _ = storage.set_item(key, value);
+    }
+}
+
+/// Moves focus to the next or previous file row/tile. The browser keeps the
+/// focus ring and scrolls the target into view for us.
+fn focus_file_offset(document: &web_sys::Document, delta: i32) {
+    let Ok(list) = document.query_selector_all(".file-open, .tile-open") else {
+        return;
+    };
+    let mut nodes = Vec::new();
+    for index in 0..list.length() {
+        if let Some(node) = list.item(index) {
+            nodes.push(node);
+        }
+    }
+    if nodes.is_empty() {
+        return;
+    }
+    let active_row = document
+        .active_element()
+        .and_then(|element| element.closest(".file, .tile").ok().flatten());
+    let current = active_row.as_ref().and_then(|row| {
+        nodes.iter().position(|node| {
+            node.dyn_ref::<web_sys::Element>()
+                .and_then(|element| element.closest(".file, .tile").ok().flatten())
+                .as_ref()
+                .is_some_and(|parent| parent.is_same_node(Some(row)))
+        })
+    });
+    let next = match current {
+        Some(index) => (index as i32 + delta).clamp(0, nodes.len() as i32 - 1) as usize,
+        None if delta > 0 => 0,
+        None => nodes.len() - 1,
+    };
+    if let Some(element) = nodes
+        .get(next)
+        .and_then(|node| node.dyn_ref::<web_sys::HtmlElement>())
+    {
+        let _ = element.focus();
+    }
+}
+
 #[component]
 pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let initial_route = route_from_hash();
@@ -108,10 +167,30 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let is_admin = RwSignal::new(false);
     let username = RwSignal::new(String::new());
     let nav_open = RwSignal::new(false);
-    let grid = RwSignal::new(false);
-    let sort = RwSignal::new(FileSort::Name);
-    let sort_desc = RwSignal::new(false);
-    let filter = RwSignal::new(FileFilter::All);
+    let grid = RwSignal::new(view_pref("kolimi.view.grid").as_deref() == Some("grid"));
+    let sort = RwSignal::new(
+        view_pref("kolimi.view.sort")
+            .as_deref()
+            .map(FileSort::parse)
+            .unwrap_or(FileSort::Name),
+    );
+    let sort_desc = RwSignal::new(view_pref("kolimi.view.sort_desc").as_deref() == Some("1"));
+    let filter = RwSignal::new(
+        view_pref("kolimi.view.filter")
+            .as_deref()
+            .map(FileFilter::parse)
+            .unwrap_or(FileFilter::All),
+    );
+    let selecting = RwSignal::new(false);
+    Effect::new(move |_| {
+        set_view_pref("kolimi.view.grid", if grid.get() { "grid" } else { "list" });
+        set_view_pref("kolimi.view.sort", sort.get().key());
+        set_view_pref(
+            "kolimi.view.sort_desc",
+            if sort_desc.get() { "1" } else { "0" },
+        );
+        set_view_pref("kolimi.view.filter", filter.get().key());
+    });
     let details_for = RwSignal::new(Option::<Entry>::None);
     let dragging = RwSignal::new(false);
     let e2ee_master = RwSignal::new(Option::<MasterKey>::None);
@@ -156,6 +235,13 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let uploads = RwSignal::new(Vec::<UploadItem>::new());
     let upload_seq = RwSignal::new(0u32);
     let selected = RwSignal::new(std::collections::HashSet::<String>::new());
+    // Selection is a Files-tab concept; leaving it clears the bulk bar.
+    Effect::new(move |_| {
+        if tab.get() != Tab::Files {
+            selected.set(std::collections::HashSet::new());
+            selecting.set(false);
+        }
+    });
     // Administrators get the user-management panel.
     spawn_local(async move {
         if let Ok(r) = api::get("/api/me").await
@@ -276,6 +362,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         let master = e2ee_master.get();
         // Navigating leaves any multi-select behind.
         selected.set(std::collections::HashSet::new());
+        selecting.set(false);
         loading.set(true);
         let seq = load_seq.get_untracked().wrapping_add(1);
         load_seq.set(seq);
@@ -570,6 +657,100 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let bulk_move = move |_| file_actions.bulk_move.run(());
     let bulk_trash = move |_| file_actions.bulk_trash.run(());
 
+    let keyboard_trash = file_actions.bulk_trash;
+    let key_listener = window_event_listener(ev::keydown, move |event: web_sys::KeyboardEvent| {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        // Dialogs and drawers own their keyboard handling.
+        if document
+            .query_selector(".backdrop")
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return;
+        }
+        let key = event.key();
+        if key == "Escape" {
+            let search_input = document.get_element_by_id("topbar-search");
+            let search_focused = search_input.as_ref().is_some_and(|input| {
+                document
+                    .active_element()
+                    .is_some_and(|active| active.is_same_node(Some(input)))
+            });
+            if search_active.get_untracked() || search_focused {
+                event.prevent_default();
+                search_active.set(false);
+                results.set(Vec::new());
+                query.set(String::new());
+                if let Some(input) =
+                    search_input.map(|element| element.unchecked_into::<web_sys::HtmlElement>())
+                {
+                    let _ = input.blur();
+                }
+            } else if context_menu.get_untracked().is_some() {
+                event.prevent_default();
+                context_menu.set(None);
+            } else if !selected.get_untracked().is_empty() {
+                event.prevent_default();
+                selected.set(std::collections::HashSet::new());
+                selecting.set(false);
+            }
+            return;
+        }
+        let target = event
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+        if let Some(target) = &target {
+            let tag = target.tag_name();
+            if matches!(tag.as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+                || target
+                    .closest("[contenteditable=\"true\"]")
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
+                return;
+            }
+        }
+        if key == "/" {
+            event.prevent_default();
+            if let Some(input) = document
+                .get_element_by_id("topbar-search")
+                .map(|element| element.unchecked_into::<web_sys::HtmlElement>())
+            {
+                let _ = input.focus();
+            }
+            return;
+        }
+        if tab.get_untracked() != Tab::Files || search_active.get_untracked() {
+            return;
+        }
+        if (event.ctrl_key() || event.meta_key()) && key.eq_ignore_ascii_case("a") {
+            event.prevent_default();
+            let visible = view_entries(
+                &entries.get_untracked(),
+                filter.get_untracked(),
+                sort.get_untracked(),
+                sort_desc.get_untracked(),
+            );
+            selected.set(visible.into_iter().map(|entry| entry.path).collect());
+            selecting.set(true);
+            return;
+        }
+        if key == "Delete" && !selected.get_untracked().is_empty() {
+            event.prevent_default();
+            keyboard_trash.run(());
+            return;
+        }
+        if key == "ArrowDown" || key == "ArrowUp" {
+            event.prevent_default();
+            focus_file_offset(&document, if key == "ArrowDown" { 1 } else { -1 });
+        }
+    });
+    on_cleanup(move || key_listener.remove());
+
     let search_submit = move |ev: ev::SubmitEvent| {
         ev.prevent_default();
         let text = query.get_untracked();
@@ -577,6 +758,8 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
             search_active.set(false);
             return;
         }
+        selected.set(std::collections::HashSet::new());
+        selecting.set(false);
         spawn_local(async move {
             let url = format!("/api/search?q={}&limit=50", encode(&text));
             match api::get(&url).await {
@@ -631,7 +814,13 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         set_route_hash(&route_hash(Tab::Admin, "/"));
         nav_open.set(false);
     });
-    let nav_theme = Callback::new(move |_: ()| toggle_theme());
+    let toggle_select_mode = Callback::new(move |_: ()| {
+        let next = !selecting.get_untracked();
+        selecting.set(next);
+        if !next {
+            selected.set(std::collections::HashSet::new());
+        }
+    });
     let nav_sign_out = Callback::new(move |_: ()| sign_out(()));
     let top_menu = Callback::new(move |_: ()| nav_open.set(!nav_open.get_untracked()));
     let top_search = Callback::new(move |ev: ev::SubmitEvent| search_submit(ev));
@@ -643,6 +832,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         <div
             class="shell"
             class:nav-open=move || nav_open.get()
+            class:selecting=move || selecting.get()
             on:dragover=move |ev| {
                 ev.prevent_default();
                 dragging.set(true);
@@ -667,8 +857,8 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 on_trash=nav_trash
                 on_settings=nav_settings
                 on_admin=nav_admin
-                on_theme=nav_theme
                 on_sign_out=nav_sign_out
+                on_close=Callback::new(move |_| nav_open.set(false))
             />
 
             <div class="main">
@@ -680,6 +870,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                     shared_names=shared_names
                     query=query
                     grid=grid
+                    selecting=selecting
                     upload_label=upload_label
                     can_write=can_write
                     move_drag=move_drag
@@ -689,8 +880,10 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                     on_search_submit=top_search
                     on_upload=top_upload
                     on_mkdir=top_mkdir
+                    on_toggle_select=toggle_select_mode
                 />
                 <main class="content">
+                    <h1 class="sr-only">"Kolimi"</h1>
                     <Show when=move || !selected.get().is_empty()>
                         <div class="bulk-bar">
                             <span class="bulk-count">
@@ -700,7 +893,10 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                             <button on:click=bulk_move>"Move to…"</button>
                             <button class="danger" on:click=bulk_trash>"Trash"</button>
                             <button
-                                on:click=move |_| selected.set(std::collections::HashSet::new())
+                                on:click=move |_| {
+                                    selected.set(std::collections::HashSet::new());
+                                    selecting.set(false);
+                                }
                             >
                                 "Clear"
                             </button>
@@ -766,6 +962,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                             master=e2ee_master
                             tab=settings_tab
                             on_back=Callback::new(move |_| tab.set(Tab::Files))
+                            on_unlock=open_encryption
                         />
                     }
                         .into_any()

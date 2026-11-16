@@ -12,7 +12,7 @@ pub(super) enum Tab {
     Admin,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FileSort {
     Name,
     Modified,
@@ -20,13 +20,55 @@ pub(super) enum FileSort {
     Type,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+impl FileSort {
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            FileSort::Name => "name",
+            FileSort::Modified => "modified",
+            FileSort::Size => "size",
+            FileSort::Type => "type",
+        }
+    }
+
+    pub(super) fn parse(value: &str) -> Self {
+        match value {
+            "modified" => FileSort::Modified,
+            "size" => FileSort::Size,
+            "type" => FileSort::Type,
+            _ => FileSort::Name,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FileFilter {
     All,
     Folders,
     Files,
     Encrypted,
     Shared,
+}
+
+impl FileFilter {
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            FileFilter::All => "all",
+            FileFilter::Folders => "folders",
+            FileFilter::Files => "files",
+            FileFilter::Encrypted => "encrypted",
+            FileFilter::Shared => "shared",
+        }
+    }
+
+    pub(super) fn parse(value: &str) -> Self {
+        match value {
+            "folders" => FileFilter::Folders,
+            "files" => FileFilter::Files,
+            "encrypted" => FileFilter::Encrypted,
+            "shared" => FileFilter::Shared,
+            _ => FileFilter::All,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -321,6 +363,30 @@ mod wasm_tests {
         assert_eq!(parent_of("/a"), "/");
         assert_eq!(parent_of("/"), "/");
         assert_eq!(parent_of(""), "/");
+    }
+
+    #[wasm_bindgen_test]
+    fn view_preferences_round_trip() {
+        for sort in [
+            FileSort::Name,
+            FileSort::Modified,
+            FileSort::Size,
+            FileSort::Type,
+        ] {
+            assert_eq!(FileSort::parse(sort.key()), sort);
+        }
+        assert_eq!(FileSort::parse("unknown"), FileSort::Name);
+
+        for filter in [
+            FileFilter::All,
+            FileFilter::Folders,
+            FileFilter::Files,
+            FileFilter::Encrypted,
+            FileFilter::Shared,
+        ] {
+            assert_eq!(FileFilter::parse(filter.key()), filter);
+        }
+        assert_eq!(FileFilter::parse("unknown"), FileFilter::All);
     }
 
     #[wasm_bindgen_test]

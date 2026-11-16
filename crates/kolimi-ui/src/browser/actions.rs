@@ -296,6 +296,12 @@ pub(super) fn actions(ctx: FilesContext) -> FileActions {
             open_encryption.run(());
             return;
         }
+        if !api::confirm(&format!(
+            "Move {} to trash?",
+            plural(paths.len(), "selected item", "selected items")
+        )) {
+            return;
+        }
         let current = path.get_untracked();
         let count = paths.len();
         spawn_local(async move {

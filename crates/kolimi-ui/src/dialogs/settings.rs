@@ -26,6 +26,7 @@ pub(crate) fn SettingsPage(
     master: RwSignal<Option<MasterKey>>,
     tab: RwSignal<SettingsTab>,
     on_back: Callback<()>,
+    on_unlock: Callback<()>,
 ) -> impl IntoView {
     let passphrase = RwSignal::new(String::new());
     let error = RwSignal::new(String::new());
@@ -355,7 +356,7 @@ pub(crate) fn SettingsPage(
                     <button
                         class="nav-item"
                         role="tab"
-                        aria-selected=move || tab.get() == SettingsTab::Account
+                        aria-selected=move || if tab.get() == SettingsTab::Account { "true" } else { "false" }
                         class:active=move || tab.get() == SettingsTab::Account
                         on:click=move |_| tab.set(SettingsTab::Account)
                     >
@@ -365,7 +366,7 @@ pub(crate) fn SettingsPage(
                     <button
                         class="nav-item"
                         role="tab"
-                        aria-selected=move || tab.get() == SettingsTab::Encryption
+                        aria-selected=move || if tab.get() == SettingsTab::Encryption { "true" } else { "false" }
                         class:active=move || tab.get() == SettingsTab::Encryption
                         on:click=move |_| tab.set(SettingsTab::Encryption)
                     >
@@ -375,7 +376,7 @@ pub(crate) fn SettingsPage(
                     <button
                         class="nav-item"
                         role="tab"
-                        aria-selected=move || tab.get() == SettingsTab::Sharing
+                        aria-selected=move || if tab.get() == SettingsTab::Sharing { "true" } else { "false" }
                         class:active=move || tab.get() == SettingsTab::Sharing
                         on:click=move |_| tab.set(SettingsTab::Sharing)
                     >
@@ -385,7 +386,7 @@ pub(crate) fn SettingsPage(
                     <button
                         class="nav-item"
                         role="tab"
-                        aria-selected=move || tab.get() == SettingsTab::Devices
+                        aria-selected=move || if tab.get() == SettingsTab::Devices { "true" } else { "false" }
                         class:active=move || tab.get() == SettingsTab::Devices
                         on:click=move |_| tab.set(SettingsTab::Devices)
                     >
@@ -395,7 +396,7 @@ pub(crate) fn SettingsPage(
                     <button
                         class="nav-item"
                         role="tab"
-                        aria-selected=move || tab.get() == SettingsTab::Passkeys
+                        aria-selected=move || if tab.get() == SettingsTab::Passkeys { "true" } else { "false" }
                         class:active=move || tab.get() == SettingsTab::Passkeys
                         on:click=move |_| tab.set(SettingsTab::Passkeys)
                     >
@@ -638,6 +639,12 @@ pub(crate) fn SettingsPage(
                     </Show>
                     <Show when=move || master.get().is_none()>
                         <p class="muted">"Unlock encryption to manage MLS shares."</p>
+                        <div class="row-actions">
+                            <button class="primary" on:click=move |_| on_unlock.run(())>
+                                <Icon name="lock"/>
+                                "Unlock encryption"
+                            </button>
+                        </div>
                     </Show>
                 </div>
             </Show>
@@ -758,6 +765,12 @@ pub(crate) fn SettingsPage(
                         <p class="muted">
                             "Unlock encryption to manage approved devices and MLS leaves. You can still start an enrollment below."
                         </p>
+                        <div class="row-actions">
+                            <button class="primary" on:click=move |_| on_unlock.run(())>
+                                <Icon name="lock"/>
+                                "Unlock encryption"
+                            </button>
+                        </div>
                     </Show>
                     <EnrollmentPanel master=master notice=notice error=error/>
                 </div>

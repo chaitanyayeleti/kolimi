@@ -3041,6 +3041,7 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "futures-util",
+ "hex",
  "http-body-util",
  "image",
  "kolimi-auth",

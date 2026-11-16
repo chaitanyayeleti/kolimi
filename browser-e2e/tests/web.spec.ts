@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createHmac } from "node:crypto";
+import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
 const PASS = "browser-e2e-pass-123";
@@ -953,6 +954,103 @@ test("web migration upgrades a legacy folder share and reset clears state", asyn
   await expect(
     settings.getByText(/MLS state cleared|had no stored/),
   ).toBeVisible();
+});
+
+test("static assets are compressed and revalidate", async ({ request }) => {
+  const shell = await request.get(`${BASE}/app/`);
+  expect(shell.status()).toBe(200);
+  const html = await shell.text();
+  expect(html).toContain("Loading your workspace");
+  expect(html).toContain("boot-spinner");
+
+  const asset = await request.get(`${BASE}/app/app_bg.wasm`, {
+    headers: { "Accept-Encoding": "br" },
+  });
+  expect(asset.status()).toBe(200);
+  expect(asset.headers()["content-encoding"]).toBe("br");
+  expect(asset.headers()["vary"]).toContain("Accept-Encoding");
+  const etag = asset.headers()["etag"];
+  expect(etag).toBeTruthy();
+
+  const revalidated = await request.get(`${BASE}/app/app_bg.wasm`, {
+    headers: { "Accept-Encoding": "br", "If-None-Match": etag },
+  });
+  expect(revalidated.status()).toBe(304);
+});
+
+test("mobile selection hides checkboxes until Select", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+
+  const checkbox = page.locator("li.file .file-check").first();
+  await expect(checkbox).toBeHidden();
+
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await expect(checkbox).toBeVisible();
+  await checkbox.check();
+  await expect(page.locator(".bulk-bar")).toContainText("1 selected");
+
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(checkbox).toBeHidden();
+  await expect(page.locator(".bulk-bar")).toHaveCount(0);
+});
+
+test("unlimited quota and settings unlock action", async ({ page }) => {
+  await login(page);
+  await expect(page.locator(".storage")).toContainText("Unlimited");
+  await expect(page.locator(".storage")).toContainText("used");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.locator(".settings-page");
+  await settings.getByRole("tab", { name: "Sharing", exact: true }).click();
+  const unlock = settings.getByRole("button", {
+    name: "Unlock encryption",
+    exact: true,
+  });
+  await expect(unlock).toBeVisible();
+  await unlock.click();
+  await expect(
+    settings.getByRole("tab", { name: "Encryption", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
+});
+
+test("keyboard shortcuts focus search and select visible files", async ({
+  page,
+}) => {
+  await login(page);
+  await page.locator(".content").click({ position: { x: 700, y: 600 } });
+
+  await page.keyboard.press("/");
+  await expect(page.locator("#topbar-search")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#topbar-search")).not.toBeFocused();
+
+  await page.keyboard.press("Control+a");
+  await expect(page.locator(".bulk-bar")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".bulk-bar")).toHaveCount(0);
+});
+
+test("main pages have no axe violations", async ({ page }) => {
+  const audit = async () => {
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(results.violations.map((violation) => violation.id)).toEqual([]);
+  };
+
+  await page.goto(`${BASE}/app/`);
+  await expect(
+    page.getByText("Your files. Your server. Your keys.", { exact: true }),
+  ).toBeVisible();
+  await audit();
+
+  await login(page);
+  await audit();
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await audit();
+
+  await page.getByRole("button", { name: "Admin", exact: true }).click();
+  await audit();
 });
 
 test("metrics HTML dashboard renders for admins", async ({ page, request }) => {

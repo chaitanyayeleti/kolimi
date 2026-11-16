@@ -21,11 +21,19 @@ pub(crate) fn Sidebar(
     on_trash: Callback<()>,
     on_settings: Callback<()>,
     on_admin: Callback<()>,
-    on_theme: Callback<()>,
     on_sign_out: Callback<()>,
+    on_close: Callback<()>,
 ) -> impl IntoView {
+    let theme = RwSignal::new(crate::app::theme_mode());
     view! {
             <aside class="sidebar">
+                <button
+                    class="icon-btn side-close"
+                    aria-label="Close menu"
+                    on:click=move |_| on_close.run(())
+                >
+                    <Icon name="x"/>
+                </button>
                 <a class="side-brand" href="/app/">
                     <Logo/>
                     "Kolimi"
@@ -79,17 +87,22 @@ pub(crate) fn Sidebar(
                             let data = usage.get();
                             let used = data["used_bytes"].as_u64().unwrap_or(0);
                             let quota = data["effective_quota_bytes"].as_u64().unwrap_or(0);
-                            let pct = if quota == 0 {
-                                0.0
-                            } else {
-                                (used as f64 / quota as f64).clamp(0.0, 1.0)
-                            };
+                            if quota == 0 {
+                                return view! {
+                                    <div class="storage-ring unlimited">
+                                        <div class="storage-info">
+                                            <b>"Unlimited"</b>
+                                            <small class="muted">
+                                                {format!("{} used", human_size(used))}
+                                            </small>
+                                        </div>
+                                    </div>
+                                }
+                                    .into_any();
+                            }
+                            let pct = (used as f64 / quota as f64).clamp(0.0, 1.0);
                             let dash = format!("{:.2} {:.2}", pct * 100.0, 100.0 - pct * 100.0);
-                            let label = if quota == 0 {
-                                format!("{} used", human_size(used))
-                            } else {
-                                format!("{} of {}", human_size(used), human_size(quota))
-                            };
+                            let label = format!("{} of {}", human_size(used), human_size(quota));
                             view! {
                                 <div class="storage-ring">
                                     <svg viewBox="0 0 36 36" role="img" aria-label="Storage used">
@@ -108,6 +121,7 @@ pub(crate) fn Sidebar(
                                     </div>
                                 </div>
                             }
+                                .into_any()
                         }}
                     </div>
                     <div class="account">
@@ -134,9 +148,22 @@ pub(crate) fn Sidebar(
                             <small>"Account"</small>
                         </div>
                     </div>
-                    <button class="nav-item" on:click=move |_| on_theme.run(())>
+                    <button
+                        class="nav-item"
+                        title="Switch theme"
+                        on:click=move |_| {
+                            theme.set(crate::app::cycle_theme());
+                        }
+                    >
                         <Icon name="sun"/>
                         "Theme"
+                        <small class="theme-mode">
+                            {move || match theme.get() {
+                                "light" => "Light",
+                                "dark" => "Dark",
+                                _ => "System",
+                            }}
+                        </small>
                     </button>
                     <button class="nav-item" on:click=move |_| on_sign_out.run(())>
                         <Icon name="logout"/>
@@ -157,6 +184,7 @@ pub(crate) fn Topbar(
     shared_names: RwSignal<Vec<crate::e2ee::ShareDisplay>>,
     query: RwSignal<String>,
     grid: RwSignal<bool>,
+    selecting: RwSignal<bool>,
     upload_label: RwSignal<String>,
     can_write: Signal<bool>,
     move_drag: RwSignal<Option<Entry>>,
@@ -166,6 +194,7 @@ pub(crate) fn Topbar(
     on_search_submit: Callback<ev::SubmitEvent>,
     on_upload: Callback<ev::Event>,
     on_mkdir: Callback<()>,
+    on_toggle_select: Callback<()>,
 ) -> impl IntoView {
     let e2ee_master = master;
     view! {
@@ -281,6 +310,7 @@ pub(crate) fn Topbar(
                             <Icon name="search"/>
                             <input
                                 type="search"
+                                id="topbar-search"
                                 aria-label="Search files"
                                 placeholder="Search files…"
                                 prop:value=move || query.get()
@@ -308,6 +338,15 @@ pub(crate) fn Topbar(
                                 <span class="hide-sm">"New folder"</span>
                             </button>
                         </Show>
+                        <button
+                            class="select-toggle"
+                            class:active=move || selecting.get()
+                            aria-pressed=move || if selecting.get() { "true" } else { "false" }
+                            on:click=move |_| on_toggle_select.run(())
+                        >
+                            <Icon name="check"/>
+                            {move || if selecting.get() { "Done" } else { "Select" }}
+                        </button>
                         <div class="segmented" role="group" aria-label="View">
                             <button
                                 class="icon-btn"

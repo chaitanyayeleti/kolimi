@@ -5,7 +5,7 @@ use leptos::task::spawn_local;
 use serde_json::{Value, json};
 
 use crate::api;
-use crate::app::{Logo, View, signed_in_view, toggle_theme};
+use crate::app::{Logo, View, cycle_theme, signed_in_view};
 use crate::components::{ErrorText, Icon, Notice, sanitize_svg};
 
 fn sign_out() {
@@ -133,8 +133,10 @@ pub(crate) fn MfaSetup(view: RwSignal<View>) -> impl IntoView {
         <div class="login-wrap">
             <button
                 class="icon-btn login-theme"
-                aria-label="Toggle theme"
-                on:click=move |_| toggle_theme()
+                aria-label="Switch theme"
+                on:click=move |_| {
+                    cycle_theme();
+                }
             >
                 <Icon name="sun"/>
             </button>

@@ -215,6 +215,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen@0.2.129
+      - name: Install asset compression
+        run: sudo apt-get update && sudo apt-get install -y brotli
       - name: Unit tests (wasm)
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
@@ -265,6 +267,8 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: browser-e2e/package-lock.json
+      - name: Install asset compression
+        run: sudo apt-get update && sudo apt-get install -y brotli
       - run: chmod +x scripts/build-ui.sh && scripts/build-ui.sh
       - run: cargo build -p kolimi-server -p kolimi-sync
       - run: npm ci --prefix browser-e2e
@@ -355,6 +359,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen@0.2.129
+      - name: Install asset compression
+        run: sudo apt-get update && sudo apt-get install -y brotli
       - name: Stage the web UI (embedded into the server binary)
         run: chmod +x scripts/build-ui.sh && scripts/build-ui.sh
       - name: Build release binaries

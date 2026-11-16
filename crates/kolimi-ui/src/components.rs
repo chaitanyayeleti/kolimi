@@ -97,6 +97,7 @@ fn icon_svg(name: &str) -> String {
             r#"<path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4.5" cy="6" r="1.3"/><circle cx="4.5" cy="12" r="1.3"/><circle cx="4.5" cy="18" r="1.3"/>"#
         }
         "x" => r#"<path d="M6 6l12 12M18 6 6 18"/>"#,
+        "check" => r#"<path d="m5 12 4 4L19 6"/>"#,
         "cloud" => r#"<path d="M6 18a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.5A3.5 3.5 0 0 1 18 18z"/>"#,
         "lock" => {
             r#"<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#

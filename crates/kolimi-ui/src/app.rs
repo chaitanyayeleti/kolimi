@@ -109,33 +109,57 @@ pub(crate) fn Logo() -> impl IntoView {
     view! { <span class="logo" inner_html=logo_svg()></span> }
 }
 
-/// Flips the `.dark` / `.light` class on `<html>` and persists the choice.
-pub(crate) fn toggle_theme() {
+/// The current theme choice: `system`, `light`, or `dark`.
+pub(crate) fn theme_mode() -> &'static str {
+    let Some(storage) = web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    else {
+        return "system";
+    };
+    match storage.get_item("kolimi-theme").ok().flatten().as_deref() {
+        Some("light") => "light",
+        Some("dark") => "dark",
+        _ => "system",
+    }
+}
+
+/// Cycles System → Light → Dark and applies the choice immediately.
+pub(crate) fn cycle_theme() -> &'static str {
+    let next = match theme_mode() {
+        "system" => "light",
+        "light" => "dark",
+        _ => "system",
+    };
     let Some(root) = web_sys::window()
         .and_then(|window| window.document())
         .and_then(|document| document.document_element())
     else {
-        return;
+        return next;
     };
     let classes = root.class_list();
-    let prefers_dark = web_sys::window()
-        .and_then(|window| {
-            window
-                .match_media("(prefers-color-scheme: dark)")
-                .ok()
-                .flatten()
-        })
-        .map(|media| media.matches())
-        .unwrap_or(false);
-    let is_dark = classes.contains("dark") || (!classes.contains("light") && prefers_dark);
     let _ = classes.remove_1("dark");
     let _ = classes.remove_1("light");
-    let _ = classes.add_1(if is_dark { "light" } else { "dark" });
+    match next {
+        "light" => {
+            let _ = classes.add_1("light");
+        }
+        "dark" => {
+            let _ = classes.add_1("dark");
+        }
+        _ => {}
+    }
     if let Some(storage) =
         web_sys::window().and_then(|window| window.local_storage().ok().flatten())
     {
-        let _ = storage.set_item("kolimi-theme", if is_dark { "light" } else { "dark" });
+        match next {
+            "light" | "dark" => {
+                let _ = storage.set_item("kolimi-theme", next);
+            }
+            _ => {
+                let _ = storage.remove_item("kolimi-theme");
+            }
+        }
     }
+    next
 }
 
 /// Marks that the session expired, so the login screen can explain why.
@@ -280,11 +304,13 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
     };
 
     view! {
-        <div class="login-wrap login-split">
+        <main class="login-wrap login-split">
         <button
             class="icon-btn login-theme"
-            aria-label="Toggle theme"
-            on:click=move |_| toggle_theme()
+            aria-label="Switch theme"
+            on:click=move |_| {
+                cycle_theme();
+            }
         >
             <Icon name="sun"/>
         </button>
@@ -376,7 +402,7 @@ fn Login(view: RwSignal<View>) -> impl IntoView {
                 <p class="error">{move || error.get()}</p>
             </Show>
         </form>
-        </div>
+        </main>
     }
 }
 
