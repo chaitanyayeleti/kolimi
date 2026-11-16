@@ -840,6 +840,22 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
             on:dragleave=move |_| dragging.set(false)
             on:drop=drop_files
         >
+            <a
+                class="skip-link"
+                href="#content"
+                on:click=move |ev: ev::MouseEvent| {
+                    ev.prevent_default();
+                    if let Some(content) = web_sys::window()
+                        .and_then(|window| window.document())
+                        .and_then(|document| document.get_element_by_id("content"))
+                        .map(|element| element.unchecked_into::<web_sys::HtmlElement>())
+                    {
+                        let _ = content.focus();
+                    }
+                }
+            >
+                "Skip to files"
+            </a>
             <div class="nav-scrim" on:click=move |_| nav_open.set(false)></div>
             <div class="dropzone" class:active=move || dragging.get()>
                 <div class="dropzone-inner">
@@ -882,7 +898,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                     on_mkdir=top_mkdir
                     on_toggle_select=toggle_select_mode
                 />
-                <main class="content">
+                <main class="content" id="content" tabindex="-1">
                     <h1 class="sr-only">"Kolimi"</h1>
                     <Show when=move || !selected.get().is_empty()>
                         <div class="bulk-bar">

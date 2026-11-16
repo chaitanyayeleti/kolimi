@@ -34,7 +34,7 @@ follow [Semantic Versioning](https://semver.org/).
   controls match the theme.
 - An unlimited quota shows “Unlimited” instead of `0%`.
 - Light-theme muted text, status badges, and the login divider meet WCAG AA
-  contrast; the app shell has a main landmark and heading.
+  contrast; the app shell has a main landmark, heading, and skip link.
 - Settings and Admin tabs expose `aria-selected` as `"true"`/`"false"`.
 
 ## [0.5.1] - 2026-11-15
