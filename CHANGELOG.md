@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-11-20
+
 ### Changed
 - Adopted the **Ink & Coral** palette: warm paper light theme, deeper
   indigo primary actions, a coral active-nav dot, a visible logo edge, and
@@ -16,7 +18,8 @@ follow [Semantic Versioning](https://semver.org/).
 - The repository README now uses the keyhole K mark, and
   `assets/branding/social-preview.png` is ready for the GitHub social preview.
 - The desktop tray icon now uses the keyhole K, with amber syncing and red
-  error badges instead of the old cloud.
+  error badges instead of the old cloud. Desktop 0.4.12 ships the palette,
+  motion, and tray icon update.
 
 ## [0.5.3] - 2026-11-20
 
