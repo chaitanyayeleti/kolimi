@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <defs>
+    <radialGradient id="bg" cx="18%" cy="12%" r="90%">
+      <stop offset="0" stop-color="#1e1b4b"/>
+      <stop offset="0.6" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#080d18"/>
+    </radialGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect x="64" y="64" width="1152" height="512" rx="32" fill="none" stroke="#ffffff" stroke-opacity=".08"/>
+  <image href="logo.svg" x="112" y="190" width="260" height="260"/>
+  <text x="424" y="270" fill="#ffffff" font-family="Adwaita Sans, Liberation Sans, sans-serif" font-size="96" font-weight="700" letter-spacing="-4">Kolimi</text>
+  <text x="428" y="336" fill="#e0e7ff" font-family="Adwaita Sans, Liberation Sans, sans-serif" font-size="34" font-weight="500">Your files. Your server. Your keys.</text>
+  <text x="428" y="392" fill="#94a3b8" font-family="Adwaita Sans, Liberation Sans, sans-serif" font-size="24">Self-hosted files, calendars, and contacts.</text>
+  <circle cx="438" cy="446" r="7" fill="#fb7185"/>
+  <text x="458" y="453" fill="#a5b4fc" font-family="Adwaita Sans, Liberation Sans, sans-serif" font-size="20" font-weight="600" letter-spacing="1">ONE BINARY · SQLITE · WEBDAV · E2EE</text>
+</svg>

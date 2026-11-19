@@ -6,6 +6,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- The repository README now uses the keyhole K mark, and
+  `assets/branding/social-preview.png` is ready for the GitHub social preview.
+
 ## [0.5.3] - 2026-11-20
 
 ### Changed

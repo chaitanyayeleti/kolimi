@@ -1,13 +1,22 @@
-# Kolimi (కొలిమి)
+<p align="center">
+  <img src="assets/branding/logo-256.png" width="96" height="96" alt="Kolimi logo" />
+</p>
 
-**A small, self-hosted server for your files, calendars, and contacts.**
+<h1 align="center">Kolimi (కొలిమి)</h1>
+
+<p align="center"><strong>A small, self-hosted server for your files, calendars, and contacts.</strong></p>
 
 The name means *forge*: a workshop where you make and keep things. Kolimi is
 built in that spirit — software you run yourself, on a machine you control,
 with as few moving parts as possible.
 
-[Install](docs/install.md) · [How-to](docs/how-to.md) · [Documentation](docs/README.md) ·
-[Security & audit](docs/audit/README.md) · [Roadmap](ROADMAP.md)
+<p align="center">
+  <a href="docs/install.md">Install</a> ·
+  <a href="docs/how-to.md">How-to</a> ·
+  <a href="docs/README.md">Documentation</a> ·
+  <a href="docs/audit/README.md">Security &amp; audit</a> ·
+  <a href="ROADMAP.md">Roadmap</a>
+</p>
 
 ## The idea
 
