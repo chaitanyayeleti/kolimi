@@ -1,6 +1,6 @@
 # Kolimi Roadmap
 
-Current release: **0.5.2** (2026-11-16). This file is the forward-looking
+Current release: **0.5.3** (2026-11-20). This file is the forward-looking
 backlog and the honest list of limitations. Shipped history lives in
 [CHANGELOG.md](CHANGELOG.md); design details live in [docs/rfc/](docs/rfc/).
 
@@ -17,7 +17,7 @@ backlog and the honest list of limitations. Shipped history lives in
 5. **No speculative platform work.** A plugin host or extra backend is
    added only with a concrete use case.
 
-## Current state (0.5.2)
+## Current state (0.5.3)
 
 | Area | Status |
 | --- | --- |
@@ -35,6 +35,9 @@ ship-blocker for calling group E2EE production-grade.
 
 ## Recently completed
 
+- **0.5.3 — brand refresh**: replaced the generic cloud mark with the
+  keyhole K across the web UI, favicons, touch icon, desktop window, and
+  desktop bundles (desktop 0.4.11). See the [CHANGELOG](CHANGELOG.md).
 - **0.5.2 — speed and polish**: precompressed Brotli/gzip assets with
   ETag revalidation, a static loading shell, persisted view preferences,
   keyboard navigation, mobile selection mode, Settings unlock actions, and
@@ -68,7 +71,7 @@ ship-blocker for calling group E2EE production-grade.
 
 The review package is [`docs/audit/mls-delta.md`](docs/audit/mls-delta.md)
 and is intentionally frozen at the 0.4.3 surface even though the server is
-now 0.5.2. The 89 openmls `cargo-vet` exemptions (724 total) are temporary
+now 0.5.3. The 89 openmls `cargo-vet` exemptions (724 total) are temporary
 and are not audits. Engage an independent reviewer, land only fixes during
 the review, then replace the exemptions with real audit entries. Do not
 describe MLS as audited before this completes.
@@ -94,7 +97,7 @@ describe MLS as audited before this completes.
   pruning (7-day grace, 30-day report freshness); review the thresholds
   with the external auditor.
 - **Deployment validation**: upgrade from 0.4.7 (and older 0.3.x data) to
-  0.5.2 with real data, a restore drill in CI, and a post-upgrade `verify`
+  0.5.3 with real data, a restore drill in CI, and a post-upgrade `verify`
   run.
 
 ### 3. Clients
