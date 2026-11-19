@@ -3,18 +3,19 @@
    [data-theme] set by bootstrap.js (persisted in localStorage). */
 
 :root {
-  --bg: #f6f7f9;
-  --surface: #ffffff;
-  --surface-2: #f1f3f6;
-  --fg: #0f172a;
+  --bg: #f7f5f0;
+  --surface: #fffdfa;
+  --surface-2: #f1eee7;
+  --fg: #111827;
   --muted: #5f6b7d;
   --faint: #94a3b8;
-  --border: #e5e8ec;
-  --border-strong: #d3d8e0;
-  --accent: #4f46e5;
-  --accent-hover: #4338ca;
+  --border: #e6e1d8;
+  --border-strong: #d5cec2;
+  --accent: #4338ca;
+  --accent-hover: #3730a3;
   --accent-fg: #ffffff;
-  --accent-soft: #eef2ff;
+  --accent-soft: #ecebff;
+  --brand: #fb7185;
   --danger: #b91c1c;
   --danger-soft: #fef2f2;
   --ok: #15803d;
@@ -22,14 +23,14 @@
   --warn: #b45309;
   --warn-soft: #fffbeb;
   color-scheme: light;
-  --file-image: #0d9488;
-  --file-pdf: #dc2626;
-  --file-doc: #2563eb;
-  --file-sheet: #16a34a;
-  --file-slides: #ea580c;
+  --file-image: #0f766e;
+  --file-pdf: #b91c1c;
+  --file-doc: #1d4ed8;
+  --file-sheet: #15803d;
+  --file-slides: #c2410c;
   --file-archive: #a16207;
-  --file-audio: #7c3aed;
-  --file-video: #db2777;
+  --file-audio: #6d28d9;
+  --file-video: #be185d;
   --file-code: #475569;
   --file-text: #64748b;
   --space-1: 0.25rem;
@@ -51,10 +52,14 @@
   --radius-sm: 8px;
   --radius-lg: 16px;
   --radius-pill: 999px;
-  --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.06), 0 1px 3px rgb(16 24 40 / 0.08);
-  --shadow: 0 4px 12px rgb(16 24 40 / 0.08), 0 1px 3px rgb(16 24 40 / 0.06);
-  --shadow-lg: 0 18px 48px rgb(16 24 40 / 0.18);
-  --ring: 0 0 0 3px rgb(99 102 241 / 0.35);
+  --shadow-sm: 0 1px 2px rgb(42 35 20 / 0.06), 0 1px 3px rgb(42 35 20 / 0.08);
+  --shadow: 0 4px 12px rgb(42 35 20 / 0.08), 0 1px 3px rgb(42 35 20 / 0.06);
+  --shadow-lg: 0 18px 48px rgb(42 35 20 / 0.18);
+  --ring: 0 0 0 3px rgb(67 56 202 / 0.32);
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   --sidebar-w: 250px;
@@ -64,18 +69,19 @@
 @media (prefers-color-scheme: dark) {
   :root:not(.light) {
     color-scheme: dark;
-    --bg: #0b0d12;
-    --surface: #12151c;
-    --surface-2: #181c25;
-    --fg: #e6e9ef;
-    --muted: #98a2b3;
+    --bg: #080b12;
+    --surface: #10141d;
+    --surface-2: #161b26;
+    --fg: #e8eaf0;
+    --muted: #9aa4b2;
     --faint: #6b7484;
-    --border: #232833;
+    --border: #232a37;
     --border-strong: #313847;
-    --accent: #818cf8;
-    --accent-hover: #a5b4fc;
+    --accent: #a5b4fc;
+    --accent-hover: #c7d2fe;
     --accent-fg: #0b0d12;
     --accent-soft: #1b2130;
+    --brand: #fb7185;
     --danger: #f87171;
     --danger-soft: #2a1618;
     --ok: #4ade80;
@@ -95,24 +101,25 @@
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
     --shadow: 0 4px 14px rgb(0 0 0 / 0.45);
     --shadow-lg: 0 18px 48px rgb(0 0 0 / 0.6);
-    --ring: 0 0 0 3px rgb(129 140 248 / 0.4);
+    --ring: 0 0 0 3px rgb(165 180 252 / 0.4);
   }
 }
 
 :root.dark {
   color-scheme: dark;
-  --bg: #0b0d12;
-  --surface: #12151c;
-  --surface-2: #181c25;
-  --fg: #e6e9ef;
-  --muted: #98a2b3;
+  --bg: #080b12;
+  --surface: #10141d;
+  --surface-2: #161b26;
+  --fg: #e8eaf0;
+  --muted: #9aa4b2;
   --faint: #6b7484;
-  --border: #232833;
+  --border: #232a37;
   --border-strong: #313847;
-  --accent: #818cf8;
-  --accent-hover: #a5b4fc;
+  --accent: #a5b4fc;
+  --accent-hover: #c7d2fe;
   --accent-fg: #0b0d12;
   --accent-soft: #1b2130;
+  --brand: #fb7185;
   --danger: #f87171;
   --danger-soft: #2a1618;
   --ok: #4ade80;
@@ -132,7 +139,7 @@
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow: 0 4px 14px rgb(0 0 0 / 0.45);
   --shadow-lg: 0 18px 48px rgb(0 0 0 / 0.6);
-  --ring: 0 0 0 3px rgb(129 140 248 / 0.4);
+  --ring: 0 0 0 3px rgb(165 180 252 / 0.4);
 }
 
 * {
@@ -514,6 +521,7 @@ textarea:focus {
   height: 30px;
   border-radius: 9px;
   overflow: hidden;
+  box-shadow: 0 0 0 1px var(--border);
 }
 
 .nav {
@@ -543,6 +551,16 @@ textarea:focus {
   background: var(--accent-soft);
   color: var(--accent);
   border-color: transparent;
+}
+
+.nav-item.active::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--brand);
 }
 
 .nav-sep {
@@ -1510,7 +1528,7 @@ textarea:focus {
   height: 38px;
   overflow: hidden;
   border-radius: 11px;
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-sm), 0 0 0 1px var(--border);
 }
 
 .login-eyebrow {
@@ -2676,4 +2694,74 @@ textarea:focus {
   outline-offset: -2px;
   background: var(--accent-soft);
   border-radius: var(--radius-sm);
+}
+
+/* Restrained state-change motion. */
+.content > :not(.bulk-bar) {
+  animation: content-in var(--motion-base) var(--ease-out);
+}
+
+.bulk-bar {
+  animation: bulk-in var(--motion-base) var(--ease-out);
+}
+
+.upload-tray {
+  animation: tray-in var(--motion-base) var(--ease-out);
+}
+
+.ctx-menu {
+  transform-origin: top left;
+  animation: menu-in var(--motion-fast) var(--ease-out);
+}
+
+.nav-scrim {
+  animation: fade-in var(--motion-fast) ease;
+}
+
+@keyframes content-in {
+  from {
+    transform: translateY(4px);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@keyframes bulk-in {
+  from {
+    transform: translateY(-4px);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@keyframes tray-in {
+  from {
+    transform: translateY(6px);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@keyframes menu-in {
+  from {
+    transform: scale(0.98);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+/* Motion accessibility: honor the OS preference globally. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -7,6 +7,12 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- Adopted the **Ink & Coral** palette: warm paper light theme, deeper
+  indigo primary actions, a coral active-nav dot, a visible logo edge, and
+  slightly calmer file-type colors. The desktop Accounts & Sync window uses
+  the same tokens.
+- Added restrained content, bulk-bar, upload-tray, context-menu, and
+  drawer-scrim motion, with a global `prefers-reduced-motion` fallback.
 - The repository README now uses the keyhole K mark, and
   `assets/branding/social-preview.png` is ready for the GitHub social preview.
 - The desktop tray icon now uses the keyhole K, with amber syncing and red
