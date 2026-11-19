@@ -6,6 +6,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Replaced the generic cloud mark with the **keyhole K** logo across the
+  web UI, favicons, Apple touch icon, desktop window, and desktop bundles.
+
 ## [0.5.2] - 2026-11-16
 
 ### Added

@@ -172,16 +172,11 @@ button:disabled {
 }
 
 .brand-mark {
-  display: grid;
-  place-items: center;
   width: 32px;
   height: 32px;
   flex: none;
   border-radius: 9px;
-  background: linear-gradient(145deg, #5b8def, #6f7bf0 55%, #9b5cf6);
-  color: #fff;
-  font-weight: 800;
-  font-size: 15px;
+  display: block;
   box-shadow: var(--shadow-sm);
 }
 

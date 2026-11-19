@@ -84,22 +84,19 @@ pub(crate) fn plural(count: usize, singular: &str, plural: &str) -> String {
     format!("{count} {}", if count == 1 { singular } else { plural })
 }
 
-/// The Kolimi brand mark: a gradient tile with a cloud. Matches the app/tray
-/// icons (`assets/branding/logo.svg`).
+/// The Kolimi brand mark: a navy tile with a white K and a coral keyhole.
+/// Matches the app/tray icons (`assets/branding/logo.svg`).
 fn logo_svg() -> String {
-    r##"<svg viewBox="0 0 32 32" width="100%" height="100%" aria-hidden="true">
-<defs><linearGradient id="kolimi-bg" x1="0" y1="0" x2="1" y2="1">
-<stop offset="0" stop-color="#5b8def"/><stop offset="0.55" stop-color="#6f7bf0"/><stop offset="1" stop-color="#9b5cf6"/>
-</linearGradient>
-<linearGradient id="kolimi-cloud" x1="0" y1="0" x2="0" y2="1">
-<stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#eaf0ff"/>
-</linearGradient></defs>
-<rect x="0" y="0" width="32" height="32" rx="8.5" fill="url(#kolimi-bg)"/>
-<rect x="0.5" y="0.5" width="31" height="31" rx="8" fill="none" stroke="#ffffff" stroke-opacity="0.18"/>
-<g fill="url(#kolimi-cloud)">
-<circle cx="12.6" cy="18.4" r="3.7"/><circle cx="17.1" cy="15.5" r="5.1"/>
-<circle cx="21.6" cy="18.6" r="3.4"/><rect x="12.6" y="17.4" width="9.4" height="4.6" rx="2.3"/>
-</g></svg>"##
+    r##"<svg viewBox="0 0 512 512" width="100%" height="100%" aria-hidden="true">
+<rect width="512" height="512" rx="120" fill="#0f172a"/>
+<rect x="8" y="8" width="496" height="496" rx="112" fill="none" stroke="#fff" stroke-opacity=".10"/>
+<rect x="128" y="112" width="76" height="288" rx="38" fill="#fff"/>
+<path d="M204 256 360 120" stroke="#fff" stroke-width="76" stroke-linecap="round"/>
+<path d="M204 256 360 392" stroke="#fff" stroke-width="76" stroke-linecap="round"/>
+<circle cx="204" cy="256" r="38" fill="#fff"/>
+<circle cx="300" cy="242" r="30" fill="#fb7185"/>
+<path d="M300 260v50" stroke="#fb7185" stroke-width="20" stroke-linecap="round"/>
+</svg>"##
         .to_string()
 }
 

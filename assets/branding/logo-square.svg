@@ -1,0 +1,9 @@
+<svg role="img" aria-label="Kolimi" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#0f172a"/>
+  <rect x="128" y="112" width="76" height="288" rx="38" fill="#fff"/>
+  <path d="M204 256 360 120" stroke="#fff" stroke-width="76" stroke-linecap="round"/>
+  <path d="M204 256 360 392" stroke="#fff" stroke-width="76" stroke-linecap="round"/>
+  <circle cx="204" cy="256" r="38" fill="#fff"/>
+  <circle cx="300" cy="242" r="30" fill="#fb7185"/>
+  <path d="M300 260v50" stroke="#fb7185" stroke-width="20" stroke-linecap="round"/>
+</svg>
