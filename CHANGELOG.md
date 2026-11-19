@@ -9,6 +9,8 @@ follow [Semantic Versioning](https://semver.org/).
 ### Changed
 - The repository README now uses the keyhole K mark, and
   `assets/branding/social-preview.png` is ready for the GitHub social preview.
+- The desktop tray icon now uses the keyhole K, with amber syncing and red
+  error badges instead of the old cloud.
 
 ## [0.5.3] - 2026-11-20
 
