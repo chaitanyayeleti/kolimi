@@ -22,8 +22,14 @@ pub(crate) fn ShareDialog(
     let kind = RwSignal::new("user".to_string());
     let recipient = RwSignal::new(String::new());
     let permission = RwSignal::new("read".to_string());
+    let link_expiry = RwSignal::new("2592000".to_string());
+    let link_password = RwSignal::new(String::new());
+    let link_password_mode = RwSignal::new("generate".to_string());
+    let link_max_files = RwSignal::new(String::new());
+    let link_max_bytes = RwSignal::new(String::new());
     let error = RwSignal::new(String::new());
     let created = RwSignal::new(Option::<(String, Option<String>)>::None);
+    let created_upload_only = RwSignal::new(false);
 
     let load = {
         let path = path.clone();
@@ -66,8 +72,42 @@ pub(crate) fn ShareDialog(
                     return;
                 }
                 payload["recipient"] = json!(target);
+            } else {
+                let expiry = link_expiry
+                    .get_untracked()
+                    .parse::<i64>()
+                    .unwrap_or(2_592_000);
+                payload["expires_in_secs"] = json!(expiry);
+                match link_password_mode.get_untracked().as_str() {
+                    "none" => payload["password"] = json!(""),
+                    "custom" => {
+                        let password = link_password.get_untracked();
+                        if password.is_empty() {
+                            error.set("Enter a password, or choose Generate".to_string());
+                            return;
+                        }
+                        payload["password"] = json!(password);
+                    }
+                    // Omitted: the server generates and shows one once.
+                    _ => {}
+                }
+                if permission.get_untracked() == "write" {
+                    if encrypted {
+                        error.set(
+                            "File requests cannot target an encrypted folder: uploads would arrive as plaintext."
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    if let Ok(files) = link_max_files.get_untracked().trim().parse::<i64>() {
+                        payload["max_files"] = json!(files);
+                    }
+                    if let Ok(bytes) = link_max_bytes.get_untracked().trim().parse::<i64>() {
+                        payload["max_bytes"] = json!(bytes.saturating_mul(1024 * 1024));
+                    }
+                }
             }
-            if encrypted && master.is_none() {
+            if encrypted && master.is_none() && permission.get_untracked() == "read" {
                 error.set(
                     "Unlock encryption first — without the key a share or link cannot be opened."
                         .to_string(),
@@ -119,6 +159,7 @@ pub(crate) fn ShareDialog(
                             }
                             created
                                 .set(Some((url, r.body["password"].as_str().map(str::to_string))));
+                            created_upload_only.set(r.body["upload_only"].as_bool() == Some(true));
                         } else if encrypted {
                             // User/group shares of encrypted content need a
                             // key path. Folders use an MLS group + keyring;
@@ -321,7 +362,13 @@ pub(crate) fn ShareDialog(
                         "Type"
                         <select
                             prop:value=move || kind.get()
-                            on:change=move |ev| kind.set(event_target_value(&ev))
+                            on:change=move |ev| {
+                                let next = event_target_value(&ev);
+                                if next == "link" {
+                                    permission.set("read".to_string());
+                                }
+                                kind.set(next);
+                            }
                         >
                             <option value="user">"User"</option>
                             <option value="group">"Group"</option>
@@ -359,9 +406,101 @@ pub(crate) fn ShareDialog(
                             </select>
                         </label>
                     </Show>
+                    <Show when=move || kind.get() == "link">
+                        <label>
+                            "Link type"
+                            <select
+                                prop:value=move || permission.get()
+                                on:change=move |ev| {
+                                    let next = event_target_value(&ev);
+                                    if next == "write" {
+                                        link_expiry.set("604800".to_string());
+                                    }
+                                    permission.set(next);
+                                }
+                            >
+                                <option value="read">"View & download"</option>
+                                {(!encrypted)
+                                    .then(|| {
+                                        view! {
+                                            <option value="write">"Request files (upload only)"</option>
+                                        }
+                                    })}
+                            </select>
+                        </label>
+                        <label>
+                            "Expiry"
+                            <select
+                                prop:value=move || link_expiry.get()
+                                on:change=move |ev| link_expiry.set(event_target_value(&ev))
+                            >
+                                <option value="0">"Never"</option>
+                                <option value="86400">"1 day"</option>
+                                <option value="604800">"7 days"</option>
+                                <option value="2592000">"30 days"</option>
+                            </select>
+                        </label>
+                        <label>
+                            "Password"
+                            <select
+                                prop:value=move || link_password_mode.get()
+                                on:change=move |ev| {
+                                    link_password_mode.set(event_target_value(&ev))
+                                }
+                            >
+                                <option value="generate">"Generate one"</option>
+                                <option value="none">"No password"</option>
+                                <option value="custom">"Set a password"</option>
+                            </select>
+                        </label>
+                        <Show when=move || link_password_mode.get() == "custom">
+                            <label>
+                                "Link password"
+                                <input
+                                    type="text"
+                                    autocomplete="new-password"
+                                    prop:value=move || link_password.get()
+                                    on:input=move |ev| link_password.set(event_target_value(&ev))
+                                />
+                            </label>
+                        </Show>
+                        <Show when=move || permission.get() == "write">
+                            <label>
+                                "Max files"
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="10000"
+                                    placeholder="20"
+                                    prop:value=move || link_max_files.get()
+                                    on:input=move |ev| link_max_files.set(event_target_value(&ev))
+                                />
+                            </label>
+                            <label>
+                                "Max total (MiB)"
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="65536"
+                                    placeholder="1024"
+                                    prop:value=move || link_max_bytes.get()
+                                    on:input=move |ev| link_max_bytes.set(event_target_value(&ev))
+                                />
+                            </label>
+                            <p class="muted form-note">
+                                "Recipients can only upload. They cannot list, download, or overwrite files, and the link stops at these limits."
+                            </p>
+                        </Show>
+                    </Show>
                     <button class="primary" on:click=create>
                         <Icon name="share"/>
-                        "Create share"
+                        {move || {
+                            if kind.get() == "link" && permission.get() == "write" {
+                                "Create file request"
+                            } else {
+                                "Create share"
+                            }
+                        }}
                     </button>
                 </div>
 
@@ -373,7 +512,13 @@ pub(crate) fn ShareDialog(
                             let qr = crate::e2ee::qr_svg(&full);
                             view! {
                                 <div class="created">
-                                    <p>"Link created:"</p>
+                                    <p>
+                                        {if created_upload_only.get() {
+                                            "File request created:"
+                                        } else {
+                                            "Link created:"
+                                        }}
+                                    </p>
                                     <code>{full.clone()}</code>
                                     <div class="qr" inner_html=sanitize_svg(&qr)></div>
                                     {password

@@ -15,6 +15,7 @@ pub mod api_mls;
 pub mod api_passkey;
 pub mod api_shares;
 pub mod api_sync;
+pub mod app_scope;
 pub mod auth;
 pub mod hardening;
 pub mod janitor;
@@ -228,7 +229,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route(
             "/api/me/app-passwords/{id}",
-            delete(api_app_passwords::revoke),
+            delete(api_app_passwords::revoke).patch(api_app_passwords::update),
         )
         .route("/api/session", delete(api::logout))
         .route("/api/users", get(api::list_users).post(api::create_user))
@@ -421,6 +422,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/public/{token}", get(api_shares::public_meta))
         .route("/public/{token}/unlock", post(api_shares::public_unlock))
+        .route("/public/{token}/upload", put(api_shares::public_upload))
         .route("/public/{token}/list", get(api_shares::public_list_root))
         .route("/public/{token}/list/{*path}", get(api_shares::public_list))
         .route(

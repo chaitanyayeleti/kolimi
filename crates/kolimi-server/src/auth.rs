@@ -13,7 +13,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use kolimi_auth::{CurrentUser, cache::credential_cache_key, password, token};
 use subtle::ConstantTimeEq;
 
-use crate::{AppState, CSRF_COOKIE, SESSION_COOKIE, hardening};
+use crate::{
+    AppState, CSRF_COOKIE, SESSION_COOKIE, app_scope::AppPasswordAuth, app_scope::authorize_scope,
+    hardening,
+};
 
 /// Authentication middleware: resolves the caller from Basic credentials,
 /// a bearer token, or a session cookie, and attaches the [`CurrentUser`].
@@ -52,7 +55,7 @@ pub async fn require_auth(
         state.trust_proxy,
     );
 
-    let (user, via_cookie) = match authenticate(&state, &headers, &ip, &path).await {
+    let (user, via_cookie, app_password) = match authenticate(&state, &headers, &ip, &path).await {
         Ok(authenticated) => authenticated,
         Err(mut response) => {
             // Only WebDAV surfaces may ask the client for HTTP Basic
@@ -93,6 +96,23 @@ pub async fn require_auth(
             .into_response());
     }
 
+    // App passwords are least-privilege. The check runs after authentication
+    // and the forced-setup gates, before any handler or CSRF work. A failed
+    // scope check never falls back to the session cookie: the credential that
+    // authenticated this request is the one that must be authorized.
+    if let Some(app) = &app_password
+        && !authorize_scope(&method, &path, &app.scopes)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "this app password does not have the required scope",
+                "insufficient_scope": true,
+            })),
+        )
+            .into_response());
+    }
+
     // Cookie-authenticated state-changing requests must carry the
     // double-submit CSRF token on every surface (API, WebDAV, plugins), not
     // just `/api/*`. Covers WebDAV mutating methods too.
@@ -116,6 +136,9 @@ pub async fn require_auth(
     }
 
     req.extensions_mut().insert(user);
+    if let Some(app) = app_password {
+        req.extensions_mut().insert(app);
+    }
     Ok(next.run(req).await)
 }
 
@@ -229,19 +252,18 @@ async fn authenticate(
     headers: &HeaderMap,
     ip: &str,
     path: &str,
-) -> Result<(CurrentUser, bool), Response> {
+) -> Result<(CurrentUser, bool, Option<AppPasswordAuth>), Response> {
     match extract_credentials(headers, path) {
         Some(Credentials::Basic { username, password }) => {
-            authenticate_basic(state, &username, &password, ip)
-                .await
-                .map(|user| (user, false))
+            let (user, app) = authenticate_basic(state, &username, &password, ip).await?;
+            Ok((user, false, app))
         }
         Some(Credentials::Bearer(raw)) => authenticate_token(state, &raw)
             .await
-            .map(|user| (user, false)),
+            .map(|user| (user, false, None)),
         Some(Credentials::Cookie(raw)) => authenticate_token(state, &raw)
             .await
-            .map(|user| (user, true)),
+            .map(|user| (user, true, None)),
         None => Err(unauthorized()),
     }
 }
@@ -251,30 +273,44 @@ async fn authenticate_basic(
     username: &str,
     password: &str,
     ip: &str,
-) -> Result<CurrentUser, Response> {
+) -> Result<(CurrentUser, Option<AppPasswordAuth>), Response> {
     // App passwords are high-entropy device credentials. They are checked
     // before the account password and intentionally bypass TOTP: the token
     // already represents a second, revocable credential for one device.
     let app_hash = token::hash_token(password);
     if let Ok(Some(app)) = state.db.find_app_password(username, &app_hash).await {
+        if app
+            .expires_at
+            .is_some_and(|at| at <= kolimi_db::now_millis())
+        {
+            return Err(unauthorized());
+        }
         let Ok(Some(user)) = state.db.get_user(app.user_id).await else {
             return Err(unauthorized());
         };
         if user.disabled {
             return Err(unauthorized());
         }
+        // A malformed scope row fails closed rather than becoming full
+        // access. Existing rows were migrated to `*`.
+        let Ok(scopes) = crate::app_scope::ScopeSet::parse(&app.scopes) else {
+            return Err(unauthorized());
+        };
         let _ = state
             .db
             .touch_app_password(app.id, kolimi_db::now_millis())
             .await;
-        return Ok(CurrentUser {
-            user_id: user.id,
-            username: user.username,
-            is_admin: user.is_admin,
-            must_change_password: user.must_change_password,
-            must_setup_mfa: user.must_setup_mfa,
-            session_hash: None,
-        });
+        return Ok((
+            CurrentUser {
+                user_id: user.id,
+                username: user.username,
+                is_admin: user.is_admin,
+                must_change_password: user.must_change_password,
+                must_setup_mfa: user.must_setup_mfa,
+                session_hash: None,
+            },
+            Some(AppPasswordAuth { id: app.id, scopes }),
+        ));
     }
 
     // Keying the lockout on (account, source) means a flood from one
@@ -336,14 +372,17 @@ async fn authenticate_basic(
             // A DB error fails closed: never downgrade to password-only.
             match state.db.totp_secret(user.id).await {
                 Ok(Some(_)) => Err(unauthorized()),
-                Ok(None) => Ok(CurrentUser {
-                    user_id: user.id,
-                    username: user.username,
-                    is_admin: user.is_admin,
-                    must_change_password: user.must_change_password,
-                    must_setup_mfa: user.must_setup_mfa,
-                    session_hash: None,
-                }),
+                Ok(None) => Ok((
+                    CurrentUser {
+                        user_id: user.id,
+                        username: user.username,
+                        is_admin: user.is_admin,
+                        must_change_password: user.must_change_password,
+                        must_setup_mfa: user.must_setup_mfa,
+                        session_hash: None,
+                    },
+                    None,
+                )),
                 Err(_) => Err(unauthorized()),
             }
         }

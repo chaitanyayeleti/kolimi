@@ -2,7 +2,7 @@
 
 Status: implemented (0.5.0: DAV refuses encrypted content and enforces
 encrypted-folder ancestry; the folder's encrypted flag is the marker) ·
-Last verified: 0.5.4 · Depends on: RFC 0007 (E2EE), RFC 0001 (storage
+Last verified: 0.6.0 · Depends on: RFC 0007 (E2EE), RFC 0001 (storage
 engine), RFC 0003 (sharing and permissions), RFC 0009 (E2EE onboarding)
 
 > **Implementation note (0.5.0):** DAV refuses `GET`/`HEAD`/`PUT`/`COPY`/

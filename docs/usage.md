@@ -52,9 +52,12 @@ Open **Settings** in the sidebar.
 - **Devices** — review MLS devices and revoke one that is lost or untrusted.
 - **Passkeys** — register or remove passkeys and enable TOTP/recovery codes.
 - **App passwords** — also under *Settings → Passkeys*: long-lived,
-  per-device credentials for WebDAV, CalDAV/CardDAV, and sync clients. The
-  token is shown once; revoke it here when a device is lost. App passwords
-  work even when TOTP is enabled or the account is passkey-only.
+  per-device credentials for WebDAV, CalDAV/CardDAV, and sync clients. Choose
+  a preset (Sync client, Files read-only, Files read/write, Calendars &
+  contacts, or Full access) and an optional expiry. The token is shown once;
+  revoke it here when a device is lost. App passwords work even when TOTP is
+  enabled or the account is passkey-only. Full access can manage the account,
+  so prefer the narrowest preset that works.
 
 Email is informational only. Kolimi does not send mail or use it to sign in.
 Account recovery through an administrator is separate from losing the
@@ -75,6 +78,12 @@ encryption passphrase; see [operations.md](operations.md#account-recovery).
 - Deleted items go to **Trash** and can be restored or purged.
 - **Shared with me** appears as a mount in the sidebar. Read-only shares
   cannot be changed; write shares can be edited in place.
+- **Shared** in the sidebar is the management view: *Received* lists shares
+  from other people, *Shared by me* lists user/group shares, and *Links*
+  lists public links. Copy a link, change user/group access, adjust link
+  expiry or password, or revoke from there. Encrypted file links rebuild
+  their `#k=…` key fragment in the browser; unlock encryption first, or the
+  page offers the unlock action instead of copying a broken URL.
 - The sidebar storage ring shows used space against your quota (when one is
   set).
 
@@ -92,13 +101,21 @@ Use **Share** on a file or folder:
 
 - **User** — share with one account.
 - **Group** — share with every member of a group.
-- **Public link** — create a read-only URL. UI-created links expire after
-  30 days and include a generated password shown once; the API can set a
-  custom `password` (`""` = none) or `expires_in_secs` (`0` = never).
+- **Public link** — create a read-only URL. Choose an expiry (Never, 1, 7,
+  or 30 days) and whether Kolimi generates a password, you set one, or the
+  link is open.
+- **Request files** — an upload-only link to a plaintext folder. Recipients
+  can upload but cannot list, download, or overwrite anything. Set a file
+  count and total size limit, an expiry, and an optional password. The files
+  appear in the folder normally.
 
-User and group permissions are **read** or **write**; public links are always
-read-only. Write shares work for encrypted folders and single files; the web
-UI can download single-file shares but has no inline editor for them.
+User and group permissions are **read** or **write**. File-request links
+always use write permission internally and cannot be switched to read; to
+change the mode, revoke the link and create a new one. Encrypted folders
+cannot receive file requests because public uploads arrive as plaintext.
+Write shares of encrypted folders and single files work for named users and
+groups; the web UI can download single-file shares but has no inline editor
+for them.
 
 For encrypted content, the recipient must have unlocked Kolimi at least once
 so their key package exists. Group membership changes update share ACLs and

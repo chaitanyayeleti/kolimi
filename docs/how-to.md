@@ -67,13 +67,19 @@ The CLI refuses to remove the password if the account has no passkey.
 ### Create an app password for a client
 
 1. Open **Settings → Passkeys → App passwords**.
-2. Name the device (for example `laptop-webdav`) and create it.
-3. Copy the token immediately; it is shown once.
-4. Paste it into the WebDAV, CalDAV, desktop, or `kolimi-sync` client.
-5. Revoke it here when the device is lost or retired.
+2. Name the device (for example `laptop-webdav`).
+3. Choose an access preset: **Sync client**, **Files read-only**,
+   **Files read/write**, **Calendars & contacts**, or **Full access**.
+   Prefer the narrowest preset; full access can manage the account.
+4. Choose an expiry (never, 30 days, 90 days, or 1 year) and create it.
+5. Copy the token immediately; it is shown once.
+6. Paste it into the WebDAV, CalDAV, desktop, or `kolimi-sync` client.
+7. Revoke it here when the device is lost or retired.
 
-App passwords work with HTTP Basic even when TOTP is enabled or the account
-is passkey-only. See [clients.md](clients.md#app-passwords).
+Existing tokens created before scopes were introduced keep full access. If
+you want least privilege, revoke and reissue them. App passwords work with
+HTTP Basic even when TOTP is enabled or the account is passkey-only. See
+[clients.md](clients.md#app-passwords).
 
 ### Change your password or revoke sessions
 
@@ -119,12 +125,27 @@ cannot be deleted from the share root.
 ### Create a public link
 
 1. Choose **Share → Public link**.
-2. Copy the URL and the generated password shown once.
-3. The link is read-only, expires after 30 days, and can be revoked from the
-   share dialog.
+2. Pick an expiry and a password mode (generated, none, or a password you
+   set).
+3. Copy the URL and the generated password shown once.
+4. Manage or revoke the link from **Shared → Links**. Encrypted file links
+   need encryption unlocked when you copy them; the key stays in the URL
+   fragment and never reaches the server.
 
-Custom link passwords and expiry are API-only for now; see
-[reference.md](reference.md#authentication).
+### Request files with an upload-only link
+
+1. Choose **Share → Public link** on a **plaintext folder**.
+2. Set **Link type** to **Request files (upload only)**.
+3. Set the maximum number of files and total size, plus expiry and password.
+4. Create the link and send it. Recipients see only an upload form; they
+   cannot list, download, or overwrite files.
+5. Uploads appear in the folder as ordinary files. Name collisions get
+   ` (2)`, ` (3)`, and so on instead of replacing anything.
+6. Track used files/bytes and revoke from **Shared → Links**.
+
+Encrypted folders cannot accept file requests: public uploads would arrive
+as plaintext, which breaks the E2EE boundary. Use a named user/group write
+share for encrypted folders instead.
 
 ### Change the encryption passphrase
 

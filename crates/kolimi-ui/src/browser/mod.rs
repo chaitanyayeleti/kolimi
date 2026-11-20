@@ -13,6 +13,7 @@ use self::dialogs::BrowserDialogs;
 use self::overlays::{ContextMenu, Lightbox, Toasts, UploadTray};
 use self::rows::{FileArea, SearchResults, TrashArea};
 use self::search::{encrypted_name_hits, received_mounts};
+use self::shared::SharedPage;
 use self::sharing::SharingContext;
 use self::shell::{Sidebar, Topbar};
 use self::types::{
@@ -30,6 +31,7 @@ mod dialogs;
 mod overlays;
 mod rows;
 mod search;
+mod shared;
 mod sharing;
 mod shell;
 mod types;
@@ -55,6 +57,7 @@ fn route_from_hash() -> Option<(Tab, String)> {
             },
         )),
         "trash" => Some((Tab::Trash, "/".to_string())),
+        "shared" => Some((Tab::Shared, "/".to_string())),
         "settings" => Some((Tab::Settings, "/".to_string())),
         "admin" => Some((Tab::Admin, "/".to_string())),
         _ => None,
@@ -64,6 +67,7 @@ fn route_from_hash() -> Option<(Tab, String)> {
 fn route_hash(tab: Tab, path: &str) -> String {
     match tab {
         Tab::Files => format!("#/files{}", encode_path(path)),
+        Tab::Shared => "#/shared".to_string(),
         Tab::Trash => "#/trash".to_string(),
         Tab::Settings => "#/settings".to_string(),
         Tab::Admin => "#/admin".to_string(),
@@ -799,6 +803,18 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         load(path.get_untracked());
         nav_open.set(false);
     });
+    let nav_shared = Callback::new(move |_: ()| {
+        search_active.set(false);
+        tab.set(Tab::Shared);
+        set_route_hash(&route_hash(Tab::Shared, "/"));
+        nav_open.set(false);
+    });
+    let open_shared = Callback::new(move |next: String| {
+        search_active.set(false);
+        tab.set(Tab::Files);
+        load(next);
+        nav_open.set(false);
+    });
     let nav_trash = Callback::new(move |_: ()| {
         search_active.set(false);
         tab.set(Tab::Trash);
@@ -870,6 +886,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 usage=usage
                 username=username
                 on_files=nav_files
+                on_shared=nav_shared
                 on_trash=nav_trash
                 on_settings=nav_settings
                 on_admin=nav_admin
@@ -957,6 +974,18 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                             on_toggle_select=file_toggle_select
                             on_move_into=file_move_into
                             on_decrypt=ctx_decrypt
+                            on_unlock=open_encryption
+                        />
+                    }
+                        .into_any()
+                }
+                Tab::Shared => {
+                    view! {
+                        <SharedPage
+                            master=e2ee_master
+                            error=error
+                            notice=notice
+                            on_open=open_shared
                             on_unlock=open_encryption
                         />
                     }

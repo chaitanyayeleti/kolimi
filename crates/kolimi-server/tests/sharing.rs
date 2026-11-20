@@ -729,9 +729,10 @@ async fn sharing_requires_ownership_and_non_root() {
     // Sharing with yourself is rejected.
     let (status, _) = share(&server, ALICE, "/docs", "user", Some(ALICE), "read").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    // Public write links are not supported yet.
-    let (status, _) = share(&server, ALICE, "/docs", "link", None, "write").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Upload-only links are allowed on a plaintext folder.
+    let (status, body) = share(&server, ALICE, "/docs", "link", None, "write").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["upload_only"], true);
     // Sharing a trashed node is rejected.
     let (status, _, _) = send(
         &server.app,
@@ -782,6 +783,199 @@ async fn write_recipient_cannot_change_folder_encryption() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json_body(&body)["encrypted"], true);
+}
+
+#[tokio::test]
+async fn upload_only_links_accept_files_without_listing_or_overwrite() {
+    let server = setup().await;
+    mkdir(&server, ALICE, "/dav/drop").await;
+    let (status, _, body) = send(
+        &server.app,
+        json_request(
+            "POST",
+            "/api/shares",
+            ALICE,
+            &json!({
+                "path": "/drop",
+                "kind": "link",
+                "permission": "write",
+                "password": "",
+                "expires_in_secs": 0,
+                "max_files": 2,
+                "max_bytes": 1024
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let created = json_body(&body);
+    assert_eq!(created["upload_only"], true);
+    assert_eq!(created["permission"], "write");
+    let url = created["url"].as_str().unwrap().to_string();
+    let token = url.trim_start_matches("/s/").to_string();
+
+    // Metadata reveals the limits but never the folder contents.
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", &format!("/public/{token}"), BOB, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let meta = json_body(&body);
+    assert_eq!(meta["upload_only"], true);
+    assert_eq!(meta["max_files"], 2);
+    assert_eq!(meta["entries"].as_array().unwrap().len(), 0);
+
+    // Two uploads succeed; the second colliding name gets a suffix.
+    let upload = |name: &str, data: &[u8]| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/public/{token}/upload?name={name}"))
+            .header(header::CONTENT_LENGTH, data.len().to_string())
+            .body(Body::from(data.to_vec()))
+            .unwrap()
+    };
+    let (status, _, body) = send(&server.app, upload("note.txt", b"hello")).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let first = json_body(&body);
+    assert_eq!(first["name"], "note.txt");
+
+    let (status, _, body) = send(&server.app, upload("note.txt", b"again")).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let second = json_body(&body);
+    assert_eq!(second["name"], "note (2).txt");
+
+    // The owner sees ordinary files in the chosen folder.
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/dav/drop/note.txt", ALICE, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"hello");
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/dav/drop/note%20%282%29.txt", ALICE, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"again");
+
+    // The third upload exceeds max_files.
+    let (status, _, _) = send(&server.app, upload("third.txt", b"nope")).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    // Write links never list or download.
+    let (status, _, _) = send(
+        &server.app,
+        request("GET", &format!("/public/{token}/list"), BOB, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = send(
+        &server.app,
+        request("GET", &format!("/public/{token}/download"), BOB, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Path traversal in the filename is rejected.
+    let (status, _, _) = send(
+        &server.app,
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/public/{token}/upload?name=..%2Fescape.txt"))
+            .header(header::CONTENT_LENGTH, "5")
+            .body(Body::from("hello"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn upload_only_links_reject_files_caps_and_encrypted_targets() {
+    let server = setup().await;
+    mkdir(&server, ALICE, "/dav/drop").await;
+    assert_eq!(
+        upload(&server, ALICE, "/dav/drop/plain.txt", b"plain").await,
+        StatusCode::CREATED
+    );
+
+    // A write link cannot target a file.
+    let (status, _) = share(&server, ALICE, "/drop/plain.txt", "link", None, "write").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A write link cannot target an encrypted folder.
+    mkdir(&server, ALICE, "/dav/vault").await;
+    let alice = server.state.db.find_user(ALICE).await.unwrap().unwrap();
+    let vault = server.state.vfs.resolve(alice.id, "/vault").await.unwrap();
+    server
+        .state
+        .db
+        .set_folder_encrypted(alice.id, vault.id, true)
+        .await
+        .unwrap();
+    let (status, _) = share(&server, ALICE, "/vault", "link", None, "write").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Byte caps are enforced too.
+    let (status, _, body) = send(
+        &server.app,
+        json_request(
+            "POST",
+            "/api/shares",
+            ALICE,
+            &json!({
+                "path": "/drop",
+                "kind": "link",
+                "permission": "write",
+                "password": "",
+                "expires_in_secs": 0,
+                "max_files": 10,
+                "max_bytes": 8
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let token = json_body(&body)["url"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("/s/")
+        .to_string();
+    let upload = |name: &str, data: &[u8]| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/public/{token}/upload?name={name}"))
+            .header(header::CONTENT_LENGTH, data.len().to_string())
+            .body(Body::from(data.to_vec()))
+            .unwrap()
+    };
+    let (status, _, _) = send(&server.app, upload("a.txt", b"12345")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = send(&server.app, upload("b.txt", b"67890")).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]

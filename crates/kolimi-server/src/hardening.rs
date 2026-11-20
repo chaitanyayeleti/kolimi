@@ -36,6 +36,10 @@ fn auth_limit() -> u32 {
 pub const LINK_LIMIT: u32 = 30;
 /// Window for [`LINK_LIMIT`].
 pub const LINK_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// Public upload requests allowed per window, per client.
+pub const PUBLIC_UPLOAD_LIMIT: u32 = 60;
+/// Window for [`PUBLIC_UPLOAD_LIMIT`].
+pub const PUBLIC_UPLOAD_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// Preview requests allowed per window, per client.
 pub const PREVIEW_LIMIT: u32 = 120;
 /// MLS protocol/keyring requests allowed per window, per client.
@@ -176,6 +180,8 @@ pub async fn limit(State(state): State<AppState>, req: Request, next: Next) -> R
         ("recovery", RECOVERY_LIMIT, RECOVERY_WINDOW)
     } else if method == Method::POST && path.starts_with("/public/") && path.ends_with("/unlock") {
         ("link", LINK_LIMIT, LINK_WINDOW)
+    } else if method == Method::PUT && path.starts_with("/public/") && path.ends_with("/upload") {
+        ("public-upload", PUBLIC_UPLOAD_LIMIT, PUBLIC_UPLOAD_WINDOW)
     } else if path == "/api/preview" {
         ("preview", PREVIEW_LIMIT, PREVIEW_WINDOW)
     } else if path.starts_with("/api/mls/") {

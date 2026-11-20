@@ -1,13 +1,17 @@
 //! The anonymous public-link page served at `/s/{token}`.
 
-use crate::app::{encode_path, human_size};
+use std::rc::Rc;
+
+use crate::app::{encode, encode_path, human_size};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::{Value, json};
+use wasm_bindgen::JsCast;
 
 use crate::api;
+use crate::components::Icon;
 
 /// The file key and chunk lengths carried in the URL fragment of a link to
 /// an encrypted file (`#k=<base64url>&l=<len,len,…>`). The fragment is never
@@ -144,6 +148,13 @@ pub fn PublicApp(token: String) -> impl IntoView {
                             .unwrap_or_else(|| {
                                 meta["name"].as_str().unwrap_or_default().to_string()
                             });
+                        if meta["upload_only"].as_bool() == Some(true) {
+                            let token = token_sv.get_value();
+                            return view! {
+                                <UploadPanel token=token name=name meta=meta error=error/>
+                            }
+                                .into_any();
+                        }
                         // List responses carry `entries` but no `kind`: treat as dir.
                         let is_dir = meta["kind"].as_str() == Some("dir")
                             || (meta.get("kind").is_none()
@@ -315,4 +326,196 @@ pub fn PublicApp(token: String) -> impl IntoView {
             }}
         </div>
     }
+}
+
+/// The upload form shown by an upload-only ("file request") link.
+#[component]
+fn UploadPanel(token: String, name: String, meta: Value, error: RwSignal<String>) -> impl IntoView {
+    let uploading = RwSignal::new(false);
+    let progress = RwSignal::new(0u8);
+    let current = RwSignal::new(String::new());
+    let uploaded = RwSignal::new(Vec::<String>::new());
+
+    let max_files = meta["max_files"].as_i64().unwrap_or(20);
+    let max_bytes = meta["max_bytes"].as_u64().unwrap_or(1024 * 1024 * 1024);
+    let used_files = meta["uploaded_files"].as_i64().unwrap_or(0);
+    let used_bytes = meta["uploaded_bytes"].as_u64().unwrap_or(0);
+
+    let start: Rc<dyn Fn(Vec<web_sys::File>)> = Rc::new(move |files: Vec<web_sys::File>| {
+        if files.is_empty() || uploading.get_untracked() {
+            return;
+        }
+        error.set(String::new());
+        uploading.set(true);
+        progress.set(0);
+        upload_at(
+            0,
+            token.clone(),
+            Rc::new(files),
+            uploading,
+            progress,
+            current,
+            uploaded,
+            error,
+        );
+    });
+
+    let start_input = start.clone();
+    let start_drop = start.clone();
+
+    view! {
+        <div class="card upload-card">
+            <h2>{name}</h2>
+            <p class="muted">
+                "Files go to the owner's folder. You cannot see what is already there, and uploads never overwrite existing files."
+            </p>
+            <p class="muted">
+                {format!(
+                    "Up to {} files · {} total · {} already received",
+                    max_files,
+                    human_size(max_bytes),
+                    human_size(used_bytes),
+                )}
+            </p>
+            <label
+                class="drop-upload"
+                class:busy=move || uploading.get()
+                on:dragover=move |event: ev::DragEvent| {
+                    event.prevent_default();
+                }
+                on:drop=move |event: ev::DragEvent| {
+                    event.prevent_default();
+                    if let Some(transfer) = event.data_transfer()
+                        && let Some(list) = transfer.files()
+                    {
+                        start_drop(file_list(&list));
+                    }
+                }
+            >
+                <Icon name="upload"/>
+                <span>
+                    {move || {
+                        if uploading.get() {
+                            format!("Uploading {}…", current.get())
+                        } else {
+                            "Choose files or drop them here".to_string()
+                        }
+                    }}
+                </span>
+                <input
+                    type="file"
+                    class="hidden"
+                    multiple
+                    disabled=move || uploading.get()
+                    on:change=move |event| {
+                        let Some(input) = event.target()
+                            .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
+                        else {
+                            return;
+                        };
+                        if let Some(list) = input.files() {
+                            start_input(file_list(&list));
+                        }
+                        input.set_value("");
+                    }
+                />
+            </label>
+            <Show when=move || uploading.get()>
+                <div class="upload-meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=move || progress.get().to_string()>
+                    <span style=move || format!("width: {}%", progress.get())></span>
+                </div>
+            </Show>
+            <Show when=move || !uploaded.get().is_empty()>
+                <div class="created">
+                    <strong>"Uploaded in this session:"</strong>
+                    <ul class="files">
+                        {move || {
+                            uploaded
+                                .get()
+                                .into_iter()
+                                .map(|name| view! { <li class="row">{name}</li> })
+                                .collect::<Vec<_>>()
+                        }}
+                    </ul>
+                    <p class="muted">
+                        {move || {
+                            let sent = uploaded.get().len() as i64;
+                            format!(
+                                "{} of {} files used · {} received",
+                                used_files + sent,
+                                max_files,
+                                human_size(used_bytes),
+                            )
+                        }}
+                    </p>
+                </div>
+            </Show>
+            <p class="error">{move || error.get()}</p>
+        </div>
+    }
+}
+
+fn file_list(list: &web_sys::FileList) -> Vec<web_sys::File> {
+    (0..list.length())
+        .filter_map(|index| list.get(index))
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upload_at(
+    index: usize,
+    token: String,
+    files: Rc<Vec<web_sys::File>>,
+    uploading: RwSignal<bool>,
+    progress: RwSignal<u8>,
+    current: RwSignal<String>,
+    uploaded: RwSignal<Vec<String>>,
+    error: RwSignal<String>,
+) {
+    if index >= files.len() {
+        uploading.set(false);
+        current.set(String::new());
+        progress.set(0);
+        return;
+    }
+    let file = files[index].clone();
+    let name = file.name();
+    current.set(name.clone());
+    let url = format!("/public/{token}/upload?name={}", encode(&name));
+    let next = {
+        let token = token.clone();
+        let files = files.clone();
+        move |result: Result<(u16, Option<u8>), String>| match result {
+            Ok((201, _)) => {
+                uploaded.update(|names| names.push(name.clone()));
+                upload_at(
+                    index + 1,
+                    token.clone(),
+                    files.clone(),
+                    uploading,
+                    progress,
+                    current,
+                    uploaded,
+                    error,
+                );
+            }
+            Ok((status, _)) => {
+                error.set(match status {
+                    413 => "This link has reached its upload limit.".to_string(),
+                    401 => "Unlock the link again, then retry.".to_string(),
+                    403 => "This link does not accept uploads.".to_string(),
+                    _ => format!("Upload failed (HTTP {status})."),
+                });
+                uploading.set(false);
+                current.set(String::new());
+            }
+            Err(message) => {
+                error.set(message);
+                uploading.set(false);
+                current.set(String::new());
+            }
+        }
+    };
+    let on_progress = move |percent: u8| progress.set(percent);
+    api::upload_blob(&url, &file, on_progress, next);
 }

@@ -718,6 +718,112 @@ test("web share and revoke", async ({ page }) => {
   await modal.getByRole("button", { name: "Close" }).click();
 });
 
+test("web shared page lists, edits, and revokes created shares", async ({
+  page,
+}) => {
+  await login(page);
+  const name = `browser-shared-${Date.now()}.txt`;
+  await upload(page, name);
+
+  await (await row(page, name))
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Share", exact: true }).click();
+  const modal = page.locator(".modal");
+  await modal
+    .getByRole("combobox", { name: "Type", exact: true })
+    .selectOption("user");
+  await modal
+    .getByRole("combobox", { name: "Recipient", exact: true })
+    .fill("bob");
+  await modal.locator(".share-form button.primary").click();
+  await expect(modal.getByText("user → bob (read)")).toBeVisible();
+  await modal.getByRole("button", { name: "Close" }).click();
+
+  await page.getByRole("button", { name: "Shared", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Shared", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("tab", { name: /Shared by me/ }).click();
+  const sharedRow = page.locator("li.row", { hasText: name }).first();
+  await expect(sharedRow).toContainText("bob");
+  await expect(sharedRow).toContainText("Can view");
+
+  await sharedRow
+    .getByRole("combobox", { name: "Access", exact: true })
+    .selectOption("write");
+  await expect(sharedRow).toContainText("Can edit");
+
+  await sharedRow.getByRole("button", { name: "Revoke", exact: true }).click();
+  await expect(page.locator("li.row", { hasText: name })).toHaveCount(0);
+});
+
+test("web file request link accepts an anonymous upload", async ({
+  page,
+  browser,
+}) => {
+  await login(page);
+  const folder = `request-${Date.now()}`;
+  page.once("dialog", (dialog) => dialog.accept(folder));
+  await page
+    .locator(".topbar")
+    .getByRole("button", { name: "New folder", exact: true })
+    .click();
+  await (await row(page, folder)).getByRole("button", { name: "Actions" }).click();
+  await page.getByRole("button", { name: "Share", exact: true }).click();
+
+  const modal = page.locator(".modal");
+  await modal
+    .getByRole("combobox", { name: "Type", exact: true })
+    .selectOption("link");
+  await modal
+    .getByRole("combobox", { name: "Link type", exact: true })
+    .selectOption("write");
+  await modal
+    .getByRole("combobox", { name: "Password", exact: true })
+    .selectOption("none");
+  await modal.locator(".share-form button.primary").click();
+  await expect(
+    modal.getByText("File request created:", { exact: true }),
+  ).toBeVisible();
+  const link = await modal.locator(".created code").textContent();
+  expect(link).toContain("/s/");
+  await modal.getByRole("button", { name: "Close" }).click();
+
+  const anonymous = await browser.newContext();
+  const uploadPage = await anonymous.newPage();
+  await uploadPage.goto(link!);
+  await expect(
+    uploadPage.getByText("Files go to the owner's folder", { exact: false }),
+  ).toBeVisible();
+  const fileName = `anonymous-${Date.now()}.txt`;
+  await uploadPage.locator('.drop-upload input[type="file"]').setInputFiles({
+    name: fileName,
+    mimeType: "text/plain",
+    buffer: Buffer.from("uploaded through a file request"),
+  });
+  await expect(
+    uploadPage.getByText("Uploaded in this session:", { exact: true }),
+  ).toBeVisible();
+  await expect(uploadPage.getByText(fileName, { exact: true })).toBeVisible();
+  await anonymous.close();
+
+  // The owner sees the upload in the target folder after a fresh load.
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await openFolder(page, folder);
+  await expect(page.getByText(fileName, { exact: true }).first()).toBeVisible();
+});
+
+test("web shared page has no accessibility violations", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Shared", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Shared", exact: true }),
+  ).toBeVisible();
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+});
+
 test("upload progress and context menu avoid inline-style CSP violations", async ({
   page,
 }) => {

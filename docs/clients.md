@@ -39,13 +39,20 @@ account password. The server stores only a BLAKE3 digest.
 Create one in the web app:
 
 1. Sign in and open **Settings → Passkeys**.
-2. Under **App passwords**, enter a name such as `laptop-dav` and choose
-   **Create app password**.
-3. Copy the token immediately — it is shown once. Paste it into the client
+2. Under **App passwords**, enter a name such as `laptop-dav`, choose an
+   access preset (Sync client, Files read-only, Files read/write, Calendars &
+   contacts, or Full access), and optionally an expiry.
+3. Choose **Create app password**.
+4. Copy the token immediately — it is shown once. Paste it into the client
    or its keychain entry.
 
 Notes:
 
+- Presets are protocol-level scopes. **Sync client** covers file transport,
+  chunks, keyring/MLS, and the share metadata needed to maintain encrypted
+  shared folders. **Calendars & contacts** covers only those DAV trees.
+  **Full access** is required for account administration and token
+  management. Existing tokens without scopes keep full access.
 - App passwords work with HTTP Basic even when the account has TOTP
   enrolled, and they are the only password path for passkey-only accounts.
 - They do not work for the web UI session login; use the web sign-in page.

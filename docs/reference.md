@@ -214,11 +214,21 @@ Notes:
   `POST /api/me/password`, `DELETE /api/session`) until TOTP or a passkey is
   enrolled.
 - App passwords: `GET|POST /api/me/app-passwords` lists or creates tokens
-  (the plaintext token is returned once), `DELETE /api/me/app-passwords/{id}`
+  (the plaintext token is returned once), `PATCH /api/me/app-passwords/{id}`
+  renames/rescopes/changes expiry, `DELETE /api/me/app-passwords/{id}`
   revokes one, and `DELETE /api/me/app-passwords/current` lets a device revoke
   the token it authenticated with. Creation/revocation accept a fresh
   `X-Reauth-Token`, or a session created within the last five minutes.
   HTTP Basic accepts an app password even when the account has TOTP.
+  `POST` accepts optional `scopes` (an array) and `expires_in_secs`
+  (`0`/omitted = never). Omitted scopes default to `*` for compatibility.
+  Scopes are `*`, `files:read`, `files:write`, `caldav:read`,
+  `caldav:write`, `carddav:read`, `carddav:write`, and `sync`; write implies
+  read. Scoped tokens are deny-by-default: account administration, passkeys,
+  sessions, invites, audit, and token management require `*`. A `sync` token
+  may also read share metadata and maintain the MLS groups used by encrypted
+  shared folders. A scope failure returns `403` and never falls back to a
+  cookie session.
 - Invite links use `/invite#token=…`; the fragment never reaches the server.
   `POST /api/invites/lookup` and `POST /api/invites/accept` take the token in
   JSON, and acceptance creates the account. Admin routes are
@@ -238,8 +248,19 @@ Notes:
 - Public links use `/public/{token}` and set a scoped unlock cookie after
   `POST /public/{token}/unlock`. `POST /api/shares` with `kind: "link"`
   accepts `password` (omitted = generated, `""` = none) and
-  `expires_in_secs` (omitted = 30 days, `0` = never); public links are
-  read-only.
+  `expires_in_secs` (omitted = 30 days, `0` = never).
+- Upload-only links (file requests) use `kind: "link"` with
+  `permission: "write"` on a plaintext folder. `POST /api/shares` also
+  accepts `max_files` (default 20, max 10,000) and `max_bytes` (default
+  1 GiB, max 64 GiB). The public page shows only the folder name and the
+  remaining limits; `GET /public/{token}/list*` and `/download*` return
+  `403`. Uploads use `PUT /public/{token}/upload?name=<filename>` with a
+  required `Content-Length`, are streamed to the owner's folder, and never
+  overwrite: collisions get ` (2)`, ` (3)`, … suffixes. Expired, revoked,
+  password-protected, encrypted, missing, or trashed targets are rejected.
+  The response is `201` with the sanitized name and size; neither existing
+  filenames nor the folder path are disclosed. Write links cannot be
+  switched to read (or back) after creation; revoke and recreate instead.
 
 ### WebDAV / CalDAV / CardDAV
 
@@ -260,7 +281,7 @@ Notes:
 
 | Area | Endpoints |
 | --- | --- |
-| Session / account | `POST /api/session`, `DELETE /api/session`, `POST /api/reauth`, `GET|PATCH /api/me`, `GET /api/me/usage`, `POST /api/me/password`, `GET|DELETE /api/me/sessions`, `PATCH|DELETE /api/me/sessions/{id}`, `GET|POST /api/me/app-passwords`, `DELETE /api/me/app-passwords/{id}`, `DELETE /api/me/app-passwords/current`, `GET|POST /api/users`, `PATCH|DELETE /api/users/{name}`, `/api/users/{name}/usage`, `/api/users/{name}/recover`, `/api/users/{name}/logout`, `/api/users/{name}/sessions` |
+| Session / account | `POST /api/session`, `DELETE /api/session`, `POST /api/reauth`, `GET|PATCH /api/me`, `GET /api/me/usage`, `POST /api/me/password`, `GET|DELETE /api/me/sessions`, `PATCH|DELETE /api/me/sessions/{id}`, `GET|POST /api/me/app-passwords`, `PATCH|DELETE /api/me/app-passwords/{id}`, `DELETE /api/me/app-passwords/current`, `GET|POST /api/users`, `PATCH|DELETE /api/users/{name}`, `/api/users/{name}/usage`, `/api/users/{name}/recover`, `/api/users/{name}/logout`, `/api/users/{name}/sessions` |
 | Invites | `GET|POST /api/invites`, `DELETE /api/invites/{id}`, `POST /api/invites/lookup`, `POST /api/invites/accept` |
 | Passkeys / TOTP | `/api/passkeys*`, `/api/passkeys/login/*`, `/api/reauth/passkey/*`, `/api/totp*` |
 | Browse / files | `GET /api/browse`, `GET /api/files/info`, `POST /api/files/move`, `POST /api/files/encrypt`, `GET /api/search`, `GET /api/preview` |
@@ -268,7 +289,7 @@ Notes:
 | Delta sync | `/api/sync/changes`, `/api/sync/tree`, `/api/sync/events`, `/api/sync/shared-tree`, `/api/files/manifest`, `/api/manifests/{id}`, `PUT /api/files`, `/api/chunks*` |
 | Shares | `/api/shares`, `/api/shares/received`, `/api/shares/owned`, `/api/shares/{id}`, `/api/shareable`, `/api/groups/{name}/members` |
 | Groups / audit (admin) | `GET|POST /api/groups`, `DELETE /api/groups/{name}`, `POST|DELETE /api/groups/{name}/members/{username}`, `GET /api/audit`, `GET /api/audit/verify` |
-| Public links | `GET /public/{token}`, `/unlock`, `/list*`, `/download*` |
+| Public links | `GET /public/{token}`, `/unlock`, `/list*`, `/download*`, `PUT /upload?name=` (upload-only links) |
 | E2EE v1/v2 | `/api/e2ee/keyring`, `/api/e2ee/identity*`, `/api/files/key`, `/api/e2ee/share-key`, `/api/e2ee/share-name`, `/api/e2ee/enrollments*`, `/api/e2ee/devices*` |
 | MLS | `/api/mls/key-packages`, `/api/mls/key-packages/consume`, `/api/mls/key-packages/{username}`, `/api/mls/devices`, `/api/mls/devices/{username}`, `/api/mls/group`, `/api/mls/commit`, `/api/mls/messages`, `/api/mls/epoch`, `/api/mls/keyring`, `/api/mls/revocations` |
 | WebDAV / CalDAV / CardDAV | `/dav/`, `/dav/principals/{user}/`, `/dav/calendars/{user}/`, `/dav/addressbooks/{user}/`, `/.well-known/{caldav,carddav}` |

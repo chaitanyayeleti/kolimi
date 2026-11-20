@@ -1,6 +1,6 @@
 # Kolimi Threat Model
 
-- **Status:** Living document. Last reviewed for **0.5.4**.
+- **Status:** Living document. Last reviewed for **0.6.0**.
 - **Related:** RFC 0001 (Storage), RFC 0002 (Sync), ROADMAP safety gates.
 
 ## Assets
@@ -50,7 +50,8 @@ client ──(TLS, untrusted network)──> kolimi-server
 | Scenario | Mitigation | Status |
 |---|---|---|
 | A1 credential stuffing | argon2id, rate limits, per-device sessions, lockout, passkeys | Implemented |
-| A1 stolen app password | high-entropy per-device token, BLAKE3 digest at rest, per-device revoke; admin recovery revokes all; TLS-only Basic auth | Implemented |
+| A1 stolen app password | high-entropy per-device token, BLAKE3 digest at rest, protocol scopes, optional expiry, per-device revoke; admin recovery revokes all; TLS-only Basic auth | Implemented |
+| A1 app-password scope bypass | deny-by-default route matrix after authentication; write implies read; no cookie fallback on a failed app-password scope; account/credential routes require `*` | Implemented |
 | A1 parser exploits (DAV/XML/manifests) | Rust memory safety, `dav-server` + own parser fuzzing, strict size/depth limits | Implemented |
 | A2 IDOR / path traversal | single server-side permission engine; every lookup goes through it; `..`/symlink normalization tests | Implemented |
 | A2 chunk-existence oracle | chunk endpoint checks visibility, constant 404 for invisible chunks | Implemented |
@@ -59,6 +60,9 @@ client ──(TLS, untrusted network)──> kolimi-server
 | A3 mount traversal | `/Shared with me/<mount>/...` resolution starts at the mount root; ancestors of a share are unreachable | Implemented |
 | A3 link token brute force | 128-bit random tokens, exact-match lookup, per-share unlock lockout (5/15min), expiry | Implemented |
 | A3 link password guessing | argon2id, same lockout machinery as logins, HttpOnly unlock cookies | Implemented |
+| A3 public upload abuse | upload-only links are write links with per-link file/byte caps, short default expiry, per-IP rate limiting, and owner quota; no listing, download, or overwrite; expiry, password, trashed, missing, and encrypted targets rejected | Implemented |
+| A3 plaintext into an E2EE tree | file-request creation rejects encrypted folders; the upload endpoint re-checks the target before writing | Implemented |
+| A3 upload filename traversal | filenames reject `/`, `\`, NUL, control characters, `.`/`..`, and overlong names; collision suffixes never overwrite; tests cover encoded traversal | Implemented |
 | A2 DAV object injection | iCalendar parsed + UID rules enforced; vCards structurally validated; raw payloads stored byte-for-byte (no re-serialization); 10 MiB cap; XML parsers size-capped | Implemented |
 | A2 DAV namespace shadowing | `principals`/`calendars`/`addressbooks` reserved at the root; principals/homes are owner-only and 404 for everyone else | Implemented |
 | A4 third-party app | Authenticated API/DAV only, per-user permission checks | Implemented |

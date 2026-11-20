@@ -8,6 +8,7 @@
 
 use axum::{
     Extension, Json,
+    body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -26,6 +27,16 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 pub const DEFAULT_LINK_TTL_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// Lifetime of an unlock session for a password-protected link (12 hours).
 pub const LINK_SESSION_TTL_MILLIS: i64 = 12 * 60 * 60 * 1000;
+/// Default number of files accepted by an upload-only link.
+pub const DEFAULT_DROP_MAX_FILES: i64 = 20;
+/// Default byte budget of an upload-only link (1 GiB).
+pub const DEFAULT_DROP_MAX_BYTES: i64 = 1024 * 1024 * 1024;
+/// Largest per-file body accepted by a public upload (1 GiB).
+pub const MAX_PUBLIC_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+/// Upper bound a caller may set for an upload link's file count.
+pub const MAX_DROP_FILES: i64 = 10_000;
+/// Upper bound a caller may set for an upload link's byte budget (64 GiB).
+pub const MAX_DROP_BYTES: i64 = 64 * 1024 * 1024 * 1024;
 
 // ---- authenticated share management -----------------------------------
 
@@ -40,6 +51,10 @@ pub struct CreateShareRequest {
     password: Option<String>,
     /// Link lifetime: omitted = 30 days, `0` = never, else seconds.
     expires_in_secs: Option<i64>,
+    /// Upload-only links: maximum files accepted (default 20).
+    max_files: Option<i64>,
+    /// Upload-only links: maximum bytes accepted (default 1 GiB).
+    max_bytes: Option<i64>,
 }
 
 pub async fn create(
@@ -50,6 +65,9 @@ pub async fn create(
     let permission = req.permission.as_deref().unwrap_or("read");
     if !matches!(permission, "read" | "write") {
         return api::bad_request("permission must be \"read\" or \"write\"");
+    }
+    if req.kind != "link" && (req.max_files.is_some() || req.max_bytes.is_some()) {
+        return api::bad_request("upload limits only apply to public links");
     }
     let access = match state.vfs.resolve_access(user.user_id, &req.path).await {
         Ok(access) => access,
@@ -123,9 +141,43 @@ pub async fn create(
             )
         }
         "link" => {
-            if permission != "read" {
-                return api::bad_request("public write links are not supported yet");
+            if permission == "write" && !access.node.is_dir() {
+                return api::bad_request("upload-only links can only target a folder");
             }
+            if permission == "write"
+                && state
+                    .vfs
+                    .path_is_encrypted(user.user_id, &req.path)
+                    .await
+                    .unwrap_or(true)
+            {
+                return api::bad_request(
+                    "upload-only links cannot target an encrypted folder: uploads arrive as plaintext",
+                );
+            }
+            if permission == "read" && (req.max_files.is_some() || req.max_bytes.is_some()) {
+                return api::bad_request("upload limits only apply to file-request links");
+            }
+            let max_files = if permission == "write" {
+                match req.max_files.unwrap_or(DEFAULT_DROP_MAX_FILES) {
+                    files if (1..=MAX_DROP_FILES).contains(&files) => Some(files),
+                    _ => {
+                        return api::bad_request("max_files must be between 1 and 10000");
+                    }
+                }
+            } else {
+                None
+            };
+            let max_bytes = if permission == "write" {
+                match req.max_bytes.unwrap_or(DEFAULT_DROP_MAX_BYTES) {
+                    bytes if (1..=MAX_DROP_BYTES).contains(&bytes) => Some(bytes),
+                    _ => {
+                        return api::bad_request("max_bytes must be between 1 and 64 GiB");
+                    }
+                }
+            } else {
+                None
+            };
             let Ok(token) = token::new_csrf_token() else {
                 return api::internal_error();
             };
@@ -151,23 +203,41 @@ pub async fn create(
                 Some(secs) if secs > 0 => Some(kolimi_db::now_millis() + secs * 1000),
                 Some(_) => return api::bad_request("expires_in_secs must be >= 0"),
             };
-            (
-                state
-                    .db
-                    .create_share(
-                        user.user_id,
-                        access.node.id,
-                        "link",
-                        None,
-                        None,
-                        "read",
-                        Some(&token),
-                        password_hash.as_deref(),
-                        expires_at,
-                    )
-                    .await,
-                generated,
-            )
+            if permission == "write" {
+                (
+                    state
+                        .db
+                        .create_link_share(
+                            user.user_id,
+                            access.node.id,
+                            &token,
+                            password_hash.as_deref(),
+                            expires_at,
+                            max_files,
+                            max_bytes,
+                        )
+                        .await,
+                    generated,
+                )
+            } else {
+                (
+                    state
+                        .db
+                        .create_share(
+                            user.user_id,
+                            access.node.id,
+                            "link",
+                            None,
+                            None,
+                            "read",
+                            Some(&token),
+                            password_hash.as_deref(),
+                            expires_at,
+                        )
+                        .await,
+                    generated,
+                )
+            }
         }
         _ => return api::bad_request("kind must be \"user\", \"group\", or \"link\""),
     };
@@ -347,10 +417,13 @@ pub async fn update(
         if !matches!(permission, "read" | "write") {
             return api::bad_request("permission must be \"read\" or \"write\"");
         }
-        if share.kind == "link" && permission != "read" {
-            return api::bad_request("public write links are not supported yet");
-        }
-        if state
+        if share.kind == "link" {
+            if permission != share.permission {
+                return api::bad_request(
+                    "public link mode cannot be changed after creation; revoke and create a new link",
+                );
+            }
+        } else if state
             .db
             .update_share_permission(share.id, permission)
             .await
@@ -527,7 +600,18 @@ pub async fn public_meta(
         "kind": if node.is_dir() { "dir" } else { "file" },
         "size": node.size,
         "modified_at": node.modified_at,
+        "upload_only": share.kind == "link" && share.permission == "write",
+        "permission": share.permission,
+        "max_files": share.max_files,
+        "max_bytes": share.max_bytes,
+        "uploaded_files": share.uploaded_files,
+        "uploaded_bytes": share.uploaded_bytes,
     });
+    if share.kind == "link" && share.permission == "write" {
+        // Never reveal what is already in the folder.
+        body["entries"] = json!([]);
+        return Json(body).into_response();
+    }
     if node.is_dir()
         && let Ok(children) = state.vfs.list_node(share.owner_id, &node).await
     {
@@ -565,6 +649,9 @@ async fn public_list_inner(
     };
     if let Err(response) = require_unlocked(state, &share, headers).await {
         return response;
+    }
+    if share.kind == "link" && share.permission != "read" {
+        return api::forbidden("this link only accepts uploads");
     }
     let node = match state
         .vfs
@@ -617,6 +704,9 @@ async fn public_download_inner(
     };
     if let Err(response) = require_unlocked(state, &share, headers).await {
         return response;
+    }
+    if share.kind == "link" && share.permission != "read" {
+        return api::forbidden("this link only accepts uploads");
     }
     let node = match state
         .vfs
@@ -675,6 +765,205 @@ async fn public_download_inner(
         headers_out.insert(header::CONTENT_LENGTH, value);
     }
     response
+}
+
+/// `PUT /public/{token}/upload?name=` — one file into an upload-only link.
+///
+/// The link grants exactly this operation: no listing, no download, and no
+/// overwrite. The body is streamed into the owner's folder and the per-link
+/// caps are reserved before reading, so a slow or oversized request cannot
+/// exceed the budget.
+pub async fn public_upload(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    Query(query): Query<UploadQuery>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (share, node) = match load_link(&state, &token).await {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    if share.kind != "link" || share.permission != "write" {
+        return api::forbidden("this link is read-only");
+    }
+    if let Err(response) = require_unlocked(&state, &share, &headers).await {
+        return response;
+    }
+    if !node.is_dir() || node.trashed {
+        return api::not_found();
+    }
+    let Some(root_path) = state
+        .db
+        .node_path(share.owner_id, share.node_id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return api::not_found();
+    };
+    if state
+        .vfs
+        .path_is_encrypted(share.owner_id, &root_path)
+        .await
+        .unwrap_or(true)
+    {
+        return api::forbidden("this folder is encrypted and cannot accept public uploads");
+    }
+    let Some(name) = sanitize_upload_name(&query.name) else {
+        return api::bad_request("name must be a plain filename without path separators");
+    };
+    let Some(declared) = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return api::bad_request("Content-Length is required");
+    };
+    if declared == 0 {
+        return api::bad_request("the file is empty");
+    }
+    if declared > MAX_PUBLIC_UPLOAD_BYTES {
+        return api::bad_request("the file is too large");
+    }
+    let max_files = share.max_files.unwrap_or(DEFAULT_DROP_MAX_FILES);
+    let max_bytes = share.max_bytes.unwrap_or(DEFAULT_DROP_MAX_BYTES);
+    if share.uploaded_files >= max_files {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "this link has reached its file limit" })),
+        )
+            .into_response();
+    }
+    if share.uploaded_bytes.saturating_add(declared as i64) > max_bytes {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "this link has reached its size limit" })),
+        )
+            .into_response();
+    }
+    if !matches!(
+        state.db.reserve_upload(share.id, declared as i64).await,
+        Ok(true)
+    ) {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "this link has reached its upload limit" })),
+        )
+            .into_response();
+    }
+
+    // Never overwrite: pick the first free suffix. The owner sees ordinary
+    // files in the chosen folder.
+    let Some(target_name) = next_free_name(&state, share.owner_id, node.id, &name).await else {
+        let _ = state.db.release_upload(share.id, declared as i64).await;
+        return conflict("too many files with that name");
+    };
+    let target = if root_path == "/" {
+        format!("/{target_name}")
+    } else {
+        format!("{root_path}/{target_name}")
+    };
+    let stream = Box::pin(body.into_data_stream());
+    let result = state
+        .vfs
+        .put_stream(share.owner_id, &target, stream, declared)
+        .await;
+    match result {
+        Ok(uploaded) => {
+            if uploaded.size != declared {
+                let delta = uploaded.size as i64 - declared as i64;
+                let _ = state.db.adjust_upload_bytes(share.id, delta).await;
+            }
+            state.metrics.upload(uploaded.size);
+            audit(
+                &state,
+                None,
+                Some("link"),
+                "share.drop.upload",
+                &share.id.to_string(),
+                json!({ "bytes": uploaded.size, "outcome": "ok" }),
+            )
+            .await;
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "uploaded": true,
+                    "name": target_name,
+                    "size": uploaded.size,
+                })),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            let _ = state.db.release_upload(share.id, declared as i64).await;
+            audit(
+                &state,
+                None,
+                Some("link"),
+                "share.drop.upload",
+                &share.id.to_string(),
+                json!({ "bytes": declared, "outcome": "failed" }),
+            )
+            .await;
+            match error {
+                kolimi_vfs::VfsError::Store(kolimi_store::StoreError::TooLarge { .. }) => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(json!({ "error": "the file exceeds the remaining storage" })),
+                )
+                    .into_response(),
+                _ => api::internal_error(),
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UploadQuery {
+    name: String,
+}
+
+fn sanitize_upload_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.len() > 255
+        || name.chars().any(|ch| ch.is_control())
+        || name.chars().any(|ch| matches!(ch, '/' | '\\' | '\0'))
+    {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn suffixed_name(name: &str, index: u32) -> String {
+    if index <= 1 {
+        return name.to_string();
+    }
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
+            format!("{stem} ({index}).{extension}")
+        }
+        _ => format!("{name} ({index})"),
+    }
+}
+
+async fn next_free_name(
+    state: &AppState,
+    owner_id: i64,
+    parent_id: i64,
+    name: &str,
+) -> Option<String> {
+    for index in 1..=500 {
+        let candidate = suffixed_name(name, index);
+        match state.db.find_child(owner_id, parent_id, &candidate).await {
+            Ok(None) => return Some(candidate),
+            Ok(Some(_)) => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// `POST /public/{token}/unlock` — exchange a password for a session cookie.
@@ -920,6 +1209,23 @@ async fn share_json(state: &AppState, share: &ShareRow, generated_password: Opti
     } else {
         None
     };
+    let node = state
+        .db
+        .node_by_id(share.owner_id, share.node_id)
+        .await
+        .ok()
+        .flatten();
+    let is_dir = node.as_ref().is_some_and(|node| node.kind == "dir");
+    let encrypted = if path.is_empty() {
+        false
+    } else {
+        state
+            .vfs
+            .path_is_encrypted(share.owner_id, &path)
+            .await
+            .unwrap_or(false)
+    };
+    let upload_only = share.kind == "link" && share.permission == "write";
     json!({
         "id": share.id,
         "kind": share.kind,
@@ -927,10 +1233,17 @@ async fn share_json(state: &AppState, share: &ShareRow, generated_password: Opti
         "recipient": recipient,
         "path": path,
         "name": name,
+        "is_dir": is_dir,
+        "encrypted": encrypted,
+        "upload_only": upload_only,
         "token": share.token,
         "url": share.token.as_ref().map(|token| format!("/s/{token}")),
         "password": generated_password,
         "expires_at": share.expires_at,
+        "max_files": share.max_files,
+        "max_bytes": share.max_bytes,
+        "uploaded_files": share.uploaded_files,
+        "uploaded_bytes": share.uploaded_bytes,
         "created_at": share.created_at,
         "missing": missing,
     })

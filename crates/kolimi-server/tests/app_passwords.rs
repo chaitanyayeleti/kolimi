@@ -8,7 +8,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use kolimi_auth::{password::hash_password, totp::TotpSecret};
+use kolimi_auth::{password::hash_password, token, totp::TotpSecret};
 use kolimi_server::{AppState, build_app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -211,6 +211,208 @@ async fn app_password_works_with_totp_and_can_revoke_itself() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+async fn create_app_password(
+    state: &AppState,
+    name: &str,
+    scopes: &str,
+    expires_at: Option<i64>,
+) -> String {
+    let alice = state.db.find_user(ALICE).await.unwrap().unwrap();
+    let plaintext = token::new_session_token().unwrap();
+    let hash = token::hash_token(&plaintext);
+    state
+        .db
+        .create_app_password(alice.id, name, &hash, scopes, expires_at)
+        .await
+        .unwrap();
+    plaintext
+}
+
+#[tokio::test]
+async fn scoped_app_passwords_enforce_least_privilege() {
+    let (_dir, state, app) = setup().await;
+    let alice = state.db.find_user(ALICE).await.unwrap().unwrap();
+    state.vfs.mkdir(alice.id, "/docs").await.unwrap();
+
+    let read = create_app_password(&state, "files read", "files:read", None).await;
+    let write = create_app_password(&state, "files write", "files:write", None).await;
+    let sync = create_app_password(&state, "sync", "files:read,files:write,sync", None).await;
+
+    // Read scope can browse, but cannot mutate or reach account/share APIs.
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/browse?path=/",
+        None,
+        &[("authorization", basic(&read))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, _) = send(
+        &app,
+        "PUT",
+        "/api/files/encrypt",
+        Some(json!({ "path": "/docs", "encrypted": false })),
+        &[
+            ("content-type", "application/json".to_string()),
+            ("authorization", basic(&read)),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["insufficient_scope"], true);
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/users",
+        None,
+        &[("authorization", basic(&read))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/me/app-passwords",
+        None,
+        &[("authorization", basic(&read))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Write scope passes the scope gate (the handler may still reject the
+    // operation for its own reasons, but never with insufficient_scope).
+    let (status, body, _) = send(
+        &app,
+        "PUT",
+        "/api/files/encrypt",
+        Some(json!({ "path": "/docs", "encrypted": false })),
+        &[
+            ("content-type", "application/json".to_string()),
+            ("authorization", basic(&write)),
+        ],
+    )
+    .await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // Sync can reach keyring and share metadata, but not account admin.
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/e2ee/keyring",
+        None,
+        &[("authorization", basic(&sync))],
+    )
+    .await;
+    assert_ne!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/shares/owned",
+        None,
+        &[("authorization", basic(&sync))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/users",
+        None,
+        &[("authorization", basic(&sync))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // A token with no explicit scopes is still full access (compatibility).
+    let full = create_app_password(&state, "legacy", "*", None).await;
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/me/app-passwords",
+        None,
+        &[("authorization", basic(&full))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Expired tokens are rejected before the scope gate.
+    let expired = create_app_password(
+        &state,
+        "expired",
+        "files:read",
+        Some(kolimi_db::now_millis() - 1),
+    )
+    .await;
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/browse?path=/",
+        None,
+        &[("authorization", basic(&expired))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A device can revoke the token it authenticated with even without the
+    // account-management scope.
+    let (status, _, _) = send(
+        &app,
+        "DELETE",
+        "/api/me/app-passwords/current",
+        None,
+        &[("authorization", basic(&read))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn app_password_can_be_rescoped_without_rotation() {
+    let (_dir, state, app) = setup().await;
+    let alice = state.db.find_user(ALICE).await.unwrap().unwrap();
+    state.vfs.mkdir(alice.id, "/docs").await.unwrap();
+    let token = create_app_password(&state, "rescope", "files:read", None).await;
+    let id = state.db.list_app_passwords(alice.id).await.unwrap()[0].id;
+
+    let (status, cookies) = login(&app).await;
+    assert_eq!(status, StatusCode::OK);
+    let session = cookie(&cookies, "kolimi_session");
+    let csrf = cookie(&cookies, "kolimi_csrf");
+    let (status, body, _) = send(
+        &app,
+        "PATCH",
+        &format!("/api/me/app-passwords/{id}"),
+        Some(json!({ "scopes": ["files:write"], "expires_in_secs": 0 })),
+        &[
+            ("content-type", "application/json".to_string()),
+            (
+                "cookie",
+                format!("kolimi_session={session}; kolimi_csrf={csrf}"),
+            ),
+            ("x-csrf-token", csrf),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["scopes"], json!(["files:write"]));
+    assert_eq!(body["expires_at"], Value::Null);
+
+    // The same token now passes the write gate; no rotation was needed.
+    let (status, body, _) = send(
+        &app,
+        "PUT",
+        "/api/files/encrypt",
+        Some(json!({ "path": "/docs", "encrypted": false })),
+        &[
+            ("content-type", "application/json".to_string()),
+            ("authorization", basic(&token)),
+        ],
+    )
+    .await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
 }
 
 #[tokio::test]

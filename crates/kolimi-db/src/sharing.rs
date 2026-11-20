@@ -38,6 +38,14 @@ pub struct ShareRow {
     pub password_hash: Option<String>,
     /// Expiry time in Unix milliseconds (`None` = never).
     pub expires_at: Option<i64>,
+    /// Maximum files accepted by an upload-only link (`None` = default).
+    pub max_files: Option<i64>,
+    /// Maximum bytes accepted by an upload-only link (`None` = default).
+    pub max_bytes: Option<i64>,
+    /// Files committed through an upload-only link.
+    pub uploaded_files: i64,
+    /// Bytes committed through an upload-only link.
+    pub uploaded_bytes: i64,
     /// Creation time in Unix milliseconds.
     pub created_at: i64,
 }
@@ -290,6 +298,88 @@ impl Db {
         .map_err(|e| map_sqlx(e, "this item is already shared with that recipient"))?;
         self.bump_shares_epoch();
         Ok(share)
+    }
+
+    /// Creates a public link with explicit upload caps.
+    ///
+    /// Used for upload-only links (`permission = "write"`); ordinary shares
+    /// keep using [`Db::create_share`], which leaves the caps NULL.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_link_share(
+        &self,
+        owner_id: i64,
+        node_id: i64,
+        token: &str,
+        password_hash: Option<&str>,
+        expires_at: Option<i64>,
+        max_files: Option<i64>,
+        max_bytes: Option<i64>,
+    ) -> Result<ShareRow, DbError> {
+        let share = sqlx::query_as::<_, ShareRow>(
+            "INSERT INTO shares (owner_id, node_id, kind, permission, token, password_hash,
+                                 expires_at, max_files, max_bytes, created_at)
+             VALUES (?, ?, 'link', 'write', ?, ?, ?, ?, ?, ?) RETURNING *",
+        )
+        .bind(owner_id)
+        .bind(node_id)
+        .bind(token)
+        .bind(password_hash)
+        .bind(expires_at)
+        .bind(max_files)
+        .bind(max_bytes)
+        .bind(now_millis())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| map_sqlx(e, "could not create the upload link"))?;
+        self.bump_shares_epoch();
+        Ok(share)
+    }
+
+    /// Atomically reserves one upload slot/byte budget on a link.
+    ///
+    /// Returns `false` when the link is not an upload link or a cap would be
+    /// exceeded. The caller releases the reservation if the upload fails.
+    pub async fn reserve_upload(&self, share_id: i64, size: i64) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE shares
+             SET uploaded_files = uploaded_files + 1,
+                 uploaded_bytes = uploaded_bytes + ?
+             WHERE id = ? AND kind = 'link' AND permission = 'write'
+               AND (max_files IS NULL OR uploaded_files < max_files)
+               AND (max_bytes IS NULL OR uploaded_bytes + ? <= max_bytes)",
+        )
+        .bind(size)
+        .bind(share_id)
+        .bind(size)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Releases a reservation made by [`Db::reserve_upload`].
+    pub async fn release_upload(&self, share_id: i64, size: i64) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE shares
+             SET uploaded_files = MAX(0, uploaded_files - 1),
+                 uploaded_bytes = MAX(0, uploaded_bytes - ?)
+             WHERE id = ?",
+        )
+        .bind(size)
+        .bind(share_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Corrects the byte counter after an upload whose actual size differed
+    /// from its declared `Content-Length` (the file slot is unchanged).
+    pub async fn adjust_upload_bytes(&self, share_id: i64, delta: i64) -> Result<(), DbError> {
+        sqlx::query("UPDATE shares SET uploaded_bytes = MAX(0, uploaded_bytes + ?) WHERE id = ?")
+            .bind(delta)
+            .bind(share_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Fetches a share by id.

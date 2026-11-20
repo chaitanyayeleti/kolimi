@@ -178,9 +178,10 @@ Acceptance: no white native controls in manual dark mode; no `0%` for an
 unlimited quota; selection works on a phone without accidental taps; the
 main pages pass axe; the file list is usable without a mouse.
 
-### Phase 3 — Shared page and link controls (0.6.0, P0)
+### Phase 3 — Shared page and link controls (shipped in 0.6.0, P0)
 
-Detailed preparation: [0.6.0-sharing.md](0.6.0-sharing.md).
+Detailed preparation: [0.6.0-sharing.md](0.6.0-sharing.md). Implemented in
+0.6.0 together with scoped app passwords and upload-only links.
 
 The APIs already exist; this phase is mostly UI:
 
@@ -250,7 +251,7 @@ Acceptance: a user can answer “what have I shared, with whom, until when, and
 how do I revoke it?” without opening each file; a link can be created with an
 expiry from the UI.
 
-### Phase 4 — Favorites and recents (0.6.0, P1)
+### Phase 4 — Favorites and recents (0.6.x, P1)
 
 **Schema** (next migration number; currently `0031`)
 
@@ -390,8 +391,8 @@ remaining friction:
 | Release | Content | Migrations | Desktop |
 | --- | --- | --- | --- |
 | **0.5.2** | Phases 1–2 | None | No bump; desktop loads the new UI |
-| **0.6.0** | Phases 3–4 | Favorites, recents | No bump unless desktop conflicts land |
-| **0.6.x** | Phase 5 | User events | No bump |
+| **0.6.0** | Phase 3 plus scoped app passwords and file requests | App-password scopes, share upload limits | Paired desktop 0.6.0 |
+| **0.6.x** | Phase 4–5 | Favorites, recents, user events | No bump unless conflicts land |
 
 If two releases are too much overhead, fold Phases 1–4 into **0.6.0**; do not
 hold the performance and polish work for notifications or PWA.

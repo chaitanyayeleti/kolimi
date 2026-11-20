@@ -18,6 +18,7 @@ pub(crate) fn Sidebar(
     usage: RwSignal<Value>,
     username: RwSignal<String>,
     on_files: Callback<()>,
+    on_shared: Callback<()>,
     on_trash: Callback<()>,
     on_settings: Callback<()>,
     on_admin: Callback<()>,
@@ -46,6 +47,14 @@ pub(crate) fn Sidebar(
                     >
                         <Icon name="folder"/>
                         "Files"
+                    </button>
+                    <button
+                        class="nav-item"
+                        class:active=move || tab.get() == Tab::Shared
+                        on:click=move |_| on_shared.run(())
+                    >
+                        <Icon name="share"/>
+                        "Shared"
                     </button>
                     <button
                         class="nav-item"
@@ -217,6 +226,12 @@ pub(crate) fn Topbar(
                             if tab.get() == Tab::Trash {
                                 return vec![
                                     view! { <span class="crumb current">"Trash"</span> }
+                                        .into_any(),
+                                ];
+                            }
+                            if tab.get() == Tab::Shared {
+                                return vec![
+                                    view! { <span class="crumb current">"Shared"</span> }
                                         .into_any(),
                                 ];
                             }

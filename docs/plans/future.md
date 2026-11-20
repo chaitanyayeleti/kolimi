@@ -17,11 +17,13 @@ are detailed in [0.6.0-sharing.md](0.6.0-sharing.md).
 
 The later phases in [ui.md](ui.md) are not started:
 
-- Shared page for received/created shares and public links.
 - Favorites and Recent.
 - Command palette.
 - Notifications.
 - PWA / installable app shell.
+
+The Shared page, scoped app passwords, and upload-only links shipped in
+**0.6.0**; see [0.6.0-sharing.md](0.6.0-sharing.md).
 
 ## Core ideas
 
@@ -29,7 +31,6 @@ The later phases in [ui.md](ui.md) are not started:
 
 | Idea | Why it matters | Size | Main caveat |
 | --- | --- | --- | --- |
-| **Upload-only links / file requests** | Public links are read-only today; collecting files from clients or family is the missing half of sharing. A drop link can accept uploads with no listing or download. | M/L | Abuse and storage exhaustion; needs hard per-link file/byte caps, rate limits, expiry, and a dedicated “Requests” area. |
 | **One-time / limited-download links** | Sensitive documents often need “download once” or a maximum download count. | S/M | Counting is fuzzy for folder links and range requests; start with single-file links. |
 | **Link activity feed** | Owners should see when a link was opened, downloaded, or used to upload. | S once events exist | Depends on an event table (the parked notifications work). |
 

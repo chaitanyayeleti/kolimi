@@ -82,7 +82,7 @@ with the token:
 ```sh
 docker run ... \
   -e KOLIMI_METRICS_TOKEN=paste-the-token-here \
-  ghcr.io/chaitanyayeleti/kolimi:0.5.4
+  ghcr.io/chaitanyayeleti/kolimi:0.6.0
 ```
 
 ### Kubernetes / Helm

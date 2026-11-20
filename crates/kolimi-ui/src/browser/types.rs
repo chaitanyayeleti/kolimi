@@ -7,6 +7,7 @@ use serde_json::Value;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tab {
     Files,
+    Shared,
     Trash,
     Settings,
     Admin,

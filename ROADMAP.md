@@ -1,6 +1,6 @@
 # Kolimi Roadmap
 
-Current release: **0.5.4** (2026-11-20). This file is the forward-looking
+Current release: **0.6.0** (2026-11-20). This file is the forward-looking
 backlog and the honest list of limitations. Shipped history lives in
 [CHANGELOG.md](CHANGELOG.md); design details live in [docs/rfc/](docs/rfc/).
 
@@ -17,16 +17,17 @@ backlog and the honest list of limitations. Shipped history lives in
 5. **No speculative platform work.** A plugin host or extra backend is
    added only with a concrete use case.
 
-## Current state (0.5.4)
+## Current state (0.6.0)
 
 | Area | Status |
 | --- | --- |
 | Files / WebDAV | Files, ranges, class-2 locking, trash, versions, search, previews; litmus suite in CI |
+| Sharing | Shared management page, user/group shares, public view links, upload-only file requests, expiry/password controls, encrypted-link fragments rebuilt client-side |
 | CalDAV / CardDAV | Discovery, collections, multiget, filters, `sync-collection` |
 | Delta sync | `kolimi-sync` CLI, desktop app, FFI core; chunk-level deltas, conflicts, shared mounts |
 | E2EE v1/v2 | Per-file keys, encrypted names, sharing, device enrollment, browser/sync/desktop clients |
 | MLS group E2EE | Node-scoped groups, membership add/remove, epoch keyring, folder + single-file write shares, serialized commits, key-package/message janitor, web/desktop/CLI |
-| Auth / accounts | Passwords, passkeys, passwordless accounts, TOTP, sessions, CSRF, lockout, rate limiting; self-service account page; admin users/invites/groups/audit; forced password rotation and session labels; per-device app passwords; mandatory first-login MFA for Admin-created and invited accounts |
+| Auth / accounts | Passwords, passkeys, passwordless accounts, TOTP, sessions, CSRF, lockout, rate limiting; scoped and expiring app passwords; forced password rotation and session labels; admin users/invites/groups/audit; mandatory first-login MFA for Admin-created and invited accounts |
 | Operations | Backup/verify, hash-chained audit log, Prometheus metrics, OTel traces, quotas, janitor |
 | Packaging | Release tarballs (gnu/musl/aarch64), `.deb`, multi-arch GHCR, Helm, AUR, AppImage; desktop `.deb`/AppImage, Windows `.msi`/NSIS and macOS `.dmg` |
 
@@ -35,10 +36,16 @@ ship-blocker for calling group E2EE production-grade.
 
 ## Recently completed
 
+- **0.6.0 — sharing, scopes, and file requests**: a Shared management page
+  for received/created shares and public links; scoped and expiring app
+  passwords with deny-by-default enforcement; and upload-only file-request
+  links with per-link caps, collision-safe uploads, and encrypted-target
+  rejection. Desktop 0.6.0 is released from the same commit. See the
+  [CHANGELOG](CHANGELOG.md) and [plan](docs/plans/0.6.0-sharing.md).
 - **0.5.4 — Ink & Coral**: warm paper light theme, deeper indigo primary,
   coral active-nav accent, calmer file-type colors, a visible logo edge, and
   restrained content/tray/menu motion with a global reduced-motion fallback.
-  Desktop 0.4.12 ships the same palette. See the [CHANGELOG](CHANGELOG.md).
+  Desktop 0.4.12 shipped the same palette. See the [CHANGELOG](CHANGELOG.md).
 - **0.5.3 — brand refresh**: replaced the generic cloud mark with the
   keyhole K across the web UI, favicons, touch icon, desktop window, and
   desktop bundles (desktop 0.4.11). See the [CHANGELOG](CHANGELOG.md).
@@ -75,7 +82,7 @@ ship-blocker for calling group E2EE production-grade.
 
 The review package is [`docs/audit/mls-delta.md`](docs/audit/mls-delta.md)
 and is intentionally frozen at the 0.4.3 surface even though the server is
-now 0.5.4. The 89 openmls `cargo-vet` exemptions (724 total) are temporary
+now 0.6.0. The 89 openmls `cargo-vet` exemptions (724 total) are temporary
 and are not audits. Engage an independent reviewer, land only fixes during
 the review, then replace the exemptions with real audit entries. Do not
 describe MLS as audited before this completes.
@@ -101,7 +108,7 @@ describe MLS as audited before this completes.
   pruning (7-day grace, 30-day report freshness); review the thresholds
   with the external auditor.
 - **Deployment validation**: upgrade from 0.4.7 (and older 0.3.x data) to
-  0.5.4 with real data, a restore drill in CI, and a post-upgrade `verify`
+  0.6.0 with real data, a restore drill in CI, and a post-upgrade `verify`
   run.
 
 ### 3. Clients

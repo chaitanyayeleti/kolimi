@@ -6,6 +6,44 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-20
+
+### Added
+- **Shared page** in the sidebar and at `#/shared`: *Received* lists shares
+  from other people, *Shared by me* lists user/group shares, and *Links*
+  lists public links. Rows show owner or recipient, permission, creation
+  time, expiry, missing targets, and encryption; actions copy links, change
+  user/group access, adjust link expiry or password, and revoke. Encrypted
+  file links rebuild their `#k=…&l=…&n=…` fragment in the browser while the
+  vault is unlocked and offer an unlock action while it is locked.
+- **Scoped app passwords**: tokens now carry protocol scopes (`files`,
+  `caldav`, `carddav`, `sync`, or `*`) and an optional expiry. Existing
+  tokens default to full access; the Settings UI offers Sync client, Files
+  read-only, Files read/write, Calendars & contacts, and Full access
+  presets. Enforcement is deny-by-default after authentication, write
+  implies read, and a failed scope never falls back to a cookie session.
+- **Upload-only links / file requests**: `kind: "link"` with
+  `permission: "write"` on a plaintext folder accepts anonymous uploads via
+  `PUT /public/{token}/upload?name=…`. Links have file and byte caps,
+  expiry, password protection, per-IP rate limiting, and collision-safe
+  uploads (` (2)`, ` (3)`, …) that never overwrite. The public page shows
+  only an upload form and remaining limits; listing and downloading are
+  refused. Encrypted, trashed, missing, expired, and revoked targets are
+  rejected.
+- `PATCH /api/me/app-passwords/{id}` to rename, rescope, or change a token's
+  expiry without rotating it.
+- `PATCH /api/shares/{id}` can change link expiry and password; link mode is
+  immutable after creation.
+
+### Changed
+- `POST /api/me/app-passwords` accepts optional `scopes` and
+  `expires_in_secs`. Omitted scopes remain `*` for compatibility with older
+  clients.
+- `POST /api/shares` accepts `max_files` and `max_bytes` for file-request
+  links. Share responses include `is_dir`, `encrypted`, `upload_only`, and
+  upload counters.
+- Server and desktop are released as the paired **0.6.0** versions.
+
 ## [0.5.4] - 2026-11-20
 
 ### Changed

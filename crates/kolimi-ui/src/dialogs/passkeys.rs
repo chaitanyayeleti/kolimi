@@ -11,7 +11,11 @@ use crate::components::{ErrorText, Icon, sanitize_svg};
 enum PendingAction {
     Add(String),
     Remove(i64),
-    AddAppPassword(String),
+    AddAppPassword {
+        name: String,
+        scopes: Vec<String>,
+        expires_in_secs: i64,
+    },
     RemoveAppPassword(i64),
 }
 
@@ -33,11 +37,19 @@ async fn apply_action(action: PendingAction, token: &str) -> Result<Option<Strin
                 .to_string()),
             Err(error) => Err(error),
         },
-        PendingAction::AddAppPassword(name) => {
+        PendingAction::AddAppPassword {
+            name,
+            scopes,
+            expires_in_secs,
+        } => {
+            let mut payload = json!({ "name": name, "scopes": scopes });
+            if expires_in_secs > 0 {
+                payload["expires_in_secs"] = json!(expires_in_secs);
+            }
             match api::send_json_with(
                 "POST",
                 "/api/me/app-passwords",
-                &json!({ "name": name }),
+                &payload,
                 Some(("x-reauth-token", token)),
             )
             .await
@@ -85,6 +97,8 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
     let reauth_code = RwSignal::new(String::new());
     let app_passwords = RwSignal::new(Vec::<Value>::new());
     let new_app_name = RwSignal::new(String::new());
+    let new_app_preset = RwSignal::new("sync".to_string());
+    let new_app_expiry = RwSignal::new("0".to_string());
     let new_app_password = RwSignal::new(Option::<String>::None);
 
     let load = Callback::new(move |_: ()| {
@@ -205,8 +219,17 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
             error.set("Name this app password (e.g. \"Laptop sync\")".to_string());
             return;
         }
+        let scopes = preset_scopes(&new_app_preset.get_untracked())
+            .iter()
+            .map(|scope| scope.to_string())
+            .collect::<Vec<_>>();
+        let expires_in_secs = new_app_expiry.get_untracked().parse::<i64>().unwrap_or(0);
         error.set(String::new());
-        pending.set(Some(PendingAction::AddAppPassword(name)));
+        pending.set(Some(PendingAction::AddAppPassword {
+            name,
+            scopes,
+            expires_in_secs,
+        }));
     };
 
     let remove_app_password = move |id: i64| {
@@ -365,6 +388,20 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                                 .as_i64()
                                 .map(relative_time)
                                 .unwrap_or_else(|| "never used".to_string());
+                            let scopes: Vec<String> = password["scopes"]
+                                .as_array()
+                                .map(|values| {
+                                    values
+                                        .iter()
+                                        .filter_map(|value| value.as_str())
+                                        .map(scope_label)
+                                        .collect()
+                                })
+                                .unwrap_or_else(|| vec!["Full access".to_string()]);
+                            let expires = password["expires_at"]
+                                .as_i64()
+                                .map(|at| format!("expires in {}", future_span(at)))
+                                .unwrap_or_else(|| "no expiry".to_string());
                             view! {
                                 <li class="row">
                                     <span class="name">
@@ -374,7 +411,13 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                                         <span>
                                             <strong>{name}</strong>
                                             <span class="muted">
-                                                {format!(" · created {created} · last used {last_used}")}
+                                                {format!(" · created {created} · last used {last_used} · {expires}")}
+                                            </span>
+                                            <span class="badges">
+                                                {scopes
+                                                    .into_iter()
+                                                    .map(|scope| view! { <span class="badge">{scope}</span> })
+                                                    .collect::<Vec<_>>()}
                                             </span>
                                         </span>
                                     </span>
@@ -406,6 +449,31 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                             on:input=move |ev| new_app_name.set(event_target_value(&ev))
                         />
                     </label>
+                    <label>
+                        "Access"
+                        <select
+                            prop:value=move || new_app_preset.get()
+                            on:change=move |ev| new_app_preset.set(event_target_value(&ev))
+                        >
+                            <option value="sync">"Sync client"</option>
+                            <option value="files-read">"Files read-only"</option>
+                            <option value="files-write">"Files read/write"</option>
+                            <option value="dav">"Calendars & contacts"</option>
+                            <option value="full">"Full access"</option>
+                        </select>
+                    </label>
+                    <label>
+                        "Expiry"
+                        <select
+                            prop:value=move || new_app_expiry.get()
+                            on:change=move |ev| new_app_expiry.set(event_target_value(&ev))
+                        >
+                            <option value="0">"Never"</option>
+                            <option value="2592000">"30 days"</option>
+                            <option value="7776000">"90 days"</option>
+                            <option value="31536000">"1 year"</option>
+                        </select>
+                    </label>
                     <button
                         disabled=move || busy.get() || pending.get().is_some()
                         on:click=add_app_password
@@ -413,6 +481,11 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                         <Icon name="key"/>
                         "Create app password"
                     </button>
+                    <Show when=move || new_app_preset.get() == "full">
+                        <p class="muted form-note">
+                            "Full access can manage the account, including users, sessions, and shares. Prefer a narrower preset."
+                        </p>
+                    </Show>
                 </div>
 
                 {move || {
@@ -422,7 +495,7 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                             let description = match &action {
                                 PendingAction::Add(name) => format!("add “{name}”"),
                                 PendingAction::Remove(_) => "remove this passkey".to_string(),
-                                PendingAction::AddAppPassword(name) => {
+                                PendingAction::AddAppPassword { name, .. } => {
                                     format!("create the app password “{name}”")
                                 }
                                 PendingAction::RemoveAppPassword(_) => {
@@ -553,5 +626,49 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                     </div>
                 </Show>
         <ErrorText message=error/>
+    }
+}
+
+fn preset_scopes(preset: &str) -> &'static [&'static str] {
+    match preset {
+        "sync" => &["files:read", "files:write", "sync"],
+        "files-read" => &["files:read"],
+        "files-write" => &["files:read", "files:write"],
+        "dav" => &[
+            "caldav:read",
+            "caldav:write",
+            "carddav:read",
+            "carddav:write",
+        ],
+        _ => &["*"],
+    }
+}
+
+fn scope_label(scope: &str) -> String {
+    match scope {
+        "*" => "Full access".to_string(),
+        "files:read" => "Files read".to_string(),
+        "files:write" => "Files write".to_string(),
+        "caldav:read" => "Calendars read".to_string(),
+        "caldav:write" => "Calendars write".to_string(),
+        "carddav:read" => "Contacts read".to_string(),
+        "carddav:write" => "Contacts write".to_string(),
+        "sync" => "Sync".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn future_span(at: i64) -> String {
+    let remaining = at - js_sys::Date::now() as i64;
+    if remaining <= 0 {
+        return "expired".to_string();
+    }
+    let minutes = remaining / 60_000;
+    if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 24 * 60 {
+        format!("{}h", minutes / 60)
+    } else {
+        format!("{}d", minutes / (24 * 60))
     }
 }
