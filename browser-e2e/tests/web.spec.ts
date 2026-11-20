@@ -792,6 +792,12 @@ test("web file request link accepts an anonymous upload", async ({
 
   const anonymous = await browser.newContext();
   const uploadPage = await anonymous.newPage();
+  const csp: string[] = [];
+  uploadPage.on("console", (message) => {
+    if (message.text().includes("Content Security Policy")) {
+      csp.push(message.text());
+    }
+  });
   await uploadPage.goto(link!);
   await expect(
     uploadPage.getByText("Files go to the owner's folder", { exact: false }),
@@ -806,6 +812,7 @@ test("web file request link accepts an anonymous upload", async ({
     uploadPage.getByText("Uploaded in this session:", { exact: true }),
   ).toBeVisible();
   await expect(uploadPage.getByText(fileName, { exact: true })).toBeVisible();
+  expect(csp, csp.join("\n")).toEqual([]);
   await anonymous.close();
 
   // The owner sees the upload in the target folder after a fresh load.

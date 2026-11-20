@@ -422,7 +422,7 @@ fn UploadPanel(token: String, name: String, meta: Value, error: RwSignal<String>
             </label>
             <Show when=move || uploading.get()>
                 <div class="upload-meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=move || progress.get().to_string()>
-                    <span style=move || format!("width: {}%", progress.get())></span>
+                    <span style:width=move || format!("{}%", progress.get())></span>
                 </div>
             </Show>
             <Show when=move || !uploaded.get().is_empty()>
