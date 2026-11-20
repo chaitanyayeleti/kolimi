@@ -16,7 +16,7 @@ use tantivy::schema::{
     Field, IndexRecordOption, STORED, STRING, Schema, TantivyDocument, TextFieldIndexing,
     TextOptions, Value,
 };
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term};
+use tantivy::{DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
 
 /// Errors from the search layer.
 #[derive(Debug, thiserror::Error)]
@@ -199,7 +199,12 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// Every user id that has at least one document in the index.
+    /// Every user id that has at least one live document in the index.
+    ///
+    /// Deleted terms can remain in a segment until Tantivy merges it, so
+    /// reading term keys alone would keep reporting a user whose documents
+    /// were deleted. Postings carry doc ids; check the segment's delete
+    /// bitset before counting the term.
     pub fn indexed_user_ids(&self) -> Result<HashSet<i64>, SearchError> {
         self.reader.reload()?;
         let searcher = self.reader.searcher();
@@ -208,10 +213,23 @@ impl SearchIndex {
             let inverted = segment.inverted_index(self.fields.user)?;
             let mut stream = inverted.terms().stream()?;
             while stream.advance() {
-                if let Ok(text) = std::str::from_utf8(stream.key())
-                    && let Ok(id) = text.parse::<i64>()
+                let Ok(text) = std::str::from_utf8(stream.key()) else {
+                    continue;
+                };
+                if let Ok(id) = text.parse::<i64>()
+                    && let Some(mut postings) = inverted.read_postings(
+                        &Term::from_field_text(self.fields.user, text),
+                        IndexRecordOption::Basic,
+                    )?
                 {
-                    out.insert(id);
+                    let mut doc = postings.doc();
+                    while doc != tantivy::TERMINATED {
+                        if !segment.is_deleted(doc) {
+                            out.insert(id);
+                            break;
+                        }
+                        doc = postings.advance();
+                    }
                 }
             }
         }

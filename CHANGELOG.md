@@ -44,6 +44,10 @@ follow [Semantic Versioning](https://semver.org/).
   upload counters.
 - Server and desktop are released as the paired **0.6.0** versions.
 
+### Fixed
+- Deleting an account now removes its search entries from the orphan check
+  immediately, without waiting for a Tantivy segment merge.
+
 ## [0.5.4] - 2026-11-20
 
 ### Changed
