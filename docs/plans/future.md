@@ -10,8 +10,9 @@ or implementation plan, reviewing its security impact, and choosing a release
 target.
 
 The goal of this page is memory, not momentum: capture the idea, why it
-matters, and the main risk while it is fresh. The selected next workstreams
-are detailed in [0.6.0-sharing.md](0.6.0-sharing.md).
+matters, and the main risk while it is fresh. The three selected workstreams
+shipped in 0.6.0; their design record is
+[0.6.0-sharing.md](0.6.0-sharing.md).
 
 ## Parked UI work
 
