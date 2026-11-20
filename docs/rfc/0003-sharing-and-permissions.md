@@ -74,11 +74,18 @@ anonymous surface is:
 - `GET /public/{token}/list/{path}` — folder listing
 - `GET /public/{token}/download/{path}` — file bytes
 - `POST /public/{token}/unlock` — password → HttpOnly, SameSite=Lax cookie
+- `PUT /public/{token}/upload?name={filename}` — upload-only links
 
 Unlock attempts are rate-limited with the same lockout policy as logins
 (per share, 5 failures / 15 minutes). Password checks and session hashes
-mirror the account-session machinery. Public write (upload) links are not
-supported yet.
+mirror the account-session machinery.
+
+Public **write** links (file requests, added in 0.6.0) are upload-only:
+`kind = "link"` with `permission = "write"` on a plaintext folder. They carry
+per-link file/byte caps and counters, reject encrypted/trashed/missing
+targets, and refuse `/list` and `/download`. Uploads are streamed, never
+overwrite (collision suffixes), and are counted only after a successful
+commit. The server never exposes the folder's existing contents.
 
 ## Data model (migration 0005)
 
