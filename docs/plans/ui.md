@@ -180,6 +180,8 @@ main pages pass axe; the file list is usable without a mouse.
 
 ### Phase 3 — Shared page and link controls (0.6.0, P0)
 
+Detailed preparation: [0.6.0-sharing.md](0.6.0-sharing.md).
+
 The APIs already exist; this phase is mostly UI:
 
 | Need | Existing API |
