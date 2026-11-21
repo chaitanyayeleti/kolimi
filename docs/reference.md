@@ -83,12 +83,18 @@ kolimi-server backup --data DIR --to DIR --retain N --offsite DIR
 kolimi-server verify --data DIR            # full BLAKE3/chunk verification
 kolimi-server migrate-manifests           # move legacy flat manifests to fanout
 kolimi-server audit list [--limit N] [--before ID]
-kolimi-server audit verify                 # entry chain + checkpoint headers/roots
-kolimi-server audit seal [--batch N]       # seal unsealed entries
+kolimi-server audit verify [--trusted-key HEX]... [--trusted-keys FILE]
+                           [--anchor-log FILE] [--require-signatures]
+kolimi-server audit seal [--batch N] [--key FILE]
+kolimi-server audit sign --key FILE [--checkpoint ID]... | --all
+kolimi-server audit keygen --out FILE [--label TEXT]
+kolimi-server audit head [--json]
 kolimi-server audit checkpoints [--limit N]
+kolimi-server audit anchors list [--limit N]
+kolimi-server audit anchors flush
 kolimi-server audit prune --checkpoint ID --to audit.jsonl
                                            # export + prune a sealed checkpoint
-kolimi-server audit verify-export --file audit.jsonl
+kolimi-server audit verify-export --file audit.jsonl [--trusted-key HEX]
                                            # verify a portable checkpoint bundle
 ```
 
@@ -112,15 +118,47 @@ marker) to a second path, typically a mounted NFS/SMB/rclone target.
 ### Audit checkpoints
 
 `audit seal` seals unsealed entries in batches (default 4,096); the janitor
-does the same automatically once 1,024 entries are pending. A checkpoint
-covers a contiguous entry range, carries an RFC 6962-style Merkle root, and
-links to the previous checkpoint header. Headers are never pruned.
+does the same automatically once 1,024 entries are pending or the oldest
+unsealed entry is older than `KOLIMI_AUDIT_SEAL_AGE_SECS` (default 86,400). A
+checkpoint covers a contiguous entry range, carries an RFC 6962-style Merkle
+root, and links to the previous checkpoint header. Headers are never pruned.
 `audit prune --checkpoint ID` exports a JSONL bundle (header plus entries),
 fsyncs it, deletes those entry bodies, and marks the header pruned.
 `audit verify` checks the retained entry chain from the anchor, every
 checkpoint header/link, and every available Merkle root.
 `audit verify-export` verifies a bundle independently. `--before ID` remains
 as a compatibility alias when it matches a checkpoint's last entry id.
+
+### Audit signing and anchoring
+
+`audit keygen --out FILE` writes a mode-`0600` Ed25519 key file. Keep it
+outside the data directory so backups do not contain it. Configure it with
+`KOLIMI_AUDIT_SIGNING_KEY`; new checkpoints are signed in the same
+transaction. `audit sign --key FILE --all` backfills existing checkpoints and
+`--checkpoint ID` countersigns one during rotation. A checkpoint may carry
+several signatures.
+
+`audit verify` trusts only keys supplied with `--trusted-key` or
+`--trusted-keys`; without them it reports signature counts but verifies
+nothing. With no explicit key, it falls back to the configured signing key
+and reports `trust_source: configured-key`. `--require-signatures` fails on
+an unsigned checkpoint. Bundle headers carry an optional `signatures` array,
+so `audit verify-export --trusted-key HEX` verifies the archive too.
+
+Anchoring publishes each signed checkpoint head as one JSON line:
+
+- `KOLIMI_AUDIT_ANCHOR_LOG` appends and fsyncs a journal (use WORM or an
+  independent mount; the same disk adds no protection).
+- `KOLIMI_AUDIT_ANCHOR_URL` (HTTPS, optional `KOLIMI_AUDIT_ANCHOR_TOKEN`)
+  POSTs the record with `Idempotency-Key: <checkpoint_hash>`; 2xx and 409 are
+  delivered, 408/429/5xx are retried, other 4xx are permanent.
+- The outbox is durable and is drained by the janitor; `audit anchors list`
+  and `audit anchors flush` inspect and retry it.
+
+`audit verify --anchor-log FILE` checks that every published checkpoint still
+exists locally with the same hash, and reports `rollback_detected` when local
+history is behind an anchor. `audit head` prints the latest record for manual
+publication. Anchor records contain no audit content.
 
 `audit prune` writes the selected prefix to a new JSONL file (it refuses to
 overwrite an existing path), fsyncs it, then deletes those rows and records
@@ -204,6 +242,10 @@ Notes:
 | `KOLIMI_PREVIEW_ALLOW_NO_LANDLOCK=1` | Permit preview decoding without Landlock (weaker sandbox; older kernels) |
 | `KOLIMI_METRICS_PER_USER=1` | Opt in to per-user usage gauges |
 | `KOLIMI_METRICS_TOKEN` | Read-only bearer token accepted only by `/metrics` |
+| `KOLIMI_AUDIT_SIGNING_KEY` | Ed25519 checkpoint signing key file (mode 0600, outside the data dir) |
+| `KOLIMI_AUDIT_ANCHOR_LOG` | Append-only JSONL anchor journal |
+| `KOLIMI_AUDIT_ANCHOR_URL`, `KOLIMI_AUDIT_ANCHOR_TOKEN` | HTTPS anchor sink and optional bearer token |
+| `KOLIMI_AUDIT_SEAL_AGE_SECS` | Seal an old unsealed audit tail (default 86400) |
 | `KOLIMI_AUTH_RATE_LIMIT` | Login/passkey attempts per client per 5 minutes (default 20) |
 | `KOLIMI_TRUST_PROXY=1` | Use `X-Forwarded-For` from a trusted proxy |
 | `KOLIMI_OTEL_ENDPOINT` | OTLP/gRPC traces (requires the `otel` feature) |

@@ -1,10 +1,12 @@
 # RFC 0014 — Audit checkpoint signing and external anchoring
 
-- **Status:** draft
+- **Status:** implemented (unreleased)
 - **Date:** 2026-11-21
 - **Depends on:** RFC 0013 (sealed audit checkpoints), the checkpoint header
   chain and Merkle roots from migration `0037`
-- **Implementation:** not started
+- **Implementation:** migration `0038_audit_checkpoint_signing.sql`; signer,
+  signature verification, anchor outbox, journal/HTTP sinks, CLI, and
+  janitor age/seal and drain
 
 ## Summary
 
@@ -192,8 +194,10 @@ same SQLite transaction.
 - No key configured: checkpoints are written unsigned, exactly as in 0.7.0.
 
 `serve` validates the configured key at startup but does not refuse to start.
-It logs a prominent error and retries loading the key on each seal, so fixing
-a path or permission recovers without a restart.
+It logs a prominent error, and the janitor retries loading the key on each
+pass. While the key cannot be loaded, sealing is refused rather than falling
+back to unsigned checkpoints; fixing a path or permission recovers without a
+restart.
 
 ### Backfill and countersigning
 

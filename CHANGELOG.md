@@ -4,6 +4,27 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Audit checkpoint signing and anchoring (RFC 0014): `audit keygen`,
+  `audit sign`, `audit head`, and `audit anchors`. Checkpoints can carry
+  detached Ed25519 signatures made with a key stored outside the data
+  directory; `audit verify` checks them against operator-supplied
+  `--trusted-key`/`--trusted-keys` and reports `rollback_detected` against an
+  `--anchor-log`. Export bundles carry signatures. `audit verify-export
+  --trusted-key` checks the archive independently.
+- Anchor delivery to an append-only JSONL journal
+  (`KOLIMI_AUDIT_ANCHOR_LOG`) and/or an HTTPS sink
+  (`KOLIMI_AUDIT_ANCHOR_URL`, optional `KOLIMI_AUDIT_ANCHOR_TOKEN`) from a
+  durable outbox with idempotency keys and exponential backoff. Anchor
+  records contain no paths, users, actions, or audit details.
+
+### Changed
+- The audit janitor also seals when the oldest unsealed entry is older than
+  `KOLIMI_AUDIT_SEAL_AGE_SECS` (default 24 hours), bounding the window that
+  signatures and anchors do not cover.
+
 ## [0.7.0] - 2026-11-21
 
 ### Added

@@ -67,7 +67,7 @@ client ──(TLS, untrusted network)──> kolimi-server
 | A2 DAV namespace shadowing | `principals`/`calendars`/`addressbooks` reserved at the root; principals/homes are owner-only and 404 for everyone else | Implemented |
 | A4 third-party app | Authenticated API/DAV only, per-user permission checks | Implemented |
 | A5 operator reads content | optional client-side E2EE (v1/v2 per-file keys; MLS groups since 0.5.1, not externally audited); encrypted names supported, but sizes/timestamps/structure remain visible | Partial (E2EE alpha) |
-| Operator tampers with or deletes audit records | BLAKE3 hash-chained append-only audit log; `audit verify` detects edits, deletions, and reordering. Retention uses `audit prune`, which exports the prefix before deleting it and records the last pruned hash as an anchor; verification resumes from that anchor. | Implemented |
+| Operator tampers with or deletes audit records | BLAKE3 hash-chained append-only audit log with sealed Merkle checkpoints; `audit verify` detects edits, deletions, and reordering. Optional Ed25519 checkpoint signatures with a key outside the data directory defeat database/backup-only tampering; anchoring signed heads to a WORM or independently controlled sink detects a host-level rewrite or rollback. Retention exports the prefix before deleting it and records the last pruned hash as an anchor. | Implemented |
 | A6 MITM | rustls, TLS 1.3 only, HSTS, no mixed content in UI | Implemented |
 | A7 memory scraping | `zeroize`/`secrecy` for secrets, no keys in logs; full-disk encryption is the operator's responsibility | Partial |
 | A8 malicious dependency | `cargo-deny`, `cargo-audit`, `cargo-vet`, minimal dep tree, pinned lockfile in CI | Implemented |

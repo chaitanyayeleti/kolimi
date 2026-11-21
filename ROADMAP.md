@@ -148,6 +148,16 @@ describe MLS as audited before this completes.
 - Review install commands and audit status during every release so they
   cannot drift again.
 
+### 5. Audit signing and anchoring rollout
+
+RFC 0014 is implemented on `main` but not released: Ed25519 checkpoint
+signatures, an append-only journal, and an HTTPS anchor sink with a durable
+outbox. Before relying on it, choose an anchor target outside the server
+(WORM or a second host), generate the key outside the data directory, pin the
+public key somewhere independent, and test a tampered-database and
+rolled-back-snapshot verification. `audit verify --anchor-log` is the check.
+Signing on the same host is defense in depth, not proof against root.
+
 ## Deferred / non-goals
 
 - **Future core ideas.** See [docs/plans/future.md](docs/plans/future.md)

@@ -75,6 +75,11 @@ pub struct Metrics {
     janitor_duration: HistogramVec,
     janitor_events: IntCounterVec,
     janitor_last_success: IntGauge,
+    audit_checkpoints_signed: IntCounter,
+    audit_signing_errors: IntCounter,
+    audit_anchor_pending: IntGauge,
+    audit_anchor_delivered: IntCounterVec,
+    audit_anchor_failures: IntCounterVec,
     process_rss: IntGauge,
     process_threads: IntGauge,
     process_fds: IntGauge,
@@ -320,6 +325,32 @@ impl Metrics {
             "kolimi_janitor_last_success_timestamp_seconds",
             "Unix time of the last successful janitor pass",
         )?;
+        let audit_checkpoints_signed = IntCounter::new(
+            "kolimi_audit_checkpoints_signed_total",
+            "Audit checkpoints sealed with a signature",
+        )?;
+        let audit_signing_errors = IntCounter::new(
+            "kolimi_audit_signing_errors_total",
+            "Audit checkpoint sealing failures caused by signing",
+        )?;
+        let audit_anchor_pending = IntGauge::new(
+            "kolimi_audit_anchor_pending",
+            "Checkpoint anchors still waiting for a configured sink",
+        )?;
+        let audit_anchor_delivered = IntCounterVec::new(
+            Opts::new(
+                "kolimi_audit_anchor_delivered_total",
+                "Checkpoint anchors delivered, by sink",
+            ),
+            &["sink"],
+        )?;
+        let audit_anchor_failures = IntCounterVec::new(
+            Opts::new(
+                "kolimi_audit_anchor_failures_total",
+                "Checkpoint anchor delivery failures, by sink",
+            ),
+            &["sink"],
+        )?;
         let process_rss = IntGauge::new(
             "kolimi_process_resident_memory_bytes",
             "Resident memory of the server process (Linux)",
@@ -396,6 +427,11 @@ impl Metrics {
         registry.register(Box::new(janitor_duration.clone()))?;
         registry.register(Box::new(janitor_events.clone()))?;
         registry.register(Box::new(janitor_last_success.clone()))?;
+        registry.register(Box::new(audit_checkpoints_signed.clone()))?;
+        registry.register(Box::new(audit_signing_errors.clone()))?;
+        registry.register(Box::new(audit_anchor_pending.clone()))?;
+        registry.register(Box::new(audit_anchor_delivered.clone()))?;
+        registry.register(Box::new(audit_anchor_failures.clone()))?;
         registry.register(Box::new(process_rss.clone()))?;
         registry.register(Box::new(process_threads.clone()))?;
         registry.register(Box::new(process_fds.clone()))?;
@@ -470,6 +506,11 @@ impl Metrics {
             janitor_duration,
             janitor_events,
             janitor_last_success,
+            audit_checkpoints_signed,
+            audit_signing_errors,
+            audit_anchor_pending,
+            audit_anchor_delivered,
+            audit_anchor_failures,
             process_rss,
             process_threads,
             process_fds,
@@ -723,6 +764,37 @@ impl Metrics {
         if count > 0 {
             self.janitor_events.with_label_values(&[kind]).inc_by(count);
         }
+    }
+
+    /// Records signed audit checkpoints.
+    pub fn audit_checkpoints_signed(&self, count: u64) {
+        if count > 0 {
+            self.audit_checkpoints_signed.inc_by(count);
+        }
+    }
+
+    /// Records an audit-signing failure.
+    pub fn audit_signing_error(&self) {
+        self.audit_signing_errors.inc();
+    }
+
+    /// Sets the pending-anchor gauge.
+    pub fn set_audit_anchor_pending(&self, pending: i64) {
+        self.audit_anchor_pending.set(pending);
+    }
+
+    /// Records delivered anchor records for one sink.
+    pub fn audit_anchor_delivered(&self, sink: &str, count: u64) {
+        if count > 0 {
+            self.audit_anchor_delivered
+                .with_label_values(&[sink])
+                .inc_by(count);
+        }
+    }
+
+    /// Records an anchor delivery failure for one sink.
+    pub fn audit_anchor_failure(&self, sink: &str) {
+        self.audit_anchor_failures.with_label_values(&[sink]).inc();
     }
 
     fn observe(

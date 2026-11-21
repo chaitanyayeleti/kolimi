@@ -21,7 +21,7 @@ Last full verification: **0.7.0** (2026-11-20).
 | [0011 — Client unlock](0011-e2ee-client-unlock.md) | implemented | shipped (desktop) | `SyncError::Locked`, tray state, keychain unlock |
 | [0012 — MLS groups](0012-mls-groups.md) | implemented | shipped; **audit pending** | Node-scoped groups, epochs, keyring, write shares, device revoke |
 | [0013 — Sealed audit checkpoints](0013-audit-checkpoints.md) | implemented | shipped (0.7.0) | Merkle-rooted checkpoint blocks; prune by checkpoint; signing/external anchors later |
-| [0014 — Checkpoint signing and anchoring](0014-audit-checkpoint-signing.md) | draft | not started | Ed25519 checkpoint signatures; optional append-only journal and HTTPS anchor sink |
+| [0014 — Checkpoint signing and anchoring](0014-audit-checkpoint-signing.md) | implemented | shipped (unreleased) | Ed25519 checkpoint signatures; optional append-only journal and HTTPS anchor sink |
 
 ## Status conventions
 

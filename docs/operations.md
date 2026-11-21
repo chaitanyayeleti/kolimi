@@ -294,9 +294,11 @@ kolimi-server audit verify-export --file /backups/audit-12.jsonl
 ```
 
 `audit seal` creates one or more checkpoints over the unsealed tail; the
-janitor also seals automatically once 1,024 entries are pending. Checkpoint
-headers are retained forever; they are small and form the permanent history.
-A checkpoint commits to its entries with an RFC 6962-style Merkle root.
+janitor seals automatically once 1,024 entries are pending **or** the oldest
+unsealed entry is older than `KOLIMI_AUDIT_SEAL_AGE_SECS` (default 24 hours).
+Checkpoint headers are retained forever; they are small and form the
+permanent history. A checkpoint commits to its entries with an RFC 6962-style
+Merkle root.
 
 `audit prune` exports a checkpoint's entries to a new JSONL bundle (header
 line plus one line per entry), fsyncs it, then deletes those rows and marks
@@ -310,8 +312,93 @@ in order and store each bundle with the same care as the database.
 
 Administrators can read the same log over HTTP: `GET /api/audit` accepts
 `limit`, `before`, `action`, and `subject`, and `GET /api/audit/verify`
-reports the entry chain, checkpoint counts, latest checkpoint, and anchor.
-Both are admin-only and never expose chain hashes.
+reports the entry chain, checkpoint counts, signature counts, and anchors.
+Both are admin-only and never expose chain hashes or audit details.
+
+### Signing checkpoints
+
+Signing protects checkpoint history against database-only tampering and
+untrusted backup restores. It does not protect against a full host compromise:
+the key is on the same machine.
+
+```sh
+sudo -u kolimi kolimi-server audit keygen \
+  --out /etc/kolimi/audit-signing.key --label main
+sudo chmod 600 /etc/kolimi/audit-signing.key
+```
+
+Keep the key outside `/var/lib/kolimi` so it is not in backups. The server
+refuses a key file that is group/other readable or a symlink. Configure it and
+seal as usual:
+
+```sh
+KOLIMI_AUDIT_SIGNING_KEY=/etc/kolimi/audit-signing.key
+kolimi-server audit seal                         # signs new checkpoints
+kolimi-server audit sign --key /etc/kolimi/audit-signing.key --all
+                                                 # backfill / rotate
+```
+
+If a key is configured but cannot be read, sealing is refused: the janitor
+logs the error, increments `kolimi_audit_signing_errors_total`, and retries on
+the next pass. It never writes a silently unsigned checkpoint. Sealing resumes
+once the key is available.
+
+Verify against a public key you keep outside the server (a ticket, a password
+manager, another host):
+
+```sh
+kolimi-server audit verify --trusted-key <hex-public-key> --require-signatures
+kolimi-server audit verify --trusted-keys /etc/kolimi/audit-trusted-keys
+```
+
+Using the configured key automatically is convenience only and reports
+`trust_source: configured-key`. A key from an independent system is stronger
+evidence. Rotation: generate a new key, countersign the last checkpoint with
+it (`audit sign --key NEW --checkpoint ID`), update the trusted set, then
+switch the configured key.
+
+### External anchoring
+
+A signature on the same host stops database edits, not a compromised host.
+Anchoring publishes the signed checkpoint head where the server cannot
+rewrite it.
+
+```sh
+# Append-only journal, ideally WORM or on an independent mount.
+KOLIMI_AUDIT_ANCHOR_LOG=/mnt/audit-anchors/kolimi.jsonl
+
+# Or an HTTPS endpoint that stores each record by Idempotency-Key.
+KOLIMI_AUDIT_ANCHOR_URL=https://anchors.example.net/kolimi
+KOLIMI_AUDIT_ANCHOR_TOKEN=...          # optional bearer token
+```
+
+Every sealed checkpoint creates a small JSON record (ids, range, Merkle root,
+checkpoint hash, signatures; no paths, users, actions, or details). The
+janitor appends it to the journal and/or POSTs it, retrying from a durable
+outbox with exponential backoff. Sink failure never blocks sealing. Inspect
+pending records with `kolimi-server audit anchors`.
+
+Verify against a copy of the anchor log kept outside the server:
+
+```sh
+kolimi-server audit verify --trusted-keys FILE --anchor-log /mnt/audit-anchors/kolimi.jsonl
+```
+
+This detects a checkpoint header that was deleted, a hash that no longer
+matches, and a local database older than a published head (`rollback_detected`).
+`kolimi-server audit head` prints the latest anchor record for manual
+publication (a ticket, an email, a separate system). An anchor only covers
+events through its checkpoint; the 24-hour seal trigger bounds that gap.
+
+A journal on the same disk as the data directory adds no protection. Use an
+object-lock/WORM mount, an append-only export, or the HTTPS sink on another
+host. Anchor records are not secret, but they do reveal audit volume and
+checkpoint timing.
+
+Enabling anchoring later does not backfill the outbox. Publish the current
+head once with `kolimi-server audit head`; because every checkpoint commits
+to the previous one, that single record covers the earlier chain. New
+checkpoints are anchored automatically.
 
 Events cover logins and failures, logouts, passkeys, TOTP, password changes,
 profile edits, invite creation/revocation/acceptance, user administration,
@@ -338,10 +425,15 @@ tokens, and file bytes are never logged.
 - search-indexer passes, duration, and documents indexed/removed
 - janitor passes/events, process RSS/CPU/threads/FDs on Linux, build
   version, and start time
+- audit checkpoints signed, signing errors, anchors pending, and anchor
+  deliveries/failures by sink
 
 Labels never contain raw request paths, file names, or user identifiers.
 User/quota and database-snapshot gauges are rebuilt at most every 30 seconds;
 per-user gauges are opt-in.
+
+Alert on `kolimi_audit_signing_errors_total` increasing and on
+`kolimi_audit_anchor_pending` staying above zero for more than a day.
 
 Opening `/metrics` in a browser (which sends `Accept: text/html`) shows a
 read-only **HTML dashboard** instead — metric families as cards, with a

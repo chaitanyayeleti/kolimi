@@ -183,13 +183,56 @@ enum AuditCommand {
         #[arg(long)]
         before: Option<i64>,
     },
-    /// Verify the hash chain and every sealed checkpoint.
-    Verify,
+    /// Verify the hash chain, checkpoint headers, signatures, and anchors.
+    Verify {
+        /// Trusted Ed25519 public key (hex); repeatable.
+        #[arg(long)]
+        trusted_key: Vec<String>,
+        /// File with `key_id public_key_hex [label]` lines.
+        #[arg(long)]
+        trusted_keys: Option<PathBuf>,
+        /// JSONL anchor log to cross-check.
+        #[arg(long)]
+        anchor_log: Option<PathBuf>,
+        /// Fail on any checkpoint without a valid trusted signature.
+        #[arg(long)]
+        require_signatures: bool,
+    },
     /// Seal unsealed entries into audit checkpoints.
     Seal {
         /// Maximum entries per checkpoint batch.
         #[arg(long, default_value_t = 4096)]
         batch: i64,
+        /// Signing key file (defaults to KOLIMI_AUDIT_SIGNING_KEY).
+        #[arg(long, env = "KOLIMI_AUDIT_SIGNING_KEY")]
+        key: Option<PathBuf>,
+    },
+    /// Sign existing checkpoints (backfill or key rotation).
+    Sign {
+        /// Signing key file (defaults to KOLIMI_AUDIT_SIGNING_KEY).
+        #[arg(long, env = "KOLIMI_AUDIT_SIGNING_KEY")]
+        key: PathBuf,
+        /// Specific checkpoint id; repeatable.
+        #[arg(long = "checkpoint")]
+        checkpoint: Vec<i64>,
+        /// Sign every checkpoint lacking this key's signature.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Generate an Ed25519 audit signing key.
+    Keygen {
+        /// New key file (must not exist).
+        #[arg(long)]
+        out: PathBuf,
+        /// Optional operator label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Print the latest checkpoint's anchor record.
+    Head {
+        /// Pretty-print the JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// List sealed checkpoint headers.
     Checkpoints {
@@ -214,7 +257,27 @@ enum AuditCommand {
         /// JSONL bundle written by `audit prune`.
         #[arg(long)]
         file: PathBuf,
+        /// Trusted Ed25519 public key (hex); repeatable.
+        #[arg(long)]
+        trusted_key: Vec<String>,
     },
+    /// Inspect or drain the anchor outbox.
+    Anchors {
+        #[command(subcommand)]
+        command: AnchorCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AnchorCommand {
+    /// List anchor-outbox rows, newest first.
+    List {
+        /// Maximum number of rows.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Attempt delivery to the configured sinks now.
+    Flush,
 }
 
 #[derive(Subcommand)]
@@ -321,7 +384,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn serve(args: ServeArgs, data: PathBuf) -> Result<(), Box<dyn Error>> {
-    let state = AppState::init(&data, args.secure_cookies, &args.origin).await?;
+    let mut state = AppState::init(&data, args.secure_cookies, &args.origin).await?;
+    let audit_signing_key = std::env::var_os("KOLIMI_AUDIT_SIGNING_KEY").map(PathBuf::from);
+    let audit_signer = match audit_signing_key.as_deref() {
+        Some(path) => match kolimi_db::AuditSigner::load(path) {
+            Ok(signer) => {
+                tracing::info!(key_id = signer.key_id(), "audit checkpoint signing enabled");
+                Some(std::sync::Arc::new(signer))
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "audit signing key unavailable; sealing will be refused until it is fixed"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    state = state.with_audit_signing(audit_signing_key, audit_signer);
+    match kolimi_server::anchor::AnchorConfig::from_env() {
+        Ok(Some(config)) => {
+            tracing::info!(
+                journal = config
+                    .journal
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                url = config.url.as_deref().unwrap_or(""),
+                "audit checkpoint anchoring enabled"
+            );
+            state = state.with_audit_anchors(Some(std::sync::Arc::new(config)));
+        }
+        Ok(None) => {}
+        Err(error) => tracing::error!(%error, "audit anchoring disabled by configuration error"),
+    }
     tokio::spawn(kolimi_server::janitor::run(state.clone()));
     tokio::spawn(kolimi_server::search_indexer::run(state.clone()));
     let app = build_app(state);
@@ -946,8 +1042,46 @@ async fn audit_command(command: AuditCommand, data: PathBuf) -> Result<(), Box<d
                 );
             }
         }
-        AuditCommand::Verify => {
-            let verify = db.audit_verify().await?;
+        AuditCommand::Verify {
+            trusted_key,
+            trusted_keys,
+            anchor_log,
+            require_signatures,
+        } => {
+            let mut keys = Vec::new();
+            for key in trusted_key {
+                keys.push(kolimi_db::TrustedAuditKey::from_hex(&key)?);
+            }
+            if let Some(path) = trusted_keys {
+                keys.extend(kolimi_db::TrustedAuditKey::parse_file(&path)?);
+            }
+            let mut trust_source = if keys.is_empty() {
+                "none".to_string()
+            } else {
+                "trusted-keys".to_string()
+            };
+            if keys.is_empty()
+                && let Some(path) = std::env::var_os("KOLIMI_AUDIT_SIGNING_KEY")
+            {
+                match kolimi_db::AuditSigner::load(Path::new(&path)) {
+                    Ok(signer) => {
+                        keys.push(kolimi_db::TrustedAuditKey::from_parts(
+                            signer.key_id(),
+                            signer.public_key().to_vec(),
+                        )?);
+                        trust_source = "configured-key".to_string();
+                    }
+                    Err(error) => eprintln!("configured signing key unavailable: {error}"),
+                }
+            }
+            let verify = db
+                .audit_verify_with(kolimi_db::AuditVerifyOptions {
+                    trusted_keys: keys,
+                    require_signatures,
+                    anchor_log,
+                    trust_source: Some(trust_source),
+                })
+                .await?;
             match verify.first_bad {
                 None => println!(
                     "audit chain ok ({} entries, {} checkpoints, {} pruned)",
@@ -958,8 +1092,27 @@ async fn audit_command(command: AuditCommand, data: PathBuf) -> Result<(), Box<d
                         "audit chain BROKEN at entry {id} ({} entries, {} checkpoints checked)",
                         verify.entries, verify.checkpoints
                     );
-                    std::process::exit(1);
                 }
+            }
+            println!(
+                "signatures: {} signed, {} verified, {} unsigned, {} untrusted, {} errors (trust: {})",
+                verify.signed_checkpoints,
+                verify.verified_signatures,
+                verify.unsigned_checkpoints,
+                verify.untrusted_signatures,
+                verify.signature_errors,
+                verify.trust_source
+            );
+            if verify.rollback_detected {
+                eprintln!("ROLLBACK DETECTED: a published anchor is newer than local history");
+            }
+            if let Some(latest) = &verify.latest_anchor {
+                println!(
+                    "anchors: {} checked, latest checkpoint {} through entry {}",
+                    verify.anchors_checked, latest.checkpoint_id, latest.last_entry_id
+                );
+            } else if verify.anchors_checked > 0 {
+                println!("anchors: {} checked", verify.anchors_checked);
             }
             if let Some(latest) = verify.latest_checkpoint {
                 println!(
@@ -973,24 +1126,86 @@ async fn audit_command(command: AuditCommand, data: PathBuf) -> Result<(), Box<d
                     anchor.pruned_through, anchor.pruned_entries
                 );
             }
+            if verify.first_bad.is_some() || verify.signature_errors > 0 || verify.rollback_detected
+            {
+                std::process::exit(1);
+            }
         }
-        AuditCommand::Seal { batch } => {
+        AuditCommand::Seal { batch, key } => {
+            let signer = match key {
+                Some(path) => Some(kolimi_db::AuditSigner::load(&path)?),
+                None => None,
+            };
+            let anchors = kolimi_server::anchor::AnchorConfig::from_env()
+                .map_err(|error| format!("audit anchoring: {error}"))?;
+            let enqueue_anchor = anchors.as_ref().is_some_and(|config| config.enabled());
             let mut sealed = 0u64;
-            while let Some(checkpoint) = db.audit_seal(batch).await? {
+            while let Some(checkpoint) = db
+                .audit_seal_with(batch, signer.as_ref(), enqueue_anchor)
+                .await?
+            {
                 println!(
-                    "sealed checkpoint {}: entries {}..={} ({} entries, root {})",
+                    "sealed checkpoint {}: entries {}..={} ({} entries, root {}{})",
                     checkpoint.id,
                     checkpoint.first_entry_id,
                     checkpoint.last_entry_id,
                     checkpoint.entry_count,
-                    hex::encode(&checkpoint.merkle_root)
+                    hex::encode(&checkpoint.merkle_root),
+                    if signer.is_some() { ", signed" } else { "" }
                 );
                 sealed += 1;
             }
             if sealed == 0 {
                 println!("no unsealed audit entries");
             }
+            if let (Some(config), true) = (anchors.as_ref(), enqueue_anchor) {
+                match kolimi_server::anchor::drain(&db, config, None, 100).await {
+                    Ok(report) => println!(
+                        "anchors: {} journaled, {} delivered, {} failed",
+                        report.journaled, report.delivered, report.failed
+                    ),
+                    Err(error) => eprintln!("anchor drain failed: {error}"),
+                }
+            }
         }
+        AuditCommand::Sign {
+            key,
+            checkpoint,
+            all,
+        } => {
+            let signer = kolimi_db::AuditSigner::load(&key)?;
+            if all && !checkpoint.is_empty() {
+                return Err("use either --checkpoint or --all, not both".into());
+            }
+            let signed = if all {
+                db.audit_sign_checkpoints(None, true, &signer).await?
+            } else if checkpoint.is_empty() {
+                return Err("specify --checkpoint ID or --all".into());
+            } else {
+                let mut count = 0;
+                for id in checkpoint {
+                    count += db.audit_sign_checkpoints(Some(id), false, &signer).await?;
+                }
+                count
+            };
+            println!("signed {signed} checkpoint(s) with key {}", signer.key_id());
+        }
+        AuditCommand::Keygen { out, label } => {
+            let signer = kolimi_db::AuditSigner::generate(&out, label.as_deref())?;
+            println!("key id: {}", signer.key_id());
+            println!("public key: {}", signer.public_key_hex());
+            println!("wrote {}", out.display());
+        }
+        AuditCommand::Head { json } => match db.audit_anchor_record(None).await? {
+            Some(record) => {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&record)?);
+                } else {
+                    println!("{}", serde_json::to_string(&record)?);
+                }
+            }
+            None => println!("no sealed checkpoints"),
+        },
         AuditCommand::Checkpoints { limit } => {
             for checkpoint in db.audit_checkpoints(limit).await? {
                 println!(
@@ -1042,14 +1257,50 @@ async fn audit_command(command: AuditCommand, data: PathBuf) -> Result<(), Box<d
                 report.anchor_hash
             );
         }
-        AuditCommand::VerifyExport { file } => match db.audit_verify_export(&file).await {
-            Ok(verify) => println!(
-                "export ok: checkpoint {} with {} entries",
-                verify.checkpoint_id, verify.entries
-            ),
-            Err(error) => {
-                eprintln!("export BROKEN: {error}");
-                std::process::exit(1);
+        AuditCommand::VerifyExport { file, trusted_key } => {
+            let mut keys = Vec::new();
+            for key in trusted_key {
+                keys.push(kolimi_db::TrustedAuditKey::from_hex(&key)?);
+            }
+            match db.audit_verify_export_with(&file, &keys).await {
+                Ok(verify) => println!(
+                    "export ok: checkpoint {} with {} entries, {} signatures ({} trusted)",
+                    verify.checkpoint_id,
+                    verify.entries,
+                    verify.signatures,
+                    verify.trusted_signatures
+                ),
+                Err(error) => {
+                    eprintln!("export BROKEN: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        AuditCommand::Anchors { command } => match command {
+            AnchorCommand::List { limit } => {
+                for row in db.audit_anchor_outbox(limit).await? {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "checkpoint_id": row.checkpoint_id,
+                            "journaled_at": row.journaled_at,
+                            "delivered_at": row.delivered_at,
+                            "attempts": row.attempts,
+                            "next_attempt_at": row.next_attempt_at,
+                            "last_error": row.last_error,
+                        })
+                    );
+                }
+            }
+            AnchorCommand::Flush => {
+                let config = kolimi_server::anchor::AnchorConfig::from_env()
+                    .map_err(|error| format!("audit anchoring: {error}"))?
+                    .ok_or("no anchor sinks configured (set KOLIMI_AUDIT_ANCHOR_LOG or KOLIMI_AUDIT_ANCHOR_URL)")?;
+                let report = kolimi_server::anchor::drain(&db, &config, None, 100).await?;
+                println!(
+                    "anchors: {} journaled, {} delivered, {} failed",
+                    report.journaled, report.delivered, report.failed
+                );
             }
         },
     }

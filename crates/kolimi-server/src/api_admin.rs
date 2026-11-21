@@ -294,7 +294,8 @@ pub async fn list_audit(
     .into_response()
 }
 
-/// `GET /api/audit/verify` — recompute the hash chain.
+/// `GET /api/audit/verify` — recompute the hash chain, signatures, and
+/// anchors. Trust comes from the server's configured signing key.
 pub async fn verify_audit(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
@@ -302,15 +303,51 @@ pub async fn verify_audit(
     if let Some(response) = require_admin(&user) {
         return response;
     }
-    match state.db.audit_verify().await {
+    let mut trusted_keys = Vec::new();
+    if let Some(signer) = state.audit_signer.as_deref()
+        && let Ok(key) =
+            kolimi_db::TrustedAuditKey::from_parts(signer.key_id(), signer.public_key().to_vec())
+    {
+        trusted_keys.push(key);
+    }
+    let trust_source = if trusted_keys.is_empty() {
+        "none"
+    } else {
+        "configured-key"
+    };
+    let verify = state
+        .db
+        .audit_verify_with(kolimi_db::AuditVerifyOptions {
+            trusted_keys,
+            require_signatures: false,
+            anchor_log: state
+                .audit_anchors
+                .as_deref()
+                .and_then(|config| config.journal.clone())
+                .filter(|path| path.exists()),
+            trust_source: Some(trust_source.to_string()),
+        })
+        .await;
+    match verify {
         Ok(verify) => {
             let anchor = state.db.audit_anchor().await.ok().flatten();
             Json(json!({
-                "ok": verify.first_bad.is_none(),
+                "ok": verify.first_bad.is_none() && !verify.rollback_detected,
                 "entries": verify.entries,
                 "checkpoints": verify.checkpoints,
                 "pruned_checkpoints": verify.pruned_checkpoints,
+                "signed_checkpoints": verify.signed_checkpoints,
+                "verified_signatures": verify.verified_signatures,
+                "unsigned_checkpoints": verify.unsigned_checkpoints,
+                "signature_errors": verify.signature_errors,
+                "anchors_checked": verify.anchors_checked,
+                "rollback_detected": verify.rollback_detected,
+                "trust_source": verify.trust_source,
                 "first_bad": verify.first_bad,
+                "latest_anchor": verify.latest_anchor.map(|anchor| json!({
+                    "checkpoint_id": anchor.checkpoint_id,
+                    "last_entry_id": anchor.last_entry_id,
+                })),
                 "latest_checkpoint": verify.latest_checkpoint.map(|checkpoint| json!({
                     "id": checkpoint.id,
                     "last_entry_id": checkpoint.last_entry_id,

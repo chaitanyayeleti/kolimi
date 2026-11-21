@@ -25,9 +25,11 @@ mod sharing;
 
 pub use app_passwords::AppPassword;
 pub use audit::{
-    AUDIT_CHECKPOINT_BATCH, AUDIT_CHECKPOINT_ENTRIES, AuditAnchor, AuditCheckpoint,
-    AuditCheckpointHead, AuditEntry, AuditExportVerify, AuditPageQuery, AuditPruneReport,
-    AuditVerify,
+    AUDIT_ANCHOR_KIND, AUDIT_CHECKPOINT_BATCH, AUDIT_CHECKPOINT_ENTRIES, AUDIT_SIGNING_KEY_MAGIC,
+    AuditAnchor, AuditAnchorHead, AuditAnchorOutboxRow, AuditAnchorRecord, AuditAnchorSignature,
+    AuditCheckpoint, AuditCheckpointHead, AuditCheckpointSignature, AuditEntry, AuditExportVerify,
+    AuditPageQuery, AuditPruneReport, AuditSigner, AuditVerify, AuditVerifyOptions,
+    TrustedAuditKey, read_anchor_log,
 };
 pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
 pub use devices::{Device, Enrollment, MAX_DEVICE_KEY_BYTES};

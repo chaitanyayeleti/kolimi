@@ -4,6 +4,7 @@
 //! into a single axum application. TLS termination lives in the binary.
 
 pub mod admin;
+pub mod anchor;
 pub mod api;
 pub mod api_2fa;
 pub mod api_admin;
@@ -121,6 +122,12 @@ pub struct AppState {
     /// Optional read-only bearer token accepted only by `/metrics`
     /// (`KOLIMI_METRICS_TOKEN`). Never grants access to other routes.
     pub metrics_token: Option<String>,
+    /// Optional audit checkpoint signing key (RFC 0014).
+    pub audit_signer: Option<Arc<kolimi_db::AuditSigner>>,
+    /// Configured signing-key path; sealing is refused while it cannot load.
+    pub audit_signing_key: Option<PathBuf>,
+    /// Optional audit anchor sinks (RFC 0014).
+    pub audit_anchors: Option<Arc<anchor::AnchorConfig>>,
 }
 
 impl AppState {
@@ -200,7 +207,27 @@ impl AppState {
             dummy_password_hash,
             trust_proxy,
             metrics_token,
+            audit_signer: None,
+            audit_signing_key: None,
+            audit_anchors: None,
         })
+    }
+
+    /// Sets the audit signing key and its configured path (RFC 0014).
+    pub fn with_audit_signing(
+        mut self,
+        key: Option<PathBuf>,
+        signer: Option<Arc<kolimi_db::AuditSigner>>,
+    ) -> Self {
+        self.audit_signing_key = key;
+        self.audit_signer = signer;
+        self
+    }
+
+    /// Sets the audit anchor sinks (RFC 0014).
+    pub fn with_audit_anchors(mut self, anchors: Option<Arc<anchor::AnchorConfig>>) -> Self {
+        self.audit_anchors = anchors;
+        self
     }
 }
 

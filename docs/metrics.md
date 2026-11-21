@@ -213,6 +213,11 @@ are rebuilt at most every 30 seconds, not on every scrape.
 | `kolimi_janitor_duration_seconds` | histogram | `result` | Pass duration |
 | `kolimi_janitor_events_total` | counter | `kind` | Objects processed |
 | `kolimi_janitor_last_success_timestamp_seconds` | gauge | — | Last successful pass |
+| `kolimi_audit_checkpoints_signed_total` | counter | — | Checkpoints sealed with a signature |
+| `kolimi_audit_signing_errors_total` | counter | — | Sealing failures caused by signing |
+| `kolimi_audit_anchor_pending` | gauge | — | Anchors waiting for a configured sink |
+| `kolimi_audit_anchor_delivered_total` | counter | `sink` | `journal` / `http` |
+| `kolimi_audit_anchor_failures_total` | counter | `sink` | `journal` / `http` |
 | `kolimi_process_resident_memory_bytes` | gauge | — | RSS (Linux) |
 | `kolimi_process_threads` | gauge | — | Thread count (Linux) |
 | `kolimi_process_open_fds` | gauge | — | Open file descriptors (Linux) |
@@ -225,7 +230,9 @@ Janitor event kinds include `retention_users`, `trash_purged`,
 `manifests_migrated`, `scrub_users`, `link_sessions_expired`,
 `enrollments_expired`, `mls_key_packages_pruned`, `mls_devices_pruned`,
 `mls_messages_pruned`, `mls_keyrings_pruned`, `scrub_checked`,
-`scrub_corrupt`, `reconciled`, and `audit_checkpoints_sealed`.
+`scrub_corrupt`, `reconciled`, `audit_checkpoints_sealed`,
+`audit_checkpoints_signed`, `audit_anchors_journaled`, and
+`audit_anchors_delivered`.
 
 The janitor and indexer now schedule bounded per-account batches: accounts
 with expired trash/versions or an uncollected delete go first, then the

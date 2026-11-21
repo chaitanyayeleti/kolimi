@@ -7,9 +7,11 @@
 //! linear. The log is tamper-evident, not fail-closed: callers decide
 //! whether an append failure aborts the audited operation.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
+use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqliteConnection;
@@ -18,6 +20,15 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use futures_util::StreamExt;
 
 use crate::{AUDIT_ENTRIES, Db, DbError, now_millis};
+
+/// Magic line of an audit signing key file (RFC 0014).
+pub const AUDIT_SIGNING_KEY_MAGIC: &str = "kolimi-audit-signing-key-v1";
+/// Domain separator for checkpoint signatures.
+pub const AUDIT_SIGNATURE_DOMAIN: &str = "kolimi-audit-checkpoint-signature-v1";
+/// Domain separator for signing-key ids.
+pub const AUDIT_KEY_ID_DOMAIN: &str = "kolimi-audit-key-v1";
+/// Anchor record kind written to journals and HTTP sinks.
+pub const AUDIT_ANCHOR_KIND: &str = "kolimi-audit-anchor-v1";
 
 /// One audit entry.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -64,6 +75,24 @@ pub struct AuditVerify {
     pub checkpoints: u64,
     /// Checkpoints whose entry bodies were pruned.
     pub pruned_checkpoints: u64,
+    /// Checkpoints carrying at least one signature.
+    pub signed_checkpoints: u64,
+    /// Signatures verified against a trusted key.
+    pub verified_signatures: u64,
+    /// Checkpoints with no signature at all.
+    pub unsigned_checkpoints: u64,
+    /// Signatures whose key is not trusted.
+    pub untrusted_signatures: u64,
+    /// Signatures that failed verification.
+    pub signature_errors: u64,
+    /// Anchor records checked against the local chain.
+    pub anchors_checked: u64,
+    /// A published head is newer than local history.
+    pub rollback_detected: bool,
+    /// Where trust came from (`trusted-keys`, `configured-key`, `none`).
+    pub trust_source: String,
+    /// Newest anchor in the supplied log.
+    pub latest_anchor: Option<AuditAnchorHead>,
     /// First bad entry or checkpoint boundary, if any.
     pub first_bad: Option<i64>,
     /// Latest checkpoint, when one exists.
@@ -77,6 +106,10 @@ pub struct AuditExportVerify {
     pub checkpoint_id: i64,
     /// Entries whose hashes were replayed.
     pub entries: u64,
+    /// Signatures present in the bundle.
+    pub signatures: u64,
+    /// Signatures that matched a trusted key.
+    pub trusted_signatures: u64,
 }
 
 /// The last pruned audit entry. Verification starts from this trust point.
@@ -118,6 +151,318 @@ pub struct AuditCheckpoint {
     pub created_at: i64,
     /// When the entry bodies were exported and pruned.
     pub entries_pruned_at: Option<i64>,
+}
+
+/// One signed checkpoint (RFC 0014).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditSigner {
+    key_id: String,
+    public_key: [u8; 32],
+    signing_key: SigningKey,
+    label: Option<String>,
+}
+
+impl AuditSigner {
+    /// Loads a signing key from a mode-`0600` file.
+    pub fn load(path: &Path) -> Result<Self, DbError> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(DbError::Audit(format!(
+                "audit signing key {} must not be a symlink",
+                path.display()
+            )));
+        }
+        if !metadata.is_file() {
+            return Err(DbError::Audit(format!(
+                "audit signing key {} is not a regular file",
+                path.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(DbError::Audit(format!(
+                    "audit signing key {} must not be group/other accessible (use mode 0600)",
+                    path.display()
+                )));
+            }
+        }
+        let text = std::fs::read_to_string(path)?;
+        let mut content = Vec::new();
+        let mut label = None;
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("# label:") {
+                label = Some(rest.trim().to_string());
+                continue;
+            }
+            if line.starts_with('#') {
+                continue;
+            }
+            content.push(line);
+        }
+        if content.len() != 2 || content[0] != AUDIT_SIGNING_KEY_MAGIC {
+            return Err(DbError::Audit(format!(
+                "audit signing key {} has an invalid header",
+                path.display()
+            )));
+        }
+        let mut seed_bytes = hex::decode(content[1])
+            .map_err(|_| DbError::Audit("audit signing seed is not valid hex".into()))?;
+        let seed: [u8; 32] = seed_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| DbError::Audit("audit signing seed must be 32 bytes".into()))?;
+        seed_bytes.fill(0);
+        let signing_key = SigningKey::from_bytes(&seed);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let key_id = audit_key_id(&public_key);
+        Ok(Self {
+            key_id,
+            public_key,
+            signing_key,
+            label,
+        })
+    }
+
+    /// Generates a new key file and refuses to overwrite an existing path.
+    pub fn generate(path: &Path, label: Option<&str>) -> Result<Self, DbError> {
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed)
+            .map_err(|error| DbError::Audit(format!("random source: {error}")))?;
+        let signing_key = SigningKey::from_bytes(&seed);
+        seed.fill(0);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let key_id = audit_key_id(&public_key);
+        let mut contents = format!(
+            "{AUDIT_SIGNING_KEY_MAGIC}\n{}\n",
+            hex::encode(signing_key.to_bytes())
+        );
+        if let Some(label) = label {
+            contents.push_str(&format!("# label: {label}\n"));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        use std::io::Write;
+        let mut file = options.open(path)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        Ok(Self {
+            key_id,
+            public_key,
+            signing_key,
+            label: label.map(str::to_string),
+        })
+    }
+
+    /// Signing-key id (16 hex characters).
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// Raw Ed25519 public key.
+    pub fn public_key(&self) -> &[u8; 32] {
+        &self.public_key
+    }
+
+    /// Hex Ed25519 public key.
+    pub fn public_key_hex(&self) -> String {
+        hex::encode(self.public_key)
+    }
+
+    /// Optional operator label.
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    /// Signs a checkpoint header hash.
+    pub fn sign_hash(&self, checkpoint_hash: &[u8]) -> Result<Vec<u8>, DbError> {
+        if checkpoint_hash.len() != 32 {
+            return Err(DbError::Audit(
+                "checkpoint hash must be 32 bytes to sign".into(),
+            ));
+        }
+        let mut message = Vec::with_capacity(AUDIT_SIGNATURE_DOMAIN.len() + 32);
+        message.extend_from_slice(AUDIT_SIGNATURE_DOMAIN.as_bytes());
+        message.extend_from_slice(checkpoint_hash);
+        use ed25519_dalek::Signer;
+        Ok(self.signing_key.sign(&message).to_bytes().to_vec())
+    }
+}
+
+/// A public key the operator trusts for checkpoint signatures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedAuditKey {
+    /// Key id derived from the public key.
+    pub key_id: String,
+    /// Raw 32-byte Ed25519 public key.
+    pub public_key: Vec<u8>,
+}
+
+impl TrustedAuditKey {
+    /// Parses a hex public key and derives its id.
+    pub fn from_hex(value: &str) -> Result<Self, DbError> {
+        let public_key = hex::decode(value.trim())
+            .map_err(|_| DbError::Audit("trusted key is not valid hex".into()))?;
+        if public_key.len() != 32 {
+            return Err(DbError::Audit(
+                "trusted key must be a 32-byte Ed25519 public key".into(),
+            ));
+        }
+        let key_id = audit_key_id(
+            public_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| DbError::Audit("trusted key length".into()))?,
+        );
+        Ok(Self { key_id, public_key })
+    }
+
+    /// Builds a trusted key from a key id and public key, checking the id.
+    pub fn from_parts(key_id: &str, public_key: Vec<u8>) -> Result<Self, DbError> {
+        let array: [u8; 32] = public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| DbError::Audit("trusted key must be 32 bytes".into()))?;
+        let expected = audit_key_id(&array);
+        if !key_id.is_empty() && key_id != expected {
+            return Err(DbError::Audit(format!(
+                "trusted key id {key_id} does not match public key ({expected})"
+            )));
+        }
+        Ok(Self {
+            key_id: expected,
+            public_key,
+        })
+    }
+
+    /// Reads one `key_id public_key_hex [label]` entry per line.
+    pub fn parse_file(path: &Path) -> Result<Vec<Self>, DbError> {
+        let text = std::fs::read_to_string(path)?;
+        let mut keys = Vec::new();
+        for (number, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let key_id = parts.next().unwrap_or_default();
+            let Some(public_key) = parts.next() else {
+                return Err(DbError::Audit(format!(
+                    "{}:{}: expected `key_id public_key_hex`",
+                    path.display(),
+                    number + 1
+                )));
+            };
+            let public_key = hex::decode(public_key)
+                .map_err(|_| DbError::Audit("trusted key is not valid hex".into()))?;
+            keys.push(Self::from_parts(key_id, public_key)?);
+        }
+        Ok(keys)
+    }
+}
+
+/// Options for `audit verify`.
+#[derive(Debug, Default)]
+pub struct AuditVerifyOptions {
+    /// Keys supplied by the operator.
+    pub trusted_keys: Vec<TrustedAuditKey>,
+    /// Fail on any checkpoint without a valid trusted signature.
+    pub require_signatures: bool,
+    /// Optional JSONL anchor log to cross-check.
+    pub anchor_log: Option<PathBuf>,
+    /// Label for where trust came from (`trusted-keys`, `configured-key`).
+    pub trust_source: Option<String>,
+}
+
+/// One signature attached to a checkpoint.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AuditCheckpointSignature {
+    /// Checkpoint id.
+    pub checkpoint_id: i64,
+    /// Signing-key id.
+    pub key_id: String,
+    /// Raw 64-byte Ed25519 signature.
+    pub signature: Vec<u8>,
+    /// Signature time in Unix milliseconds.
+    pub signed_at: i64,
+    /// Key algorithm (`ed25519`).
+    pub algorithm: String,
+    /// Raw public key.
+    pub public_key: Vec<u8>,
+}
+
+/// A signature inside an anchor record or export bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditAnchorSignature {
+    /// Signing-key id.
+    pub key_id: String,
+    /// Key algorithm (`ed25519`).
+    pub algorithm: String,
+    /// Hex public key (informational).
+    pub public_key: String,
+    /// Hex signature.
+    pub signature: String,
+}
+
+/// One published checkpoint head (RFC 0014).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditAnchorRecord {
+    /// Record kind, [`AUDIT_ANCHOR_KIND`].
+    pub kind: String,
+    /// Checkpoint id.
+    pub checkpoint_id: i64,
+    /// First sealed entry id.
+    pub first_entry_id: i64,
+    /// Last sealed entry id.
+    pub last_entry_id: i64,
+    /// Number of sealed entries.
+    pub entry_count: i64,
+    /// Merkle root (hex).
+    pub merkle_root: String,
+    /// Checkpoint header hash (hex).
+    pub checkpoint_hash: String,
+    /// Checkpoint creation time in Unix milliseconds.
+    pub created_at: i64,
+    /// Signatures over the checkpoint hash.
+    #[serde(default)]
+    pub signatures: Vec<AuditAnchorSignature>,
+}
+
+/// One pending or completed anchor-outbox row.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AuditAnchorOutboxRow {
+    /// Checkpoint id.
+    pub checkpoint_id: i64,
+    /// Canonical anchor JSON captured at seal time.
+    pub payload: String,
+    /// Journal append time.
+    pub journaled_at: Option<i64>,
+    /// HTTP sink delivery time.
+    pub delivered_at: Option<i64>,
+    /// Failed attempts.
+    pub attempts: i64,
+    /// Next retry time.
+    pub next_attempt_at: i64,
+    /// Last error text.
+    pub last_error: Option<String>,
+}
+
+/// Compact latest-anchor fields reported by verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditAnchorHead {
+    /// Checkpoint id.
+    pub checkpoint_id: i64,
+    /// Last anchored entry id.
+    pub last_entry_id: i64,
 }
 
 /// Compact checkpoint fields reported by verification.
@@ -172,6 +517,7 @@ struct AuditCheckpointExport {
     merkle_root: String,
     checkpoint_hash: String,
     created_at: i64,
+    signatures: Vec<AuditAnchorSignature>,
 }
 
 /// Header line parsed by `audit verify-export`.
@@ -186,6 +532,8 @@ struct AuditExportHeader {
     merkle_root: String,
     checkpoint_hash: String,
     created_at: i64,
+    #[serde(default)]
+    signatures: Vec<AuditAnchorSignature>,
 }
 
 /// Entry line parsed by `audit verify-export`.
@@ -282,6 +630,123 @@ fn checkpoint_header_hash(
     hasher.update(merkle_root);
     hasher.update(&created_at.to_be_bytes());
     hasher.finalize().as_bytes().to_vec()
+}
+
+fn audit_key_id(public_key: &[u8; 32]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(AUDIT_KEY_ID_DOMAIN.as_bytes());
+    hasher.update(public_key);
+    hex::encode(&hasher.finalize().as_bytes()[..8])
+}
+
+fn checkpoint_signature_message(checkpoint_hash: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(AUDIT_SIGNATURE_DOMAIN.len() + checkpoint_hash.len());
+    message.extend_from_slice(AUDIT_SIGNATURE_DOMAIN.as_bytes());
+    message.extend_from_slice(checkpoint_hash);
+    message
+}
+
+fn verify_checkpoint_signature(
+    public_key: &[u8],
+    checkpoint_hash: &[u8],
+    signature: &[u8],
+) -> bool {
+    let Ok(public_key) = <[u8; 32]>::try_from(public_key) else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(signature) else {
+        return false;
+    };
+    verifying_key
+        .verify(&checkpoint_signature_message(checkpoint_hash), &signature)
+        .is_ok()
+}
+
+/// Inserts the signing key row (once) and a signature for `checkpoint`.
+async fn store_checkpoint_signature(
+    conn: &mut SqliteConnection,
+    checkpoint: &AuditCheckpoint,
+    signer: &AuditSigner,
+) -> Result<(), DbError> {
+    let existing: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT public_key FROM audit_signing_keys WHERE key_id = ?")
+            .bind(signer.key_id())
+            .fetch_optional(&mut *conn)
+            .await?;
+    if let Some(existing) = existing {
+        if existing != signer.public_key() {
+            return Err(DbError::Audit(format!(
+                "signing key {} is already registered with a different public key",
+                signer.key_id()
+            )));
+        }
+    } else {
+        sqlx::query(
+            "INSERT INTO audit_signing_keys
+                 (key_id, algorithm, public_key, label, created_at, retired_at)
+             VALUES (?, 'ed25519', ?, ?, ?, NULL)",
+        )
+        .bind(signer.key_id())
+        .bind(signer.public_key().as_slice())
+        .bind(signer.label())
+        .bind(now_millis())
+        .execute(&mut *conn)
+        .await?;
+    }
+    let signature = signer.sign_hash(&checkpoint.checkpoint_hash)?;
+    sqlx::query(
+        "INSERT INTO audit_checkpoint_signatures
+             (checkpoint_id, key_id, signature, signed_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(checkpoint_id, key_id) DO NOTHING",
+    )
+    .bind(checkpoint.id)
+    .bind(signer.key_id())
+    .bind(&signature)
+    .bind(now_millis())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Builds the canonical anchor record for a checkpoint from its signatures.
+async fn build_anchor_record(
+    conn: &mut SqliteConnection,
+    checkpoint: &AuditCheckpoint,
+) -> Result<AuditAnchorRecord, DbError> {
+    let rows = sqlx::query_as::<_, AuditCheckpointSignature>(
+        "SELECT s.checkpoint_id, s.key_id, s.signature, s.signed_at,
+                k.algorithm, k.public_key
+         FROM audit_checkpoint_signatures s
+         JOIN audit_signing_keys k ON k.key_id = s.key_id
+         WHERE s.checkpoint_id = ?
+         ORDER BY s.key_id",
+    )
+    .bind(checkpoint.id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(AuditAnchorRecord {
+        kind: AUDIT_ANCHOR_KIND.to_string(),
+        checkpoint_id: checkpoint.id,
+        first_entry_id: checkpoint.first_entry_id,
+        last_entry_id: checkpoint.last_entry_id,
+        entry_count: checkpoint.entry_count,
+        merkle_root: hex::encode(&checkpoint.merkle_root),
+        checkpoint_hash: hex::encode(&checkpoint.checkpoint_hash),
+        created_at: checkpoint.created_at,
+        signatures: rows
+            .into_iter()
+            .map(|row| AuditAnchorSignature {
+                key_id: row.key_id,
+                algorithm: row.algorithm,
+                public_key: hex::encode(&row.public_key),
+                signature: hex::encode(&row.signature),
+            })
+            .collect(),
+    })
 }
 
 impl Db {
@@ -453,12 +918,53 @@ impl Db {
         Ok((max_id - from + 1).max(0))
     }
 
+    /// Timestamp of the oldest unsealed entry, if any.
+    pub async fn audit_oldest_unsealed_ts(&self) -> Result<Option<i64>, DbError> {
+        let max_id: Option<i64> = sqlx::query_scalar("SELECT MAX(id) FROM audit_log")
+            .fetch_one(&self.pool)
+            .await?;
+        let Some(max_id) = max_id else {
+            return Ok(None);
+        };
+        let last_checkpoint: Option<i64> = sqlx::query_scalar(
+            "SELECT last_entry_id FROM audit_checkpoints ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let anchor = self.audit_anchor().await?;
+        let from = last_checkpoint
+            .map(|last| last + 1)
+            .or_else(|| anchor.map(|anchor| anchor.pruned_through + 1))
+            .unwrap_or(1);
+        if max_id < from {
+            return Ok(None);
+        }
+        Ok(
+            sqlx::query_scalar("SELECT MIN(ts) FROM audit_log WHERE id >= ?")
+                .bind(from)
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
     /// Seals up to `max_entries` unsealed entries into one checkpoint.
     ///
     /// Returns `None` when there is no unsealed entry left. The append lock
     /// makes the chosen range stable: appends either land before the maximum
     /// id or wait for the checkpoint transaction.
     pub async fn audit_seal(&self, max_entries: i64) -> Result<Option<AuditCheckpoint>, DbError> {
+        self.audit_seal_with(max_entries, None, false).await
+    }
+
+    /// Seals up to `max_entries` entries, signs the new checkpoint when a
+    /// signer is supplied, and enqueues its anchor record when requested.
+    /// The checkpoint, signature, and outbox row commit atomically.
+    pub async fn audit_seal_with(
+        &self,
+        max_entries: i64,
+        signer: Option<&AuditSigner>,
+        enqueue_anchor: bool,
+    ) -> Result<Option<AuditCheckpoint>, DbError> {
         let max_entries = max_entries.clamp(1, AUDIT_CHECKPOINT_BATCH);
         let _guard = self.audit_lock.lock().await;
         let mut tx = self.begin_write().await?;
@@ -577,6 +1083,27 @@ impl Db {
         .bind(created_at)
         .fetch_one(&mut *tx)
         .await?;
+        if let Some(signer) = signer {
+            store_checkpoint_signature(&mut tx, &checkpoint, signer).await?;
+        }
+        if enqueue_anchor {
+            let record = build_anchor_record(&mut tx, &checkpoint).await?;
+            let payload = serde_json::to_string(&record)
+                .map_err(|error| DbError::Audit(format!("anchor payload: {error}")))?;
+            let now = now_millis();
+            sqlx::query(
+                "INSERT INTO audit_anchor_outbox
+                     (checkpoint_id, payload, journaled_at, delivered_at, attempts,
+                      next_attempt_at, last_error)
+                 VALUES (?, ?, NULL, NULL, 0, ?, NULL)
+                 ON CONFLICT(checkpoint_id) DO UPDATE SET payload = excluded.payload",
+            )
+            .bind(checkpoint.id)
+            .bind(payload)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(Some(checkpoint))
     }
@@ -588,17 +1115,263 @@ impl Db {
         batch: i64,
         max_checkpoints: u64,
     ) -> Result<u64, DbError> {
+        self.audit_seal_if_due(threshold, 0, batch, max_checkpoints, None, false)
+            .await
+    }
+
+    /// Seals while the unsealed tail is at least `threshold` entries or its
+    /// oldest entry is at least `max_age_millis` old.
+    pub async fn audit_seal_if_due(
+        &self,
+        threshold: i64,
+        max_age_millis: i64,
+        batch: i64,
+        max_checkpoints: u64,
+        signer: Option<&AuditSigner>,
+        enqueue_anchor: bool,
+    ) -> Result<u64, DbError> {
         let mut sealed = 0u64;
         while sealed < max_checkpoints {
-            if self.audit_unsealed_count().await? < threshold.max(1) {
+            let count = self.audit_unsealed_count().await?;
+            if count == 0 {
                 break;
             }
-            if self.audit_seal(batch).await?.is_none() {
+            let mut due = count >= threshold.max(1);
+            if !due
+                && max_age_millis > 0
+                && let Some(ts) = self.audit_oldest_unsealed_ts().await?
+                && now_millis() - ts >= max_age_millis
+            {
+                due = true;
+            }
+            if !due {
+                break;
+            }
+            if self
+                .audit_seal_with(batch, signer, enqueue_anchor)
+                .await?
+                .is_none()
+            {
                 break;
             }
             sealed += 1;
         }
         Ok(sealed)
+    }
+
+    /// Adds signatures to existing checkpoints (backfill or key rotation).
+    /// With `all`, only checkpoints lacking a signature from this key are
+    /// selected. Returns the number of checkpoints signed.
+    pub async fn audit_sign_checkpoints(
+        &self,
+        checkpoint_id: Option<i64>,
+        all: bool,
+        signer: &AuditSigner,
+    ) -> Result<u64, DbError> {
+        let _guard = self.audit_lock.lock().await;
+        let checkpoints = if let Some(id) = checkpoint_id {
+            sqlx::query_as::<_, AuditCheckpoint>("SELECT * FROM audit_checkpoints WHERE id = ?")
+                .bind(id)
+                .fetch_all(&self.pool)
+                .await?
+        } else if all {
+            sqlx::query_as::<_, AuditCheckpoint>(
+                "SELECT c.* FROM audit_checkpoints c
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM audit_checkpoint_signatures s
+                     WHERE s.checkpoint_id = c.id AND s.key_id = ?
+                 )
+                 ORDER BY c.id",
+            )
+            .bind(signer.key_id())
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            return Err(DbError::Audit("specify --checkpoint ID or --all".into()));
+        };
+        if checkpoint_id.is_some() && checkpoints.is_empty() {
+            return Err(DbError::Audit(format!(
+                "no checkpoint {}",
+                checkpoint_id.unwrap_or_default()
+            )));
+        }
+        let mut tx = self.begin_write().await?;
+        for checkpoint in &checkpoints {
+            let recomputed = checkpoint_header_hash(
+                &checkpoint.prev_checkpoint_hash,
+                checkpoint.first_entry_id,
+                checkpoint.last_entry_id,
+                checkpoint.entry_count,
+                &checkpoint.merkle_root,
+                checkpoint.created_at,
+            );
+            if recomputed != checkpoint.checkpoint_hash {
+                return Err(DbError::Audit(format!(
+                    "checkpoint {} header hash does not match; refusing to sign",
+                    checkpoint.id
+                )));
+            }
+            store_checkpoint_signature(&mut tx, checkpoint, signer).await?;
+        }
+        tx.commit().await?;
+        Ok(checkpoints.len() as u64)
+    }
+
+    /// Signatures attached to one checkpoint, with key metadata.
+    pub async fn audit_checkpoint_signatures(
+        &self,
+        checkpoint_id: i64,
+    ) -> Result<Vec<AuditCheckpointSignature>, DbError> {
+        Ok(sqlx::query_as::<_, AuditCheckpointSignature>(
+            "SELECT s.checkpoint_id, s.key_id, s.signature, s.signed_at,
+                    k.algorithm, k.public_key
+             FROM audit_checkpoint_signatures s
+             JOIN audit_signing_keys k ON k.key_id = s.key_id
+             WHERE s.checkpoint_id = ?
+             ORDER BY s.key_id",
+        )
+        .bind(checkpoint_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// The canonical anchor record for one checkpoint, or the latest.
+    pub async fn audit_anchor_record(
+        &self,
+        checkpoint_id: Option<i64>,
+    ) -> Result<Option<AuditAnchorRecord>, DbError> {
+        let checkpoint = match checkpoint_id {
+            Some(id) => {
+                sqlx::query_as::<_, AuditCheckpoint>("SELECT * FROM audit_checkpoints WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+            None => {
+                sqlx::query_as::<_, AuditCheckpoint>(
+                    "SELECT * FROM audit_checkpoints ORDER BY id DESC LIMIT 1",
+                )
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
+        let Some(checkpoint) = checkpoint else {
+            return Ok(None);
+        };
+        let mut conn = self.pool.acquire().await?;
+        Ok(Some(build_anchor_record(&mut conn, &checkpoint).await?))
+    }
+
+    /// Anchor-outbox rows that still need a configured sink.
+    pub async fn audit_anchor_pending(
+        &self,
+        journal: bool,
+        http: bool,
+        now: i64,
+        limit: i64,
+    ) -> Result<Vec<AuditAnchorOutboxRow>, DbError> {
+        if !journal && !http {
+            return Ok(Vec::new());
+        }
+        Ok(sqlx::query_as::<_, AuditAnchorOutboxRow>(
+            "SELECT checkpoint_id, payload, journaled_at, delivered_at,
+                    attempts, next_attempt_at, last_error
+             FROM audit_anchor_outbox
+             WHERE next_attempt_at <= ?
+               AND ((? AND journaled_at IS NULL) OR (? AND delivered_at IS NULL))
+             ORDER BY checkpoint_id
+             LIMIT ?",
+        )
+        .bind(now)
+        .bind(journal)
+        .bind(http)
+        .bind(limit.clamp(1, 1000))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Number of rows that still need a configured sink.
+    pub async fn audit_anchor_pending_count(
+        &self,
+        journal: bool,
+        http: bool,
+    ) -> Result<i64, DbError> {
+        if !journal && !http {
+            return Ok(0);
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_anchor_outbox
+             WHERE (? AND journaled_at IS NULL) OR (? AND delivered_at IS NULL)",
+        )
+        .bind(journal)
+        .bind(http)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// All anchor-outbox rows, newest first, for `audit anchors`.
+    pub async fn audit_anchor_outbox(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<AuditAnchorOutboxRow>, DbError> {
+        Ok(sqlx::query_as::<_, AuditAnchorOutboxRow>(
+            "SELECT checkpoint_id, payload, journaled_at, delivered_at,
+                    attempts, next_attempt_at, last_error
+             FROM audit_anchor_outbox
+             ORDER BY checkpoint_id DESC
+             LIMIT ?",
+        )
+        .bind(limit.clamp(1, 10_000))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Marks the journal sink as done for a checkpoint.
+    pub async fn audit_anchor_mark_journaled(
+        &self,
+        checkpoint_id: i64,
+        at: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE audit_anchor_outbox SET journaled_at = ? WHERE checkpoint_id = ?")
+            .bind(at)
+            .bind(checkpoint_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Marks the HTTP sink as done for a checkpoint.
+    pub async fn audit_anchor_mark_delivered(
+        &self,
+        checkpoint_id: i64,
+        at: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE audit_anchor_outbox SET delivered_at = ? WHERE checkpoint_id = ?")
+            .bind(at)
+            .bind(checkpoint_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Records a failed attempt and its next retry time.
+    pub async fn audit_anchor_mark_failed(
+        &self,
+        checkpoint_id: i64,
+        error: &str,
+        next_attempt_at: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE audit_anchor_outbox
+             SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?
+             WHERE checkpoint_id = ?",
+        )
+        .bind(next_attempt_at)
+        .bind(error)
+        .bind(checkpoint_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Exports entries up to `before` as JSONL and prunes them, recording an
@@ -912,6 +1685,17 @@ impl Db {
             .create_new(true)
             .open(temp)
             .await?;
+        let signature_rows = sqlx::query_as::<_, AuditCheckpointSignature>(
+            "SELECT s.checkpoint_id, s.key_id, s.signature, s.signed_at,
+                    k.algorithm, k.public_key
+             FROM audit_checkpoint_signatures s
+             JOIN audit_signing_keys k ON k.key_id = s.key_id
+             WHERE s.checkpoint_id = ?
+             ORDER BY s.key_id",
+        )
+        .bind(checkpoint.id)
+        .fetch_all(&mut *tx)
+        .await?;
         let header = AuditCheckpointExport {
             kind: "kolimi-audit-checkpoint",
             id: checkpoint.id,
@@ -922,6 +1706,15 @@ impl Db {
             merkle_root: hex::encode(&checkpoint.merkle_root),
             checkpoint_hash: hex::encode(&checkpoint.checkpoint_hash),
             created_at: checkpoint.created_at,
+            signatures: signature_rows
+                .into_iter()
+                .map(|row| AuditAnchorSignature {
+                    key_id: row.key_id,
+                    algorithm: row.algorithm,
+                    public_key: hex::encode(&row.public_key),
+                    signature: hex::encode(&row.signature),
+                })
+                .collect(),
         };
         let mut line =
             serde_json::to_vec(&header).map_err(|error| DbError::Audit(error.to_string()))?;
@@ -1000,6 +1793,17 @@ impl Db {
 
     /// Verifies a sealed checkpoint export bundle.
     pub async fn audit_verify_export(&self, path: &Path) -> Result<AuditExportVerify, DbError> {
+        self.audit_verify_export_with(path, &[]).await
+    }
+
+    /// Verifies a bundle and checks signatures against trusted keys. With no
+    /// trusted keys, signatures are checked against their included public
+    /// key (self-signed evidence only).
+    pub async fn audit_verify_export_with(
+        &self,
+        path: &Path,
+        trusted_keys: &[TrustedAuditKey],
+    ) -> Result<AuditExportVerify, DbError> {
         let file = tokio::fs::File::open(path).await?;
         let mut lines = tokio::io::BufReader::new(file).lines();
         let Some(header_line) = lines.next_line().await? else {
@@ -1031,6 +1835,37 @@ impl Db {
         );
         if recomputed != checkpoint_hash {
             return Err(DbError::Audit("export header hash does not match".into()));
+        }
+
+        let mut trusted_signatures = 0u64;
+        for signature in &header.signatures {
+            if signature.algorithm != "ed25519" {
+                return Err(DbError::Audit(format!(
+                    "export signature {} uses unsupported algorithm {}",
+                    signature.key_id, signature.algorithm
+                )));
+            }
+            let public_key = hex::decode(&signature.public_key)
+                .map_err(|_| DbError::Audit("export signature public key is invalid".into()))?;
+            let bytes = hex::decode(&signature.signature)
+                .map_err(|_| DbError::Audit("export signature is invalid hex".into()))?;
+            if !verify_checkpoint_signature(&public_key, &checkpoint_hash, &bytes) {
+                return Err(DbError::Audit(format!(
+                    "export signature {} does not verify",
+                    signature.key_id
+                )));
+            }
+            if trusted_keys
+                .iter()
+                .any(|key| key.key_id == signature.key_id && key.public_key == public_key)
+            {
+                trusted_signatures += 1;
+            }
+        }
+        if !trusted_keys.is_empty() && trusted_signatures == 0 {
+            return Err(DbError::Audit(
+                "export has no signature from a trusted key".into(),
+            ));
         }
 
         let mut expected_prev: Option<Vec<u8>> = None;
@@ -1091,6 +1926,8 @@ impl Db {
         Ok(AuditExportVerify {
             checkpoint_id: header.id,
             entries: count,
+            signatures: header.signatures.len() as u64,
+            trusted_signatures,
         })
     }
 
@@ -1098,11 +1935,43 @@ impl Db {
     /// verifies every checkpoint header, its range, and every root whose
     /// entry bodies are still present.
     pub async fn audit_verify(&self) -> Result<AuditVerify, DbError> {
+        self.audit_verify_with(AuditVerifyOptions::default()).await
+    }
+
+    /// Verification with operator-supplied trust keys and an optional
+    /// anchor log (RFC 0014).
+    pub async fn audit_verify_with(
+        &self,
+        options: AuditVerifyOptions,
+    ) -> Result<AuditVerify, DbError> {
         let anchor = self.audit_anchor().await?;
         let checkpoints =
             sqlx::query_as::<_, AuditCheckpoint>("SELECT * FROM audit_checkpoints ORDER BY id")
                 .fetch_all(&self.pool)
                 .await?;
+        let mut signatures: HashMap<i64, Vec<AuditCheckpointSignature>> = HashMap::new();
+        for row in sqlx::query_as::<_, AuditCheckpointSignature>(
+            "SELECT s.checkpoint_id, s.key_id, s.signature, s.signed_at,
+                    k.algorithm, k.public_key
+             FROM audit_checkpoint_signatures s
+             JOIN audit_signing_keys k ON k.key_id = s.key_id
+             ORDER BY s.checkpoint_id, s.key_id",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        {
+            signatures.entry(row.checkpoint_id).or_default().push(row);
+        }
+        let mut stats = VerifyStats {
+            trust_source: options.trust_source.clone().unwrap_or_else(|| {
+                if options.trusted_keys.is_empty() {
+                    "none".to_string()
+                } else {
+                    "trusted-keys".to_string()
+                }
+            }),
+            ..VerifyStats::default()
+        };
         let mut pruned_checkpoints = 0u64;
         let mut expected_first: Option<i64> = None;
         let mut expected_checkpoint = Vec::new();
@@ -1119,6 +1988,7 @@ impl Db {
                         &checkpoints,
                         pruned_checkpoints,
                         Some(checkpoint.first_entry_id),
+                        &stats,
                     ));
                 }
             } else if anchor
@@ -1132,6 +2002,7 @@ impl Db {
                     &checkpoints,
                     pruned_checkpoints,
                     Some(checkpoint.first_entry_id),
+                    &stats,
                 ));
             }
             let bad_boundary = checkpoint.first_entry_id <= 0
@@ -1146,6 +2017,7 @@ impl Db {
                     &checkpoints,
                     pruned_checkpoints,
                     Some(checkpoint.first_entry_id),
+                    &stats,
                 ));
             }
             let recomputed = checkpoint_header_hash(
@@ -1162,8 +2034,79 @@ impl Db {
                     &checkpoints,
                     pruned_checkpoints,
                     Some(checkpoint.first_entry_id),
+                    &stats,
                 ));
             }
+
+            let checkpoint_signatures = signatures
+                .get(&checkpoint.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if checkpoint_signatures.is_empty() {
+                stats.unsigned_checkpoints += 1;
+                if options.require_signatures {
+                    return Ok(self.audit_verify_result(
+                        0,
+                        &checkpoints,
+                        pruned_checkpoints,
+                        Some(checkpoint.first_entry_id),
+                        &stats,
+                    ));
+                }
+            } else {
+                stats.signed_checkpoints += 1;
+                if !options.trusted_keys.is_empty() {
+                    let mut valid = false;
+                    for signature in checkpoint_signatures {
+                        if signature.algorithm != "ed25519" {
+                            stats.signature_errors += 1;
+                            return Ok(self.audit_verify_result(
+                                0,
+                                &checkpoints,
+                                pruned_checkpoints,
+                                Some(checkpoint.first_entry_id),
+                                &stats,
+                            ));
+                        }
+                        let Some(trusted) = options
+                            .trusted_keys
+                            .iter()
+                            .find(|key| key.key_id == signature.key_id)
+                        else {
+                            stats.untrusted_signatures += 1;
+                            continue;
+                        };
+                        if trusted.public_key != signature.public_key
+                            || !verify_checkpoint_signature(
+                                &trusted.public_key,
+                                &checkpoint.checkpoint_hash,
+                                &signature.signature,
+                            )
+                        {
+                            stats.signature_errors += 1;
+                            return Ok(self.audit_verify_result(
+                                0,
+                                &checkpoints,
+                                pruned_checkpoints,
+                                Some(checkpoint.first_entry_id),
+                                &stats,
+                            ));
+                        }
+                        stats.verified_signatures += 1;
+                        valid = true;
+                    }
+                    if options.require_signatures && !valid {
+                        return Ok(self.audit_verify_result(
+                            0,
+                            &checkpoints,
+                            pruned_checkpoints,
+                            Some(checkpoint.first_entry_id),
+                            &stats,
+                        ));
+                    }
+                }
+            }
+
             if checkpoint.entries_pruned_at.is_none() {
                 let rows = sqlx::query_as::<_, AuditEntry>(
                     "SELECT * FROM audit_log WHERE id BETWEEN ? AND ? ORDER BY id",
@@ -1178,6 +2121,7 @@ impl Db {
                         &checkpoints,
                         pruned_checkpoints,
                         Some(checkpoint.first_entry_id),
+                        &stats,
                     ));
                 }
                 let mut expected_prev = if checkpoint.first_entry_id == 1 {
@@ -1193,6 +2137,7 @@ impl Db {
                             &checkpoints,
                             pruned_checkpoints,
                             Some(checkpoint.first_entry_id),
+                            &stats,
                         ));
                     }
                     let expected = chain_hash(
@@ -1210,6 +2155,7 @@ impl Db {
                             &checkpoints,
                             pruned_checkpoints,
                             Some(row.id),
+                            &stats,
                         ));
                     }
                     expected_prev = row.hash.clone();
@@ -1222,6 +2168,7 @@ impl Db {
                         &checkpoints,
                         pruned_checkpoints,
                         Some(checkpoint.first_entry_id),
+                        &stats,
                     ));
                 }
             }
@@ -1257,11 +2204,172 @@ impl Db {
                     &checkpoints,
                     pruned_checkpoints,
                     Some(row.id),
+                    &stats,
                 ));
             }
             expected_prev = row.hash.clone();
         }
-        Ok(self.audit_verify_result(entries, &checkpoints, pruned_checkpoints, None))
+
+        if let Some(path) = &options.anchor_log {
+            let records = read_anchor_log(path).await?;
+            let by_id: HashMap<i64, &AuditCheckpoint> = checkpoints
+                .iter()
+                .map(|checkpoint| (checkpoint.id, checkpoint))
+                .collect();
+            let mut seen: HashMap<i64, String> = HashMap::new();
+            for record in &records {
+                if record.kind != AUDIT_ANCHOR_KIND {
+                    return Ok(self.audit_verify_result(
+                        entries,
+                        &checkpoints,
+                        pruned_checkpoints,
+                        Some(record.last_entry_id),
+                        &stats,
+                    ));
+                }
+                let duplicate = if let Some(previous) = seen.get(&record.checkpoint_id) {
+                    if previous != &record.checkpoint_hash {
+                        return Ok(self.audit_verify_result(
+                            entries,
+                            &checkpoints,
+                            pruned_checkpoints,
+                            Some(record.last_entry_id),
+                            &stats,
+                        ));
+                    }
+                    true
+                } else {
+                    seen.insert(record.checkpoint_id, record.checkpoint_hash.clone());
+                    false
+                };
+                let Some(checkpoint) = by_id.get(&record.checkpoint_id) else {
+                    // A published checkpoint is gone locally: truncation or
+                    // a rollback to an older snapshot.
+                    stats.rollback_detected = true;
+                    return Ok(self.audit_verify_result(
+                        entries,
+                        &checkpoints,
+                        pruned_checkpoints,
+                        Some(record.last_entry_id),
+                        &stats,
+                    ));
+                };
+                let matches = record.first_entry_id == checkpoint.first_entry_id
+                    && record.last_entry_id == checkpoint.last_entry_id
+                    && record.entry_count == checkpoint.entry_count
+                    && record.merkle_root == hex::encode(&checkpoint.merkle_root)
+                    && record.checkpoint_hash == hex::encode(&checkpoint.checkpoint_hash)
+                    && record.created_at == checkpoint.created_at;
+                if !matches {
+                    return Ok(self.audit_verify_result(
+                        entries,
+                        &checkpoints,
+                        pruned_checkpoints,
+                        Some(record.last_entry_id),
+                        &stats,
+                    ));
+                }
+                if !duplicate {
+                    stats.anchors_checked += 1;
+                }
+                if !options.trusted_keys.is_empty() {
+                    let mut valid = false;
+                    for signature in &record.signatures {
+                        if signature.algorithm != "ed25519" {
+                            stats.signature_errors += 1;
+                            return Ok(self.audit_verify_result(
+                                entries,
+                                &checkpoints,
+                                pruned_checkpoints,
+                                Some(record.last_entry_id),
+                                &stats,
+                            ));
+                        }
+                        let Ok(public_key) = hex::decode(&signature.public_key) else {
+                            stats.signature_errors += 1;
+                            return Ok(self.audit_verify_result(
+                                entries,
+                                &checkpoints,
+                                pruned_checkpoints,
+                                Some(record.last_entry_id),
+                                &stats,
+                            ));
+                        };
+                        let Ok(bytes) = hex::decode(&signature.signature) else {
+                            stats.signature_errors += 1;
+                            return Ok(self.audit_verify_result(
+                                entries,
+                                &checkpoints,
+                                pruned_checkpoints,
+                                Some(record.last_entry_id),
+                                &stats,
+                            ));
+                        };
+                        let Some(trusted) = options
+                            .trusted_keys
+                            .iter()
+                            .find(|key| key.key_id == signature.key_id)
+                        else {
+                            continue;
+                        };
+                        if trusted.public_key != public_key
+                            || !verify_checkpoint_signature(
+                                &trusted.public_key,
+                                &checkpoint.checkpoint_hash,
+                                &bytes,
+                            )
+                        {
+                            stats.signature_errors += 1;
+                            return Ok(self.audit_verify_result(
+                                entries,
+                                &checkpoints,
+                                pruned_checkpoints,
+                                Some(record.last_entry_id),
+                                &stats,
+                            ));
+                        }
+                        valid = true;
+                    }
+                    if options.require_signatures && !valid {
+                        return Ok(self.audit_verify_result(
+                            entries,
+                            &checkpoints,
+                            pruned_checkpoints,
+                            Some(record.last_entry_id),
+                            &stats,
+                        ));
+                    }
+                }
+                let head = AuditAnchorHead {
+                    checkpoint_id: record.checkpoint_id,
+                    last_entry_id: record.last_entry_id,
+                };
+                if stats
+                    .latest_anchor
+                    .as_ref()
+                    .is_none_or(|latest| head.last_entry_id > latest.last_entry_id)
+                {
+                    stats.latest_anchor = Some(head);
+                }
+            }
+            if let Some(latest) = &stats.latest_anchor {
+                let local_max: Option<i64> = sqlx::query_scalar("SELECT MAX(id) FROM audit_log")
+                    .fetch_one(&self.pool)
+                    .await?;
+                if local_max.unwrap_or(0) < latest.last_entry_id {
+                    stats.rollback_detected = true;
+                    return Ok(self.audit_verify_result(
+                        entries,
+                        &checkpoints,
+                        pruned_checkpoints,
+                        Some(latest.last_entry_id),
+                        &stats,
+                    ));
+                }
+            }
+        }
+
+        Ok(self.audit_verify_result(entries, &checkpoints, pruned_checkpoints, None, &stats))
     }
 
     fn audit_verify_result(
@@ -1270,11 +2378,21 @@ impl Db {
         checkpoints: &[AuditCheckpoint],
         pruned_checkpoints: u64,
         first_bad: Option<i64>,
+        stats: &VerifyStats,
     ) -> AuditVerify {
         AuditVerify {
             entries,
             checkpoints: checkpoints.len() as u64,
             pruned_checkpoints,
+            signed_checkpoints: stats.signed_checkpoints,
+            verified_signatures: stats.verified_signatures,
+            unsigned_checkpoints: stats.unsigned_checkpoints,
+            untrusted_signatures: stats.untrusted_signatures,
+            signature_errors: stats.signature_errors,
+            anchors_checked: stats.anchors_checked,
+            rollback_detected: stats.rollback_detected,
+            trust_source: stats.trust_source.clone(),
+            latest_anchor: stats.latest_anchor.clone(),
             first_bad,
             latest_checkpoint: checkpoints.last().map(|checkpoint| AuditCheckpointHead {
                 id: checkpoint.id,
@@ -1285,12 +2403,44 @@ impl Db {
     }
 }
 
+/// Accumulates verification counters across early returns.
+#[derive(Debug, Default)]
+struct VerifyStats {
+    signed_checkpoints: u64,
+    verified_signatures: u64,
+    unsigned_checkpoints: u64,
+    untrusted_signatures: u64,
+    signature_errors: u64,
+    anchors_checked: u64,
+    rollback_detected: bool,
+    latest_anchor: Option<AuditAnchorHead>,
+    trust_source: String,
+}
+
+/// Reads a JSONL anchor log.
+pub async fn read_anchor_log(path: &Path) -> Result<Vec<AuditAnchorRecord>, DbError> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut lines = tokio::io::BufReader::new(file).lines();
+    let mut records = Vec::new();
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        records.push(
+            serde_json::from_str(&line)
+                .map_err(|error| DbError::Audit(format!("anchor log: {error}")))?,
+        );
+    }
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use serde_json::{Value, json};
 
+    use super::{AuditSigner, AuditVerifyOptions, TrustedAuditKey};
     use crate::Db;
 
     async fn db() -> (tempfile::TempDir, Db) {
@@ -1326,6 +2476,15 @@ mod tests {
                 entries: 3,
                 checkpoints: 0,
                 pruned_checkpoints: 0,
+                signed_checkpoints: 0,
+                verified_signatures: 0,
+                unsigned_checkpoints: 0,
+                untrusted_signatures: 0,
+                signature_errors: 0,
+                anchors_checked: 0,
+                rollback_detected: false,
+                trust_source: "none".into(),
+                latest_anchor: None,
                 first_bad: None,
                 latest_checkpoint: None,
             }
@@ -1732,5 +2891,252 @@ mod tests {
             .await
             .unwrap();
         assert!(db.audit_verify_export(&path).await.is_err());
+    }
+
+    fn trusted(signer: &AuditSigner) -> TrustedAuditKey {
+        TrustedAuditKey::from_parts(signer.key_id(), signer.public_key().to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn signing_key_round_trips_and_refuses_weak_permissions() {
+        let (dir, _db) = db().await;
+        let path = dir.path().join("audit-signing.key");
+        let signer = AuditSigner::generate(&path, Some("test")).unwrap();
+        let loaded = AuditSigner::load(&path).unwrap();
+        assert_eq!(loaded.key_id(), signer.key_id());
+        assert_eq!(loaded.public_key(), signer.public_key());
+        assert!(AuditSigner::generate(&path, None).is_err(), "no overwrite");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(AuditSigner::load(&path).is_err(), "group-readable key");
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_checkpoints_verify_only_against_pinned_keys() {
+        let (dir, db) = db().await;
+        append_entries(&db, &["a", "b", "c"]).await;
+        let signer = AuditSigner::generate(&dir.path().join("key"), None).unwrap();
+        let checkpoint = db
+            .audit_seal_with(10, Some(&signer), false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let unsigned = db.audit_verify().await.unwrap();
+        assert_eq!(unsigned.signed_checkpoints, 1);
+        assert_eq!(unsigned.verified_signatures, 0);
+        assert_eq!(unsigned.trust_source, "none");
+
+        let verify = db
+            .audit_verify_with(AuditVerifyOptions {
+                trusted_keys: vec![trusted(&signer)],
+                require_signatures: true,
+                ..AuditVerifyOptions::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(verify.first_bad, None);
+        assert_eq!(verify.verified_signatures, 1);
+        assert_eq!(verify.trust_source, "trusted-keys");
+
+        let other = AuditSigner::generate(&dir.path().join("other"), None).unwrap();
+        let verify = db
+            .audit_verify_with(AuditVerifyOptions {
+                trusted_keys: vec![trusted(&other)],
+                require_signatures: true,
+                ..AuditVerifyOptions::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(verify.first_bad, Some(1));
+        assert_eq!(verify.untrusted_signatures, 1);
+
+        // A corrupted signature fails even with the right key.
+        sqlx::query("UPDATE audit_checkpoint_signatures SET signature = ? WHERE checkpoint_id = ?")
+            .bind(vec![0u8; 64])
+            .bind(checkpoint.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let verify = db
+            .audit_verify_with(AuditVerifyOptions {
+                trusted_keys: vec![trusted(&signer)],
+                require_signatures: true,
+                ..AuditVerifyOptions::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(verify.first_bad, Some(1));
+        assert_eq!(verify.signature_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn swapping_the_stored_public_key_does_not_fool_a_pinned_key() {
+        let (dir, db) = db().await;
+        append_entries(&db, &["a", "b"]).await;
+        let signer = AuditSigner::generate(&dir.path().join("key"), None).unwrap();
+        db.audit_seal_with(10, Some(&signer), false)
+            .await
+            .unwrap()
+            .unwrap();
+        let attacker = AuditSigner::generate(&dir.path().join("attacker"), None).unwrap();
+        sqlx::query("UPDATE audit_signing_keys SET public_key = ? WHERE key_id = ?")
+            .bind(attacker.public_key().as_slice())
+            .bind(signer.key_id())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let verify = db
+            .audit_verify_with(AuditVerifyOptions {
+                trusted_keys: vec![trusted(&signer)],
+                require_signatures: true,
+                ..AuditVerifyOptions::default()
+            })
+            .await
+            .unwrap();
+        assert!(verify.first_bad.is_some());
+        assert!(verify.signature_errors > 0);
+    }
+
+    #[tokio::test]
+    async fn sign_backfills_and_is_idempotent() {
+        let (dir, db) = db().await;
+        append_entries(&db, &["a", "b"]).await;
+        db.audit_seal(10).await.unwrap().unwrap();
+        let signer = AuditSigner::generate(&dir.path().join("key"), None).unwrap();
+        assert_eq!(
+            db.audit_sign_checkpoints(None, true, &signer)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.audit_sign_checkpoints(None, true, &signer)
+                .await
+                .unwrap(),
+            0
+        );
+        let verify = db
+            .audit_verify_with(AuditVerifyOptions {
+                trusted_keys: vec![trusted(&signer)],
+                ..AuditVerifyOptions::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(verify.signed_checkpoints, 1);
+        assert_eq!(verify.verified_signatures, 1);
+    }
+
+    #[tokio::test]
+    async fn seal_age_trigger_seals_a_small_tail() {
+        let (_dir, db) = db().await;
+        append_entries(&db, &["a"]).await;
+        assert_eq!(
+            db.audit_seal_if_due(1024, 0, 4096, 10, None, false)
+                .await
+                .unwrap(),
+            0
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert_eq!(
+            db.audit_seal_if_due(1024, 1, 4096, 10, None, false)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_records_are_enqueued_and_verify_against_the_chain() {
+        let (dir, db) = db().await;
+        append_entries(&db, &["a", "b", "c"]).await;
+        let signer = AuditSigner::generate(&dir.path().join("key"), None).unwrap();
+        let checkpoint = db
+            .audit_seal_with(10, Some(&signer), true)
+            .await
+            .unwrap()
+            .unwrap();
+        let outbox = db.audit_anchor_outbox(10).await.unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert!(outbox[0].journaled_at.is_none());
+        assert!(outbox[0].payload.contains("kolimi-audit-anchor-v1"));
+
+        let record = db.audit_anchor_record(None).await.unwrap().unwrap();
+        assert_eq!(record.checkpoint_id, checkpoint.id);
+        assert_eq!(record.signatures.len(), 1);
+        assert_eq!(record.signatures[0].key_id, signer.key_id());
+
+        let path = dir.path().join("anchors.jsonl");
+        tokio::fs::write(&path, serde_json::to_string(&record).unwrap() + "\n")
+            .await
+            .unwrap();
+        let verify = db
+            .audit_verify_with(AuditVerifyOptions {
+                trusted_keys: vec![trusted(&signer)],
+                anchor_log: Some(path.clone()),
+                ..AuditVerifyOptions::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(verify.first_bad, None);
+        assert_eq!(verify.anchors_checked, 1);
+        assert!(!verify.rollback_detected);
+        assert_eq!(
+            verify.latest_anchor.unwrap().last_entry_id,
+            checkpoint.last_entry_id
+        );
+
+        // An anchor for a checkpoint the local database does not have means
+        // the local history was rolled back or truncated.
+        let mut missing = record;
+        missing.checkpoint_id = checkpoint.id + 100;
+        let path = dir.path().join("stale.jsonl");
+        tokio::fs::write(&path, serde_json::to_string(&missing).unwrap() + "\n")
+            .await
+            .unwrap();
+        let verify = db
+            .audit_verify_with(AuditVerifyOptions {
+                anchor_log: Some(path),
+                ..AuditVerifyOptions::default()
+            })
+            .await
+            .unwrap();
+        assert!(verify.rollback_detected);
+        assert!(verify.first_bad.is_some());
+    }
+
+    #[tokio::test]
+    async fn export_bundles_carry_and_verify_signatures() {
+        let (dir, db) = db().await;
+        append_entries(&db, &["a", "b", "c"]).await;
+        let signer = AuditSigner::generate(&dir.path().join("key"), None).unwrap();
+        let checkpoint = db
+            .audit_seal_with(10, Some(&signer), false)
+            .await
+            .unwrap()
+            .unwrap();
+        append_entries(&db, &["tail"]).await;
+        let path = dir.path().join("bundle.jsonl");
+        db.audit_export_and_prune_checkpoint(checkpoint.id, &path)
+            .await
+            .unwrap();
+
+        let verify = db
+            .audit_verify_export_with(&path, &[trusted(&signer)])
+            .await
+            .unwrap();
+        assert_eq!(verify.signatures, 1);
+        assert_eq!(verify.trusted_signatures, 1);
+
+        let other = AuditSigner::generate(&dir.path().join("other"), None).unwrap();
+        assert!(
+            db.audit_verify_export_with(&path, &[trusted(&other)])
+                .await
+                .is_err()
+        );
     }
 }

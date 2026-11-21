@@ -86,6 +86,16 @@ pub struct Report {
     pub reconciled: u64,
     /// Audit checkpoints sealed this pass.
     pub audit_checkpoints_sealed: u64,
+    /// Sealed checkpoints that were signed.
+    pub audit_checkpoints_signed: u64,
+    /// Sealing failed; entries remain unsealed for the next pass.
+    pub audit_seal_failed: bool,
+    /// Anchor records appended to the journal.
+    pub audit_anchors_journaled: u64,
+    /// Anchor records delivered over HTTP.
+    pub audit_anchors_delivered: u64,
+    /// Anchor rows that failed at least one sink.
+    pub audit_anchor_failures: u64,
 }
 
 /// Errors during a janitor pass.
@@ -100,6 +110,9 @@ pub enum JanitorError {
     /// Blob store failure.
     #[error("blob store: {0}")]
     Store(#[from] kolimi_store::StoreError),
+    /// Audit anchor delivery failure.
+    #[error("audit anchor: {0}")]
+    Anchor(#[from] crate::anchor::AnchorError),
 }
 
 /// Runs one maintenance pass.
@@ -167,15 +180,75 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
         )
         .await?;
 
-    // Seal audit entries off the request path once enough have accumulated.
-    report.audit_checkpoints_sealed = state
-        .db
-        .audit_seal_pending(
-            kolimi_db::AUDIT_CHECKPOINT_ENTRIES,
-            kolimi_db::AUDIT_CHECKPOINT_BATCH,
-            AUDIT_CHECKPOINTS_PER_PASS,
-        )
-        .await?;
+    // Seal audit entries off the request path once enough have accumulated
+    // or the oldest unsealed entry is old enough to bound the anchor gap.
+    let seal_age_millis = std::env::var("KOLIMI_AUDIT_SEAL_AGE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|seconds| *seconds >= 0)
+        .map(|seconds| seconds.saturating_mul(1000))
+        .unwrap_or(24 * 60 * 60 * 1000);
+    let enqueue_anchor = state
+        .audit_anchors
+        .as_deref()
+        .is_some_and(crate::anchor::AnchorConfig::enabled);
+    let mut signer = state.audit_signer.clone();
+    if signer.is_none()
+        && let Some(path) = state.audit_signing_key.as_deref()
+    {
+        match kolimi_db::AuditSigner::load(path) {
+            Ok(loaded) => {
+                tracing::info!(key_id = loaded.key_id(), "audit signing key reloaded");
+                signer = Some(std::sync::Arc::new(loaded));
+            }
+            Err(error) => tracing::error!(%error, "audit signing key still unavailable"),
+        }
+    }
+    if state.audit_signing_key.is_some() && signer.is_none() {
+        report.audit_seal_failed = true;
+        state.metrics.audit_signing_error();
+        tracing::error!("refusing to seal audit checkpoints without the configured signing key");
+    } else {
+        match state
+            .db
+            .audit_seal_if_due(
+                kolimi_db::AUDIT_CHECKPOINT_ENTRIES,
+                seal_age_millis,
+                kolimi_db::AUDIT_CHECKPOINT_BATCH,
+                AUDIT_CHECKPOINTS_PER_PASS,
+                signer.as_deref(),
+                enqueue_anchor,
+            )
+            .await
+        {
+            Ok(sealed) => {
+                report.audit_checkpoints_sealed = sealed;
+                if signer.is_some() {
+                    report.audit_checkpoints_signed = sealed;
+                    state.metrics.audit_checkpoints_signed(sealed);
+                }
+            }
+            Err(error) => {
+                report.audit_seal_failed = true;
+                if signer.is_some() {
+                    state.metrics.audit_signing_error();
+                }
+                tracing::error!(%error, "audit checkpoint seal failed; retrying next pass");
+            }
+        }
+    }
+    if let Some(config) = state.audit_anchors.as_deref()
+        && config.enabled()
+    {
+        match crate::anchor::drain(&state.db, config, Some(&state.metrics), 20).await {
+            Ok(drain) => {
+                report.audit_anchors_journaled = drain.journaled;
+                report.audit_anchors_delivered = drain.delivered;
+                report.audit_anchor_failures = drain.failed;
+            }
+            Err(error) => tracing::error!(%error, "audit anchor drain failed; retrying next pass"),
+        }
+    }
 
     // Recompute a bounded batch of usage counters from *referenced* bytes so
     // the cached numbers cannot drift; the request path never walks the tree.
@@ -310,6 +383,15 @@ pub async fn run(state: AppState) {
                 state
                     .metrics
                     .janitor_event("audit_checkpoints_sealed", report.audit_checkpoints_sealed);
+                state
+                    .metrics
+                    .janitor_event("audit_checkpoints_signed", report.audit_checkpoints_signed);
+                state
+                    .metrics
+                    .janitor_event("audit_anchors_journaled", report.audit_anchors_journaled);
+                state
+                    .metrics
+                    .janitor_event("audit_anchors_delivered", report.audit_anchors_delivered);
                 if report != Report::default() {
                     tracing::info!(
                         retention_users = report.retention_users,
@@ -330,6 +412,10 @@ pub async fn run(state: AppState) {
                         corrupt = report.corrupt,
                         reconciled = report.reconciled,
                         audit_checkpoints_sealed = report.audit_checkpoints_sealed,
+                        audit_checkpoints_signed = report.audit_checkpoints_signed,
+                        audit_anchors_journaled = report.audit_anchors_journaled,
+                        audit_anchors_delivered = report.audit_anchors_delivered,
+                        audit_anchor_failures = report.audit_anchor_failures,
                         "janitor pass complete"
                     );
                 }
