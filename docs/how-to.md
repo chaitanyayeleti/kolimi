@@ -296,9 +296,10 @@ signing, and anchoring.
 
 ### Sign and anchor audit checkpoints
 
-Signing is local — no external service is required. Anchoring is optional and
-is the part that publishes the signed head somewhere the server cannot
-rewrite.
+Available in **0.7.1+**. Back up the data directory before upgrading; 0.7.1
+adds migration `0038`. Signing is local — no external service is required.
+Anchoring is optional and is the part that publishes the signed head somewhere
+the server cannot rewrite.
 
 1. Generate a key outside the data directory:
 
@@ -322,6 +323,22 @@ rewrite.
    kolimi-server audit verify --trusted-key <hex-public-key> --require-signatures
    ```
 
+   Expected output includes:
+
+   ```text
+   signatures: 1 signed, 1 verified, 0 unsigned, 0 untrusted, 0 errors (trust: trusted-keys)
+   ```
+
+   `audit verify` exits `1` if the entry chain, a checkpoint, a trusted
+   signature, or an anchored head does not match. `--require-signatures` also
+   fails any checkpoint that has no valid trusted signature. Without
+   `--trusted-key`/`--trusted-keys`, it reports signature counts but does not
+   verify them cryptographically. A trusted-keys file has one line per key:
+
+   ```text
+   <key_id> <public_key_hex> [label]
+   ```
+
 4. Optionally publish heads. A mounted journal:
 
    ```sh
@@ -341,6 +358,28 @@ rewrite.
    kolimi-server audit verify --trusted-keys FILE \
      --anchor-log /mnt/audit-anchors/kolimi.jsonl
    ```
+
+   Check delivery and retry pending records with:
+
+   ```sh
+   kolimi-server audit anchors list
+   kolimi-server audit anchors flush
+   ```
+
+   Enabling anchoring later does not backfill the outbox; publish the current
+   head once with `kolimi-server audit head` (one head commits to the whole
+   earlier chain).
+
+5. Verify an exported retention bundle independently:
+
+   ```sh
+   kolimi-server audit verify-export --file audit-12.jsonl \
+     --trusted-key <hex-public-key>
+   ```
+
+The janitor seals automatically at 1,024 pending entries or when the oldest
+unsealed entry is older than 24 hours. Override the age with
+`KOLIMI_AUDIT_SEAL_AGE_SECS`; set it to `0` to disable the age trigger.
 
 If a configured key cannot be loaded, sealing is refused rather than writing
 unsigned checkpoints. A journal on the server's own disk adds no protection;

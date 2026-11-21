@@ -54,8 +54,18 @@ services:
       KOLIMI_METRICS_PER_USER: ${KOLIMI_METRICS_PER_USER:-0}
       KOLIMI_METRICS_TOKEN: ${KOLIMI_METRICS_TOKEN:-}
       RUST_LOG: ${RUST_LOG:-info}
+      # Optional audit checkpoint signing (0.7.1+). Uncomment the variable
+      # and matching volume below; the host key must be owned by UID 65532
+      # with mode 0600 so the distroless nonroot user can read it.
+      # KOLIMI_AUDIT_SIGNING_KEY: /run/secrets/audit-signing.key
+      # Seal a small tail after a day instead of waiting for 1,024 entries.
+      # KOLIMI_AUDIT_SEAL_AGE_SECS: "86400"
+      # Optional anchor journal; mount a WORM or independent directory.
+      # KOLIMI_AUDIT_ANCHOR_LOG: /mnt/audit-anchors/kolimi.jsonl
     volumes:
       - kolimi-data:/data
+      # - /etc/kolimi/audit-signing.key:/run/secrets/audit-signing.key:ro
+      # - /srv/kolimi-anchors:/mnt/audit-anchors
     labels:
       - traefik.enable=true
       # /metrics is admin-only inside the app (session or basic auth), so

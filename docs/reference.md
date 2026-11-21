@@ -140,10 +140,11 @@ several signatures.
 
 `audit verify` trusts only keys supplied with `--trusted-key` or
 `--trusted-keys`; without them it reports signature counts but verifies
-nothing. With no explicit key, it falls back to the configured signing key
-and reports `trust_source: configured-key`. `--require-signatures` fails on
-an unsigned checkpoint. Bundle headers carry an optional `signatures` array,
-so `audit verify-export --trusted-key HEX` verifies the archive too.
+nothing. When no explicit key is supplied and a signing key is configured,
+it falls back to that key and reports `trust_source: configured-key`;
+otherwise the source is `none`. `--require-signatures` fails on an unsigned
+checkpoint. Bundle headers carry an optional `signatures` array, so
+`audit verify-export --trusted-key HEX` verifies the archive too.
 
 Anchoring publishes each signed checkpoint head as one JSON line:
 
@@ -159,6 +160,31 @@ Anchoring publishes each signed checkpoint head as one JSON line:
 exists locally with the same hash, and reports `rollback_detected` when local
 history is behind an anchor. `audit head` prints the latest record for manual
 publication. Anchor records contain no audit content.
+
+Configuration:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `KOLIMI_AUDIT_SIGNING_KEY` | unset | Mode-`0600` Ed25519 key file. Setting it makes sealing fail closed if the key cannot load. |
+| `KOLIMI_AUDIT_ANCHOR_LOG` | unset | Append-only JSONL journal path. |
+| `KOLIMI_AUDIT_ANCHOR_URL` | unset | HTTPS anchor sink; plain HTTP only for loopback. |
+| `KOLIMI_AUDIT_ANCHOR_TOKEN` | unset | Bearer token for the HTTPS sink. |
+| `KOLIMI_AUDIT_SEAL_AGE_SECS` | `86400` | Seal an old unsealed tail; `0` disables the age trigger. |
+
+The trusted-keys file has one entry per line:
+
+```text
+<key_id> <public_key_hex> [label]
+```
+
+`audit verify` exits `1` if the entry chain, a checkpoint header/range,
+Merkle root, trusted signature, or anchored head fails. With
+`--require-signatures`, an unsigned checkpoint is also fatal. Output counters:
+`entries`, `checkpoints`, `pruned_checkpoints`, `signed_checkpoints`,
+`verified_signatures`, `unsigned_checkpoints`, `untrusted_signatures`,
+`signature_errors`, `anchors_checked`, `rollback_detected`, `trust_source`,
+`latest_anchor`, and `first_bad`. `trust_source` is `trusted-keys`,
+`configured-key`, or `none`.
 
 `audit prune` writes the selected prefix to a new JSONL file (it refuses to
 overwrite an existing path), fsyncs it, then deletes those rows and records
@@ -334,8 +360,10 @@ Notes:
   `DELETE /api/groups/{name}`, and
   `POST|DELETE /api/groups/{name}/members/{username}`. `GET /api/audit`
   accepts `limit`, `before`, `action`, and `subject`; `GET /api/audit/verify`
-  recomputes the hash chain. Both audit routes are admin-only and omit chain
-  hashes.
+  recomputes the hash chain and reports checkpoint, signature, anchor, and
+  `rollback_detected` counters. It verifies signatures against the server's
+  configured key only. Both audit routes are admin-only and omit chain hashes
+  and audit details.
 - Public links use `/public/{token}` and set a scoped unlock cookie after
   `POST /public/{token}/unlock`. `POST /api/shares` with `kind: "link"`
   accepts `password` (omitted = generated, `""` = none) and

@@ -118,6 +118,8 @@ Then verify:
 - [ ] The AUR package points at the new tag and its checksum matches.
 - [ ] `install.sh --version vX.Y.Z` installs and starts a working server.
 - [ ] A desktop `.deb`/AppImage starts and can sign in.
+- [ ] If the release includes audit signing, seal a checkpoint and verify it
+      with the published binary using an external `--trusted-key`.
 
 ## Rollback
 

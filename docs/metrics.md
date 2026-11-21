@@ -298,6 +298,15 @@ sum by (result) (rate(kolimi_janitor_runs_total[1h]))
 increase(kolimi_janitor_events_total{kind="scrub_corrupt"}[1h])
 ```
 
+**Audit signing and anchoring**
+
+```promql
+increase(kolimi_audit_signing_errors_total[1h])
+kolimi_audit_anchor_pending
+sum by (sink) (rate(kolimi_audit_anchor_failures_total[15m]))
+sum by (sink) (rate(kolimi_audit_anchor_delivered_total[5m]))
+```
+
 **Database pool**
 
 ```promql

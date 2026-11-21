@@ -400,6 +400,54 @@ head once with `kolimi-server audit head`; because every checkpoint commits
 to the previous one, that single record covers the earlier chain. New
 checkpoints are anchored automatically.
 
+### Audit signing and anchoring configuration
+
+| Variable | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `KOLIMI_AUDIT_SIGNING_KEY` | No | unset | Path to the mode-`0600` Ed25519 key file. Setting it makes signing mandatory: if the key cannot be loaded, sealing is refused. Keep it outside the data directory. |
+| `KOLIMI_AUDIT_ANCHOR_LOG` | No | unset | Append-only JSONL journal. Use WORM/object-lock or an independent mount; the same disk adds no protection. |
+| `KOLIMI_AUDIT_ANCHOR_URL` | No | unset | HTTPS anchor sink. Plain `http://` is accepted only for loopback. |
+| `KOLIMI_AUDIT_ANCHOR_TOKEN` | No | unset | Bearer token for the HTTPS sink. Requires `KOLIMI_AUDIT_ANCHOR_URL`. |
+| `KOLIMI_AUDIT_SEAL_AGE_SECS` | No | `86400` | Seal an old unsealed tail after this many seconds. `0` disables the age trigger; the 1,024-entry trigger remains. |
+
+At least one of `KOLIMI_AUDIT_ANCHOR_LOG` and `KOLIMI_AUDIT_ANCHOR_URL` must be
+set for anchoring. With none of the variables above, checkpoints are unsigned
+and unanchored, exactly as in 0.7.0. The Traefik/Docker key mount is in
+[how-to.md](how-to.md#sign-and-anchor-audit-checkpoints).
+
+### Verification and failure handling
+
+`audit verify` reports:
+
+- `entries`, `checkpoints`, `pruned_checkpoints` — retained chain and headers.
+- `signed_checkpoints`, `verified_signatures`, `unsigned_checkpoints`,
+  `untrusted_signatures`, `signature_errors` — signature status.
+- `trust_source` — `trusted-keys`, `configured-key`, or `none`.
+- `anchors_checked`, `latest_anchor`, `rollback_detected` — anchor comparison.
+- `first_bad` — the first entry or boundary that failed.
+
+Exit code is `0` only when no chain, checkpoint, trusted-signature, or anchor
+error was found. `--require-signatures` also fails an unsigned checkpoint.
+Without `--trusted-key`/`--trusted-keys`, signatures are counted but not
+cryptographically verified; when a signing key is configured it is used
+automatically and reported as `configured-key`, otherwise `trust_source` is
+`none`.
+
+Common failures:
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `configured signing key unavailable` | Wrong path, wrong owner/mode, or a symlink. The key must be a regular file, readable by the service user, mode `0600`/`0400`. |
+| Sealing stops with signing errors | The configured key disappeared or became unreadable. Fix the file; the janitor retries every pass and never falls back to unsigned checkpoints. |
+| `unsigned_checkpoints` > 0 | Checkpoints predate signing. Run `audit sign --key FILE --all`, or use `--require-signatures` to make the gap visible. |
+| `untrusted_signatures` > 0 | The checkpoint was signed by a key not in your trusted set. Add the right public key or rotate/countersign. |
+| `rollback_detected` | A published anchored head is newer than local history. Restore a newer database backup or investigate truncation. |
+| `anchors_checked` stays 0 | `--anchor-log` was not supplied; the journal is only read when explicitly passed. |
+| `kolimi_audit_anchor_pending` grows | The sink is down or rejected the request. Check `audit anchors list` for `last_error`; 2xx/409 succeed, 408/429/5xx retry, other 4xx are permanent. |
+
+`GET /api/audit/verify` returns the same counters, verifies against the
+server's configured key only, and never exposes audit details or private keys.
+
 Events cover logins and failures, logouts, passkeys, TOTP, password changes,
 profile edits, invite creation/revocation/acceptance, user administration,
 file mutations (via the change feed), shares, link unlocks/downloads, E2EE
