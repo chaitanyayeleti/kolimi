@@ -20,6 +20,7 @@ Last full verification: **0.6.0** (2026-11-20).
 | [0010 — WebDAV / E2EE boundary](0010-webdav-e2ee-boundary.md) | implemented | shipped | DAV refuses encrypted content; encrypted-folder ancestry is the marker; names stay opaque |
 | [0011 — Client unlock](0011-e2ee-client-unlock.md) | implemented | shipped (desktop) | `SyncError::Locked`, tray state, keychain unlock |
 | [0012 — MLS groups](0012-mls-groups.md) | implemented | shipped; **audit pending** | Node-scoped groups, epochs, keyring, write shares, device revoke |
+| [0013 — Sealed audit checkpoints](0013-audit-checkpoints.md) | draft | not started | Merkle-rooted checkpoint blocks; prune by checkpoint; signing/external anchors later |
 
 ## Status conventions
 
