@@ -54,6 +54,8 @@ enum Command {
     },
     /// Verify the integrity of every stored file and version.
     Verify,
+    /// Move legacy flat manifest blobs into the fanout layout.
+    MigrateManifests,
     /// Inspect the append-only audit log.
     Audit {
         #[command(subcommand)]
@@ -266,6 +268,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(Command::Group { command }) => group_command(command, data).await,
         Some(Command::Backup { to, incremental }) => backup(data, to, incremental).await,
         Some(Command::Verify) => verify(data).await,
+        Some(Command::MigrateManifests) => migrate_manifests(data).await,
         Some(Command::Audit { command }) => audit_command(command, data).await,
         Some(Command::PreviewWorker { kind, input, max }) => {
             match kolimi_preview::worker::run(&kind, &input, max) {
@@ -740,6 +743,22 @@ async fn verify(data: PathBuf) -> Result<(), Box<dyn Error>> {
         return Err(format!("{failures} user(s) failed verification").into());
     }
     println!("all content verified");
+    Ok(())
+}
+
+async fn migrate_manifests(data: PathBuf) -> Result<(), Box<dyn Error>> {
+    let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
+    let store = kolimi_store::BlobStore::open(data.join("blobs")).await?;
+    let mut total = 0u64;
+    for user in db.list_users().await? {
+        let moved = store.migrate_legacy_manifests(user.id, usize::MAX).await?;
+        if moved > 0 {
+            println!("{}: moved {moved} legacy manifests", user.username);
+        }
+        db.mark_legacy_manifests_migrated(user.id).await?;
+        total += moved;
+    }
+    println!("migrated {total} legacy manifests");
     Ok(())
 }
 

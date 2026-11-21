@@ -439,13 +439,14 @@ once per minute. The session or token row is still read on every request, so
 revocation and account disable take effect immediately; only the timestamp
 write is throttled.
 
-Directory reads are paginated. `kolimi-sync` now uses the change feed for
-file content updates and skips the full remote tree walk on those passes.
-Directory creation/deletion, moves, and other structural changes deliberately
-fall back to a full reconciliation. The local filesystem is still scanned by
-push, so very large local trees remain CPU-bound on the client; the server no
-longer serves a full snapshot for every file edit. Trash listings are
-paginated with the same `limit`/`cursor` pattern as directory browsing.
+Directory reads are paginated. `kolimi-sync` uses the change feed for file
+content updates, directory creation, moves, and deletes, and only falls back
+to a full remote tree walk for an unknown change kind or an old server. Push
+keeps directory mtimes in its state file: unchanged directories are not
+enumerated, only their tracked files are stat'ed, and a changed directory is
+rescanned. Very large local trees still cost one stat per tracked file, but
+the server never serves a full snapshot for an ordinary edit. Trash listings
+are paginated with the same `limit`/`cursor` pattern as directory browsing.
 
 The search indexer only visits accounts with unindexed change-feed rows. The
 janitor processes bounded per-account batches: expired trash/versions first,
@@ -461,7 +462,9 @@ blobs already present and hard-links new ones on the same filesystem
 (otherwise copies them), which keeps repeated backups cheap. At terabyte
 scale, plan the backup window, temporary space, and restore time explicitly.
 `verify` is a full re-hash; the janitor scrubs bounded batches in the
-background.
+background. Legacy flat manifests are readable forever, but the janitor moves
+up to 1,000 per account per sweep into the fanout layout; run
+`kolimi-server migrate-manifests` for an immediate one-shot migration.
 
 A practical profile:
 
@@ -473,7 +476,7 @@ A practical profile:
 
 Read-heavy downloads, WebDAV/CalDAV, and small-directory browsing scale best.
 The first pressure points are concurrent SQLite writes, very large single
-directories, structural full-tree sync reconciliations, and unpruned audit
+directories, the per-file stat pass on huge client trees, and unpruned audit
 growth.
 
 ## E2EE and MLS operations

@@ -225,7 +225,7 @@ async fn encrypted_files_never_reach_the_server_in_plaintext() {
     ))
     .await
     .unwrap();
-    assert_eq!(report, Default::default());
+    assert!(report.is_quiescent(), "{report:?}");
 
     // An edit stays delta-friendly and decrypts on the other side.
     let mut edited = secret.clone();

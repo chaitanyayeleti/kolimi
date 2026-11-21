@@ -265,7 +265,7 @@ async fn group_share_reaches_members_and_removal_revokes() {
     assert_eq!(report.removed_local, 1, "{report:?}");
     assert!(shared_file(&carol_dir).is_none());
     let report = sync_once(&bob).await.unwrap();
-    assert_eq!(report, Default::default());
+    assert!(report.is_quiescent(), "{report:?}");
     assert!(shared_file(&bob_dir).is_some());
 
     server.handle.abort();

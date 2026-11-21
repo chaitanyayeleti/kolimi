@@ -82,6 +82,9 @@ data/
 - Atomic commit: manifest blob is written first (temp + fsync + rename), then
   the path→manifest mapping is updated in a single SQLite transaction.
   A `kill -9` at any point leaves either the old or the new state, never a mix.
+- Older stores keep manifests flat at `manifests/<content-id>`; reads fall
+  back there. The janitor and `kolimi-server migrate-manifests` move them into
+  the fanout layout without changing content ids.
 - **Dedup scope:** per-user by default (privacy- and authorization-safe).
   Global dedup is an explicit opt-in with a documented cross-user tradeoff.
 - **E2EE boundary:** with client-side encryption, chunks are encrypted by the

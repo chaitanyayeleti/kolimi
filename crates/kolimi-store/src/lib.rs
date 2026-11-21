@@ -647,6 +647,61 @@ impl BlobStore {
         copy_tree(&self.root.join("users"), &dest.join("users")).await
     }
 
+    /// Moves up to `limit` legacy flat manifests into the fanout layout.
+    ///
+    /// Old stores keep `manifests/<content-id>`; new writes use
+    /// `manifests/aa/bb/<content-id>`. Reads already fall back, so this is a
+    /// background compaction step, not a correctness requirement.
+    pub async fn migrate_legacy_manifests(
+        &self,
+        user_id: i64,
+        limit: usize,
+    ) -> Result<u64, StoreError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let dir = self.manifests_dir(user_id);
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(StoreError::Io(error)),
+        };
+        let mut migrated = 0u64;
+        while let Some(entry) = entries.next_entry().await? {
+            if migrated as usize >= limit {
+                break;
+            }
+            if !entry.file_type().await?.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Ok(content_id) = name.parse::<Hash>() else {
+                continue;
+            };
+            let target = self.manifest_path(user_id, &content_id);
+            if tokio::fs::try_exists(&target).await? {
+                // A concurrent write already produced the fanout copy.
+                tokio::fs::remove_file(entry.path()).await?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                if tokio::fs::rename(entry.path(), &target).await.is_err() {
+                    // Different filesystem or a platform without atomic
+                    // rename: copy first, then remove the old copy. A crash
+                    // between the two leaves both, and the next pass removes
+                    // the legacy file.
+                    tokio::fs::copy(entry.path(), &target).await?;
+                    tokio::fs::remove_file(entry.path()).await?;
+                }
+            }
+            migrated += 1;
+        }
+        Ok(migrated)
+    }
+
     /// Copies the blob tree incrementally.
     ///
     /// Files already present in the destination are skipped. New files are
@@ -963,6 +1018,36 @@ mod tests {
                 (state >> 24) as u8
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn legacy_manifests_migrate_to_fanout() {
+        let (_dir, store) = store().await;
+        let data = b"legacy manifest".to_vec();
+        let (manifest, _) = store.ingest_bytes(1, &data).await.unwrap();
+        let content_id = manifest.content_id();
+        let fanout = store.manifest_path(1, &content_id);
+        let legacy = store.legacy_manifest_path(1, &content_id);
+        tokio::fs::create_dir_all(legacy.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::rename(&fanout, &legacy).await.unwrap();
+        assert!(legacy.exists() && !fanout.exists());
+
+        assert_eq!(store.migrate_legacy_manifests(1, 10).await.unwrap(), 1);
+        assert!(!legacy.exists());
+        assert!(fanout.exists());
+        assert_eq!(
+            store
+                .get_manifest(1, &content_id)
+                .await
+                .unwrap()
+                .content_id(),
+            content_id
+        );
+
+        // Idempotent once the flat directory is empty.
+        assert_eq!(store.migrate_legacy_manifests(1, 10).await.unwrap(), 0);
     }
 
     #[tokio::test]

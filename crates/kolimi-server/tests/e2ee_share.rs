@@ -224,7 +224,7 @@ async fn encrypted_file_shared_with_a_user_syncs_decrypted() {
 
     // A second pass is a no-op.
     let report = sync_once(&bob).await.unwrap();
-    assert_eq!(report, Default::default());
+    assert!(report.is_quiescent(), "{report:?}");
 
     // Alice edits; bob follows on the next pull.
     let mut edited = secret.clone();

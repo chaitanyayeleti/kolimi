@@ -135,6 +135,11 @@ fn tree(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     out
 }
 
+/// Asserts a pass moved nothing in either direction.
+fn assert_quiescent(report: &kolimi_sync::SyncReport) {
+    assert!(report.is_quiescent(), "{report:?}");
+}
+
 #[tokio::test]
 async fn bidirectional_sync_roundtrip_with_conflicts() {
     let server = start_server().await;
@@ -158,9 +163,9 @@ async fn bidirectional_sync_roundtrip_with_conflicts() {
 
     // A second pass is a no-op in both directions.
     let report = sync_once(&config(&server.url, &seed)).await.unwrap();
-    assert_eq!(report, Default::default());
+    assert_quiescent(&report);
     let report = sync_once(&config(&server.url, &mirror)).await.unwrap();
-    assert_eq!(report, Default::default());
+    assert_quiescent(&report);
 
     // Edit, add, and delete in the seed; the mirror follows.
     std::fs::write(seed.join("a.txt"), b"hello sync, edited").unwrap();
@@ -234,21 +239,125 @@ async fn incremental_pull_skips_full_tree_for_file_edits() {
     );
     assert_eq!(std::fs::read(mirror.join("a.txt")).unwrap(), b"version two");
 
-    // Structural changes deliberately fall back to a full reconciliation.
+    // Directory creation is part of the fast path: a mkdir row arrives
+    // before its child file's upsert.
     std::fs::create_dir_all(seed.join("newdir")).unwrap();
     std::fs::write(seed.join("newdir/b.txt"), b"new branch").unwrap();
     sync_once(&config(&server.url, &seed)).await.unwrap();
     server.tree_gets.store(0, Ordering::SeqCst);
     let report = sync_once(&config(&server.url, &mirror)).await.unwrap();
     assert_eq!(report.pulled, 1, "{report:?}");
-    assert!(
-        server.tree_gets.load(Ordering::SeqCst) > 0,
-        "a new directory must trigger a full tree reconciliation"
+    assert_eq!(
+        server.tree_gets.load(Ordering::SeqCst),
+        0,
+        "a new directory must use the change feed too"
     );
     assert_eq!(
         std::fs::read(mirror.join("newdir/b.txt")).unwrap(),
         b"new branch"
     );
+
+    // A server-side move is applied as a local rename.
+    let client = reqwest::Client::new();
+    let moved = client
+        .request(
+            reqwest::Method::from_bytes(b"MOVE").unwrap(),
+            format!("{}/dav/newdir/b.txt", server.url),
+        )
+        .basic_auth("alice", Some(PASS))
+        .header("Destination", format!("{}/dav/newdir/c.txt", server.url))
+        .send()
+        .await
+        .unwrap();
+    assert!(moved.status().is_success(), "{:?}", moved.status());
+    server.tree_gets.store(0, Ordering::SeqCst);
+    let report = sync_once(&config(&server.url, &mirror)).await.unwrap();
+    assert_eq!(report.pulled, 0, "{report:?}");
+    assert_eq!(
+        server.tree_gets.load(Ordering::SeqCst),
+        0,
+        "a move must use the change feed"
+    );
+    assert_eq!(
+        std::fs::read(mirror.join("newdir/c.txt")).unwrap(),
+        b"new branch"
+    );
+    assert!(!mirror.join("newdir/b.txt").exists());
+
+    // A directory move renames the whole mirrored subtree.
+    let moved_dir = client
+        .request(
+            reqwest::Method::from_bytes(b"MOVE").unwrap(),
+            format!("{}/dav/newdir", server.url),
+        )
+        .basic_auth("alice", Some(PASS))
+        .header("Destination", format!("{}/dav/renamed", server.url))
+        .send()
+        .await
+        .unwrap();
+    assert!(moved_dir.status().is_success(), "{:?}", moved_dir.status());
+    server.tree_gets.store(0, Ordering::SeqCst);
+    let report = sync_once(&config(&server.url, &mirror)).await.unwrap();
+    assert_eq!(report.pulled, 0, "{report:?}");
+    assert_eq!(
+        server.tree_gets.load(Ordering::SeqCst),
+        0,
+        "a directory move must use the change feed"
+    );
+    assert_eq!(
+        std::fs::read(mirror.join("renamed/c.txt")).unwrap(),
+        b"new branch"
+    );
+    assert!(!mirror.join("newdir").exists());
+
+    // A directory delete removes the mirrored subtree.
+    let deleted = client
+        .delete(format!("{}/dav/renamed", server.url))
+        .basic_auth("alice", Some(PASS))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status().as_u16(), 204);
+    server.tree_gets.store(0, Ordering::SeqCst);
+    let report = sync_once(&config(&server.url, &mirror)).await.unwrap();
+    assert_eq!(report.removed_local, 1, "{report:?}");
+    assert_eq!(
+        server.tree_gets.load(Ordering::SeqCst),
+        0,
+        "a delete must use the change feed"
+    );
+    assert!(!mirror.join("renamed").exists());
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn incremental_push_skips_unchanged_directories() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let seed = root.path().join("seed");
+    std::fs::create_dir_all(seed.join("sub")).unwrap();
+    std::fs::write(seed.join("sub/a.txt"), b"one").unwrap();
+    std::fs::write(seed.join("sub/b.txt"), b"two").unwrap();
+    sync_once(&config(&server.url, &seed)).await.unwrap();
+
+    // Nothing changed: every directory is served from the mtime cache.
+    let report = sync_once(&config(&server.url, &seed)).await.unwrap();
+    assert_quiescent(&report);
+    assert_eq!(report.dirs_walked, 0, "{report:?}");
+    assert!(report.dirs_cached >= 2, "{report:?}");
+
+    // A content edit in an unchanged directory is caught by the file stat.
+    std::fs::write(seed.join("sub/a.txt"), b"one edited").unwrap();
+    let report = sync_once(&config(&server.url, &seed)).await.unwrap();
+    assert_eq!(report.pushed, 1, "{report:?}");
+    assert_eq!(report.dirs_walked, 0, "{report:?}");
+
+    // Adding a file changes the directory mtime and triggers one scan.
+    std::fs::write(seed.join("sub/new.txt"), b"three").unwrap();
+    let report = sync_once(&config(&server.url, &seed)).await.unwrap();
+    assert_eq!(report.pushed, 1, "{report:?}");
+    assert_eq!(report.dirs_walked, 1, "{report:?}");
 
     server.handle.abort();
 }

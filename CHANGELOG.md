@@ -7,6 +7,21 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `kolimi-sync` pushes incrementally: it caches directory mtimes in
+  `.kolimi/state.json`, skips `read_dir` for unchanged directories, and
+  stats only their tracked files. Content edits are still caught; new,
+  removed, or renamed entries change the directory mtime and trigger a scan.
+- The sync client now applies directory creation, moves, and deletes from
+  the change feed instead of falling back to a full tree reconciliation.
+  Only an unknown op/kind or an old server triggers the full snapshot.
+- `kolimi-server migrate-manifests` moves legacy flat manifests into the
+  fanout layout; the janitor also migrates them in bounded per-account
+  batches and reports `kolimi_janitor_events_total{kind="manifests_migrated"}`.
+- `/api/shares/received` preloads wrapped display names for all mounts in
+  one query instead of one lookup per mount.
+- The Grafana dashboard includes write/audit pressure, auth timestamp
+  throttle, browse page size, search-indexer, and janitor account-batch
+  panels.
 - Scaling metrics: session/app-password timestamp writes split into
   `written`/`skipped`, SQLite write transactions, audit rows, change-feed
   rows, `/api/browse` page sizes, and search-indexer results.

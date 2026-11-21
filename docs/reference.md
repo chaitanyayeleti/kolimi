@@ -79,6 +79,7 @@ kolimi-server backup --data DIR --to DIR   # online SQLite snapshot + blobs
 kolimi-server backup --data DIR --to DIR --incremental
                                            # skip existing blobs; hard-link new ones
 kolimi-server verify --data DIR            # full BLAKE3/chunk verification
+kolimi-server migrate-manifests           # move legacy flat manifests to fanout
 kolimi-server audit list [--limit N] [--before ID]
 kolimi-server audit verify                 # exit 1 on a broken hash chain
 kolimi-server audit prune --before ID --to audit.jsonl
@@ -87,6 +88,8 @@ kolimi-server audit prune --before ID --to audit.jsonl
 
 `backup` is safe while the server is running. `verify` is the full
 on-demand check; the janitor also scrubs incrementally in the background.
+`migrate-manifests` moves any pre-0.6.0 flat manifests into the fanout
+layout; the janitor does the same in bounded batches.
 
 `--incremental` keeps an existing backup current without copying unchanged
 blobs. New blobs are hard-linked when the destination is on the same
@@ -308,9 +311,15 @@ and `DELETE /api/trash/{id}` are unchanged.
 `encrypted` alongside the existing `op`, `content_id`, and path fields.
 `GET /api/sync/head` returns the current `change_seq`. Clients snapshot the
 tree, record the head, and replay changes from there so a write during the
-snapshot is not lost. File content updates are applied incrementally;
-structural changes (directories, moves, deletes) trigger a full tree
-reconciliation.
+snapshot is not lost. File content updates, directory creation, moves, and
+deletes are all applied incrementally; a full tree reconciliation is only
+the fallback for an unknown op/kind or an old server.
+
+`kolimi-sync` also pushes incrementally: it keeps directory mtimes in
+`.kolimi/state.json`, skips `read_dir` for unchanged directories, and stats
+only their tracked files. A content edit in an unchanged directory is still
+detected; adding, removing, or renaming an entry changes the directory mtime
+and rescans that directory.
 
 ### WebDAV / CalDAV / CardDAV
 

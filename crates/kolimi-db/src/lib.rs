@@ -1141,6 +1141,34 @@ impl Db {
         Ok(())
     }
 
+    /// Whether a full legacy-manifest scan found nothing left for this user.
+    pub async fn legacy_manifests_migrated(&self, user_id: i64) -> Result<bool, DbError> {
+        let flag: Option<i64> = sqlx::query_scalar(
+            "SELECT legacy_manifests_migrated FROM maintenance_state WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(flag.unwrap_or(0) != 0)
+    }
+
+    /// Stops the janitor from rescanning a user's manifest directory.
+    pub async fn mark_legacy_manifests_migrated(&self, user_id: i64) -> Result<(), DbError> {
+        let now = now_millis();
+        sqlx::query(
+            "INSERT INTO maintenance_state
+                 (user_id, last_gc_at, dirty, legacy_manifests_migrated, updated_at)
+             VALUES (?, NULL, 0, 1, ?)
+             ON CONFLICT(user_id) DO UPDATE SET
+                 legacy_manifests_migrated = 1, updated_at = excluded.updated_at",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Records a successful login time for the admin user list.
     pub async fn set_last_login(&self, user_id: i64, at: i64) -> Result<(), DbError> {
         sqlx::query("UPDATE users SET last_login_at = ? WHERE id = ?")
@@ -2356,6 +2384,9 @@ mod tests {
         assert_eq!(db.users_with_pending_gc(10).await.unwrap(), vec![alice.id]);
         db.set_last_gc(alice.id, now).await.unwrap();
         assert!(db.users_with_pending_gc(10).await.unwrap().is_empty());
+        assert!(!db.legacy_manifests_migrated(alice.id).await.unwrap());
+        db.mark_legacy_manifests_migrated(alice.id).await.unwrap();
+        assert!(db.legacy_manifests_migrated(alice.id).await.unwrap());
 
         // The rotating sweep visits the never-swept account next.
         let due = db.users_due_for_gc(1).await.unwrap();

@@ -327,17 +327,23 @@ pub async fn received(
         Ok(mounts) => mounts,
         Err(_) => return api::internal_error(),
     };
+    let names = match state
+        .db
+        .share_names(
+            user.user_id,
+            &mounts.iter().map(|mount| mount.node_id).collect::<Vec<_>>(),
+        )
+        .await
+    {
+        Ok(names) => names,
+        Err(_) => return api::internal_error(),
+    };
     let mut items = Vec::with_capacity(mounts.len());
     for mount in &mounts {
         // Encrypted shares carry an opaque display name (and, for folders, a
         // name key) wrapped to this recipient. Including it here saves a
         // request per mount and lets the UI render real names immediately.
-        let wrapped = state
-            .db
-            .share_name(mount.node_id, user.user_id)
-            .await
-            .ok()
-            .flatten();
+        let wrapped = names.get(&mount.node_id).cloned();
         items.push(json!({
             "share_id": mount.share_id,
             "owner": mount.owner_username,

@@ -27,6 +27,8 @@ pub const SCRUB_BATCH: usize = 200;
 pub const RETENTION_BATCH: i64 = 100;
 /// Accounts swept for garbage per pass.
 pub const GC_BATCH: i64 = 50;
+/// Legacy flat manifests moved to the fanout layout per account per pass.
+pub const MIGRATE_BATCH: usize = 1000;
 /// Accounts scrubbed per pass (each checks `SCRUB_BATCH` blobs).
 pub const SCRUB_USERS: i64 = 50;
 /// Usage counters recomputed from disk per pass (bounded; least-recently
@@ -58,6 +60,8 @@ pub struct Report {
     pub chunks_deleted: u64,
     /// Manifest blobs reclaimed.
     pub manifests_deleted: u64,
+    /// Legacy flat manifests moved into the fanout layout.
+    pub manifests_migrated: u64,
     /// Accounts scrubbed.
     pub scrub_users: u64,
     /// Expired public-link unlock sessions removed.
@@ -175,6 +179,17 @@ async fn sweep_user(
     now: i64,
     report: &mut Report,
 ) -> Result<(), JanitorError> {
+    if !state.db.legacy_manifests_migrated(user_id).await? {
+        let moved = state
+            .vfs
+            .store()
+            .migrate_legacy_manifests(user_id, MIGRATE_BATCH)
+            .await?;
+        report.manifests_migrated += moved;
+        if moved < MIGRATE_BATCH as u64 {
+            state.db.mark_legacy_manifests_migrated(user_id).await?;
+        }
+    }
     let swept = state.vfs.collect_garbage(user_id, GC_GRACE).await?;
     report.gc_users += 1;
     report.chunks_deleted += swept.chunks_deleted;
@@ -251,6 +266,9 @@ pub async fn run(state: AppState) {
                     .janitor_event("manifests_deleted", report.manifests_deleted);
                 state
                     .metrics
+                    .janitor_event("manifests_migrated", report.manifests_migrated);
+                state
+                    .metrics
                     .janitor_event("scrub_users", report.scrub_users);
                 state
                     .metrics
@@ -283,6 +301,7 @@ pub async fn run(state: AppState) {
                         gc_users = report.gc_users,
                         chunks_deleted = report.chunks_deleted,
                         manifests_deleted = report.manifests_deleted,
+                        manifests_migrated = report.manifests_migrated,
                         scrub_users = report.scrub_users,
                         expired_link_sessions = report.expired_link_sessions,
                         expired_enrollments = report.expired_enrollments,

@@ -41,9 +41,13 @@ WebDAV compatibility is defined by the litmus test suite plus real clients
 - `GET /api/sync/changes?since={seq}&limit=N` returns a page of events plus
   `next_seq`, including the current `kind` and `encrypted` flags. Clients
   resume from their stored `seq` forever; they never enumerate the whole tree
-  again after the first scan. File content upserts are applied from the feed.
-  Structural changes (directories, moves, deletes) fall back to a full tree
-  reconciliation in the first implementation; the fast path can expand later.
+  again after the first scan. File content upserts, directory creation,
+  moves, and deletes are applied directly from the feed; an unknown op/kind
+  or an old server falls back to a full tree reconciliation.
+- The push side keeps a directory-mtime index. Unchanged directories are not
+  re-enumerated, their tracked files are stat'ed, and a changed directory is
+  rescanned, so adding/removing/renaming entries is still detected without a
+  full walk.
 - `GET /api/sync/head` returns the current `change_seq`. A client records it
   before a tree snapshot, then replays changes from that point, so a write
   during the snapshot is not lost.

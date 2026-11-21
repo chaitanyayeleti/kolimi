@@ -222,9 +222,10 @@ are rebuilt at most every 30 seconds, not on every scrape.
 
 Janitor event kinds include `retention_users`, `trash_purged`,
 `versions_pruned`, `gc_users`, `chunks_deleted`, `manifests_deleted`,
-`scrub_users`, `link_sessions_expired`, `enrollments_expired`,
-`mls_key_packages_pruned`, `mls_devices_pruned`, `mls_messages_pruned`,
-`mls_keyrings_pruned`, `scrub_checked`, `scrub_corrupt`, and `reconciled`.
+`manifests_migrated`, `scrub_users`, `link_sessions_expired`,
+`enrollments_expired`, `mls_key_packages_pruned`, `mls_devices_pruned`,
+`mls_messages_pruned`, `mls_keyrings_pruned`, `scrub_checked`,
+`scrub_corrupt`, and `reconciled`.
 
 The janitor and indexer now schedule bounded per-account batches: accounts
 with expired trash/versions or an uncollected delete go first, then the

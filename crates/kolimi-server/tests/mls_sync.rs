@@ -187,7 +187,7 @@ async fn encrypted_folder_share_uses_mls_keyring() {
     // Bob now has a local MLS group; a second pass is a no-op.
     assert!(bob_dir.join(".kolimi/mls-state.bin").exists());
     let report = sync_once(&bob).await.unwrap();
-    assert_eq!(report, Default::default());
+    assert!(report.is_quiescent(), "{report:?}");
 
     // Alice adds a file; Bob decrypts it through the same keyring update.
     std::fs::write(alice_dir.join("Private/Team/c.txt"), b"gamma").unwrap();

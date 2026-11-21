@@ -4,6 +4,8 @@
 //! client's JSON of wrapped master-key copies, and a file key is a
 //! wrapped per-file key. Neither can be used without the user's secret.
 
+use std::collections::HashMap;
+
 use crate::{Db, DbError, now_millis};
 
 /// Maximum keyring size accepted by [`Db::set_keyring`].
@@ -201,6 +203,31 @@ impl Db {
         .bind(recipient_id)
         .fetch_optional(&self.pool)
         .await?)
+    }
+
+    /// Returns wrapped share metadata for many nodes at once.
+    pub async fn share_names(
+        &self,
+        recipient_id: i64,
+        node_ids: &[i64],
+    ) -> Result<HashMap<i64, Vec<u8>>, DbError> {
+        let mut out = HashMap::new();
+        for chunk in node_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT node_id, wrapped FROM e2ee_share_names
+                 WHERE recipient_id = ? AND node_id IN ({placeholders})"
+            );
+            let mut query =
+                sqlx::query_as::<_, (i64, Vec<u8>)>(sqlx::AssertSqlSafe(sql)).bind(recipient_id);
+            for node_id in chunk {
+                query = query.bind(node_id);
+            }
+            for (node_id, wrapped) in query.fetch_all(&self.pool).await? {
+                out.insert(node_id, wrapped);
+            }
+        }
+        Ok(out)
     }
 
     /// Returns the wrapped key of a node, if it is encrypted.
@@ -416,6 +443,36 @@ mod tests {
             db.keyring(user.id).await.unwrap().as_deref(),
             Some(r#"{"version":1,"wraps":[]}"#)
         );
+    }
+
+    #[tokio::test]
+    async fn share_names_load_in_one_batch() {
+        let (_dir, db) = db().await;
+        let alice = db.create_user("alice", "hash-a").await.unwrap();
+        let bob = db.create_user("bob", "hash-b").await.unwrap();
+        let root = db.root_node(alice.id).await.unwrap();
+        let first = db
+            .insert_node(alice.id, Some(root.id), "one.txt", "file", None, 0, 0)
+            .await
+            .unwrap();
+        let second = db
+            .insert_node(alice.id, Some(root.id), "two.txt", "file", None, 0, 0)
+            .await
+            .unwrap();
+        db.set_share_name(first.id, bob.id, &[1, 2, 3])
+            .await
+            .unwrap();
+        db.set_share_name(second.id, bob.id, &[4, 5, 6])
+            .await
+            .unwrap();
+
+        let names = db
+            .share_names(bob.id, &[first.id, second.id])
+            .await
+            .unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[&first.id], vec![1, 2, 3]);
+        assert_eq!(names[&second.id], vec![4, 5, 6]);
     }
 
     #[tokio::test]

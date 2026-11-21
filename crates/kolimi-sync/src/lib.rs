@@ -189,6 +189,22 @@ pub struct SyncReport {
     pub removed_remote: u64,
     /// Files skipped this pass due to a per-file error (not fatal).
     pub failed: u64,
+    /// Directories enumerated during incremental push.
+    pub dirs_walked: u64,
+    /// Directories skipped because their mtime was unchanged.
+    pub dirs_cached: u64,
+}
+
+impl SyncReport {
+    /// Whether this pass moved no files in either direction.
+    pub fn is_quiescent(&self) -> bool {
+        self.pulled == 0
+            && self.pushed == 0
+            && self.removed_local == 0
+            && self.removed_remote == 0
+            && self.conflicts == 0
+            && self.failed == 0
+    }
 }
 
 /// Errors from the sync core.
@@ -252,6 +268,11 @@ struct State {
     /// Last applied change-feed sequence for the owned tree.
     #[serde(default)]
     change_seq: Option<i64>,
+    /// Local directory mtimes, relative path (`""` = root). Push skips
+    /// `read_dir` for directories whose mtime is unchanged and stats only
+    /// their tracked files.
+    #[serde(default)]
+    dirs: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -695,6 +716,12 @@ fn has_symlink_ancestor(local_dir: &Path, local: &Path) -> bool {
         current = path.parent();
     }
     false
+}
+
+/// Whether an ancestor directory of `path` (not `path` itself) is a symlink.
+fn has_symlink_parent(local_dir: &Path, path: &Path) -> bool {
+    path.parent()
+        .is_some_and(|parent| has_symlink_ancestor(local_dir, parent))
 }
 
 /// Moves aside any file that blocks directory creation for a pull: if an
@@ -1229,7 +1256,7 @@ pub async fn share_path_with_permission(
         files.push(rel_path.to_string());
     } else if local_root.is_dir() {
         let state = State::load(&config.local_dir)?;
-        collect_files(&config.local_dir, &local_root, &mut files, &state)?;
+        collect_all_files(&config.local_dir, &local_root, &mut files, &state)?;
     } else {
         return Err(SyncError::E2ee(format!(
             "{rel_path} does not exist locally"
@@ -3227,16 +3254,17 @@ fn remove_local_file(
     Ok(())
 }
 
-/// Applies file upserts from the change feed. Returns `false` when a change
-/// type outside this fast path (directory change, move, delete, old server)
-/// requires a full tree reconciliation.
+/// Applies change-feed rows incrementally: file upserts, directory creates,
+/// deletes, and moves. Returns `false` only when a row is outside this fast
+/// path (unknown op/kind, missing fields, or an old server), which makes the
+/// caller fall back to a full tree reconciliation.
 #[allow(clippy::too_many_arguments)]
 async fn apply_incremental_changes(
     http: &Http,
     config: &SyncConfig,
     root: &str,
     e2ee: Option<&E2ee>,
-    mls: Option<&mut crate::mls::MlsClient>,
+    mut mls: Option<&mut crate::mls::MlsClient>,
     policy: &EncryptPolicy,
     state: &mut State,
     report: &mut SyncReport,
@@ -3245,7 +3273,7 @@ async fn apply_incremental_changes(
         return Ok(false);
     };
     let mut after = since;
-    let mut changed = BTreeMap::new();
+    let mut applied = since;
     loop {
         let path = format!("/api/sync/changes?since={after}&limit=1000");
         let (status, body) = http.get_json(&path).await?;
@@ -3259,29 +3287,127 @@ async fn apply_incremental_changes(
             return Ok(false);
         };
         for change in rows {
-            // Only file content upserts are safe to apply without rebuilding
-            // the full namespace. Structural changes fall back to a full
-            // reconciliation.
-            if change["op"].as_str() != Some("upsert") || change["kind"].as_str() != Some("file") {
+            let seq = change["seq"].as_i64().unwrap_or(after);
+            let op = change["op"].as_str().unwrap_or_default();
+            let kind = change["kind"].as_str();
+            let Some(server_path) = change["path"].as_str() else {
                 return Ok(false);
+            };
+            let target = local_rel_from_server(server_path, root, e2ee);
+            match op {
+                "upsert" => {
+                    let Some(rel) = target else {
+                        applied = seq;
+                        continue;
+                    };
+                    if rel.is_empty() {
+                        applied = seq;
+                        continue;
+                    }
+                    match kind {
+                        Some("dir") => {
+                            create_local_dir(config, state, report, &rel)?;
+                            state.created_dirs.insert(server_path.to_string());
+                        }
+                        Some("file") => {
+                            let Some(content_id) = change["content_id"].as_str() else {
+                                return Ok(false);
+                            };
+                            let encrypted = change["encrypted"].as_bool().unwrap_or(true);
+                            if !apply_remote_file(
+                                http,
+                                config,
+                                e2ee,
+                                mls.as_deref_mut(),
+                                policy,
+                                state,
+                                report,
+                                &rel,
+                                server_path,
+                                content_id,
+                                encrypted,
+                            )
+                            .await?
+                            {
+                                state.change_seq = Some(applied);
+                                return Ok(true);
+                            }
+                        }
+                        _ => return Ok(false),
+                    }
+                }
+                "delete" => {
+                    let Some(rel) = target else {
+                        applied = seq;
+                        continue;
+                    };
+                    apply_remote_delete(config, state, report, &rel)?;
+                }
+                "move" => {
+                    let from_server = change["from_path"].as_str().unwrap_or_default();
+                    let from_rel = (!from_server.is_empty())
+                        .then(|| local_rel_from_server(from_server, root, e2ee))
+                        .flatten();
+                    match target {
+                        Some(to_rel) if !to_rel.is_empty() => match from_rel {
+                            Some(from_rel) if !from_rel.is_empty() => {
+                                if !apply_remote_move(
+                                    config,
+                                    state,
+                                    &from_rel,
+                                    &to_rel,
+                                    from_server,
+                                    server_path,
+                                    kind,
+                                )? {
+                                    return Ok(false);
+                                }
+                            }
+                            // Moved into this sync root from outside it:
+                            // treat the destination as a create.
+                            _ => match kind {
+                                Some("dir") => {
+                                    create_local_dir(config, state, report, &to_rel)?;
+                                    state.created_dirs.insert(server_path.to_string());
+                                }
+                                Some("file") => {
+                                    let Some(content_id) = change["content_id"].as_str() else {
+                                        return Ok(false);
+                                    };
+                                    let encrypted = change["encrypted"].as_bool().unwrap_or(true);
+                                    if !apply_remote_file(
+                                        http,
+                                        config,
+                                        e2ee,
+                                        mls.as_deref_mut(),
+                                        policy,
+                                        state,
+                                        report,
+                                        &to_rel,
+                                        server_path,
+                                        content_id,
+                                        encrypted,
+                                    )
+                                    .await?
+                                    {
+                                        state.change_seq = Some(applied);
+                                        return Ok(true);
+                                    }
+                                }
+                                _ => return Ok(false),
+                            },
+                        },
+                        // Moved out of this sync root: remove the old copy.
+                        _ => {
+                            if let Some(from_rel) = from_rel.filter(|rel| !rel.is_empty()) {
+                                apply_remote_delete(config, state, report, &from_rel)?;
+                            }
+                        }
+                    }
+                }
+                _ => return Ok(false),
             }
-            let (Some(server_path), Some(content_id)) =
-                (change["path"].as_str(), change["content_id"].as_str())
-            else {
-                return Ok(false);
-            };
-            let Some(rel) = local_rel_from_server(server_path, root, e2ee) else {
-                continue;
-            };
-            changed.insert(
-                rel,
-                RemoteFile {
-                    path: server_path.to_string(),
-                    content_id: content_id.to_string(),
-                    encrypted: change["encrypted"].as_bool().unwrap_or(true),
-                    shared: false,
-                },
-            );
+            applied = seq;
         }
         let next = body["next_seq"].as_i64().unwrap_or(after);
         let has_more = body["has_more"].as_bool().unwrap_or(false);
@@ -3293,35 +3419,269 @@ async fn apply_incremental_changes(
             break;
         }
     }
-
-    if !changed.is_empty() {
-        let failed_before = report.failed;
-        pull(
-            http,
-            config,
-            &changed,
-            &[],
-            false,
-            false,
-            e2ee,
-            mls,
-            &mut EncryptPolicy {
-                prefixes: policy.prefixes.clone(),
-                fallback: policy.fallback.clone(),
-            },
-            state,
-            report,
-        )
-        .await?;
-        if report.failed > failed_before {
-            // Keep the old sequence so the failed file (and anything after
-            // it) is retried next pass. Successful files are idempotent.
-            state.change_seq = Some(since);
-            return Ok(true);
-        }
-    }
     state.change_seq = Some(after);
     Ok(true)
+}
+
+/// Pulls one changed file. Returns false when the per-file pull failed (the
+/// caller keeps the sequence so the next pass retries).
+#[allow(clippy::too_many_arguments)]
+async fn apply_remote_file(
+    http: &Http,
+    config: &SyncConfig,
+    e2ee: Option<&E2ee>,
+    mls: Option<&mut crate::mls::MlsClient>,
+    policy: &EncryptPolicy,
+    state: &mut State,
+    report: &mut SyncReport,
+    rel: &str,
+    server_path: &str,
+    content_id: &str,
+    encrypted: bool,
+) -> Result<bool, SyncError> {
+    let mut changed = BTreeMap::new();
+    changed.insert(
+        rel.to_string(),
+        RemoteFile {
+            path: server_path.to_string(),
+            content_id: content_id.to_string(),
+            encrypted,
+            shared: false,
+        },
+    );
+    let failed_before = report.failed;
+    pull(
+        http,
+        config,
+        &changed,
+        &[],
+        false,
+        false,
+        e2ee,
+        mls,
+        &mut EncryptPolicy {
+            prefixes: policy.prefixes.clone(),
+            fallback: policy.fallback.clone(),
+        },
+        state,
+        report,
+    )
+    .await?;
+    Ok(report.failed == failed_before)
+}
+
+fn create_local_dir(
+    config: &SyncConfig,
+    state: &mut State,
+    report: &mut SyncReport,
+    rel: &str,
+) -> Result<(), SyncError> {
+    safe_rel(rel)?;
+    let local = config.local_dir.join(rel);
+    if has_symlink_ancestor(&config.local_dir, &local) {
+        return Err(SyncError::Protocol(format!(
+            "refusing to create /{rel}: a symlink is in the way"
+        )));
+    }
+    if local.exists() && !local.is_dir() {
+        // A local file occupies the path the server turned into a folder.
+        // Preserve it as a conflict copy instead of failing the pass.
+        let conflict = conflict_path(&local);
+        std::fs::rename(&local, &conflict)?;
+        record_conflict(state, &config.local_dir, &conflict);
+        report.conflicts += 1;
+    }
+    std::fs::create_dir_all(local)?;
+    Ok(())
+}
+
+/// Removes a path the server deleted. Tracked files are removed (modified
+/// ones become conflict copies); untracked local content is preserved.
+fn apply_remote_delete(
+    config: &SyncConfig,
+    state: &mut State,
+    report: &mut SyncReport,
+    rel: &str,
+) -> Result<(), SyncError> {
+    if rel.is_empty() {
+        return Ok(());
+    }
+    safe_rel(rel)?;
+    let local = config.local_dir.join(rel);
+    let prefix = format!("{rel}/");
+    let tracked: Vec<String> = state
+        .files
+        .keys()
+        .filter(|path| *path == rel || path.starts_with(&prefix))
+        .cloned()
+        .collect();
+
+    // Never follow a symlink out of the mirror.
+    if has_symlink_parent(&config.local_dir, &local) {
+        return Err(SyncError::Protocol(format!(
+            "refusing to delete /{rel}: a symlink is in the path"
+        )));
+    }
+    let is_symlink = std::fs::symlink_metadata(&local)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    if is_symlink {
+        std::fs::remove_file(&local)?;
+    } else if local.is_dir() {
+        for file in &tracked {
+            remove_local_file(config, state, report, file)?;
+        }
+        // Conflict copies (and any untracked local files) keep the directory.
+        remove_empty_dirs(&local)?;
+    } else if local.exists() {
+        if state.files.contains_key(rel) {
+            remove_local_file(config, state, report, rel)?;
+        } else {
+            let conflict = conflict_path(&local);
+            std::fs::rename(&local, &conflict)?;
+            record_conflict(state, &config.local_dir, &conflict);
+            report.conflicts += 1;
+        }
+    }
+    state
+        .files
+        .retain(|path, _| path != rel && !path.starts_with(&prefix));
+    state
+        .keys
+        .retain(|path, _| path != rel && !path.starts_with(&prefix));
+    Ok(())
+}
+
+/// Removes empty directories bottom-up. Returns whether `dir` itself was
+/// removed.
+fn remove_empty_dirs(dir: &Path) -> Result<bool, SyncError> {
+    let mut empty = true;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            if !remove_empty_dirs(&path)? {
+                empty = false;
+            }
+        } else {
+            empty = false;
+        }
+    }
+    if empty {
+        std::fs::remove_dir(dir)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Applies a server-side move/rename locally. Returns false when the
+/// destination already exists locally (caller falls back to a full pull).
+fn apply_remote_move(
+    config: &SyncConfig,
+    state: &mut State,
+    from_rel: &str,
+    to_rel: &str,
+    from_server: &str,
+    to_server: &str,
+    kind: Option<&str>,
+) -> Result<bool, SyncError> {
+    safe_rel(from_rel)?;
+    safe_rel(to_rel)?;
+    let from_local = config.local_dir.join(from_rel);
+    let to_local = config.local_dir.join(to_rel);
+    if to_local.exists() || std::fs::symlink_metadata(&to_local).is_ok() {
+        return Ok(false);
+    }
+    if has_symlink_parent(&config.local_dir, &from_local)
+        || has_symlink_parent(&config.local_dir, &to_local)
+    {
+        return Err(SyncError::Protocol(format!(
+            "refusing to move /{from_rel} to /{to_rel}: a symlink is in the path"
+        )));
+    }
+    let from_meta = std::fs::symlink_metadata(&from_local).ok();
+    let is_dir = from_meta
+        .as_ref()
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(kind == Some("dir"));
+    if let Some(parent) = to_local.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if from_meta.is_some() {
+        std::fs::rename(&from_local, &to_local)?;
+    }
+    if is_dir {
+        move_state_subtree(state, from_rel, to_rel, from_server, to_server);
+    } else {
+        if let Some(mut known) = state.files.remove(from_rel) {
+            known.server_path = Some(to_server.to_string());
+            state.files.insert(to_rel.to_string(), known);
+        }
+        if let Some(key) = state.keys.remove(from_rel) {
+            state.keys.insert(to_rel.to_string(), key);
+        }
+    }
+    Ok(true)
+}
+
+fn move_state_subtree(
+    state: &mut State,
+    from_rel: &str,
+    to_rel: &str,
+    from_server: &str,
+    to_server: &str,
+) {
+    let prefix = format!("{from_rel}/");
+    let files: Vec<(String, StateFile)> = state
+        .files
+        .iter()
+        .filter(|(path, _)| path.starts_with(&prefix))
+        .map(|(path, file)| (path.clone(), file.clone()))
+        .collect();
+    for (old_rel, mut file) in files {
+        let suffix = &old_rel[prefix.len()..];
+        let new_rel = format!("{to_rel}/{suffix}");
+        if let Some(path) = file.server_path.as_mut()
+            && let Some(rest) = path.strip_prefix(from_server)
+        {
+            *path = format!("{to_server}{rest}");
+        }
+        state.files.remove(&old_rel);
+        state.files.insert(new_rel, file);
+    }
+    let keys: Vec<(String, String)> = state
+        .keys
+        .iter()
+        .filter(|(path, _)| path.starts_with(&prefix))
+        .map(|(path, key)| (path.clone(), key.clone()))
+        .collect();
+    for (old_rel, key) in keys {
+        let suffix = &old_rel[prefix.len()..];
+        state.keys.remove(&old_rel);
+        state.keys.insert(format!("{to_rel}/{suffix}"), key);
+    }
+
+    let from_prefix = from_server.trim_end_matches('/');
+    let to_prefix = to_server.trim_end_matches('/');
+    let dirs: Vec<(String, String)> = state
+        .created_dirs
+        .iter()
+        .filter(|path| *path == from_prefix || path.starts_with(&format!("{from_prefix}/")))
+        .map(|path| {
+            (
+                path.clone(),
+                format!(
+                    "{to_prefix}{}",
+                    path.strip_prefix(from_prefix).unwrap_or_default()
+                ),
+            )
+        })
+        .collect();
+    for (old_path, new_path) in dirs {
+        state.created_dirs.remove(&old_path);
+        state.created_dirs.insert(new_path);
+    }
 }
 
 /// The change-feed head, or `None` on a server predating `/api/sync/head`.
@@ -3583,7 +3943,22 @@ async fn push(
     state
         .conflicts
         .retain(|rel| config.local_dir.join(rel).exists());
-    collect_files(&config.local_dir, &config.local_dir, &mut locals, state)?;
+    // Incremental push: unchanged directories are not enumerated. Their
+    // tracked files are still stat'ed, so content edits are caught; new or
+    // removed entries change the directory mtime and trigger a scan.
+    let known_files = files_by_parent(state);
+    let known_dirs = dirs_by_parent(state);
+    let mut visited_dirs = BTreeMap::new();
+    collect_changed_files(
+        &config.local_dir,
+        &config.local_dir,
+        &mut locals,
+        state,
+        &known_files,
+        &known_dirs,
+        &mut visited_dirs,
+        report,
+    )?;
     // Writable received shares are the one exception to the read-only
     // `Shared with me/` mirror. Only MLS write mounts are ever uploaded.
     let shared_writes = match e2ee {
@@ -3596,7 +3971,16 @@ async fn push(
     for mount in &shared_writes {
         let dir = config.local_dir.join(&mount.local_prefix);
         if dir.is_dir() {
-            collect_files(&config.local_dir, &dir, &mut locals, state)?;
+            collect_changed_files(
+                &config.local_dir,
+                &dir,
+                &mut locals,
+                state,
+                &known_files,
+                &known_dirs,
+                &mut visited_dirs,
+                report,
+            )?;
         } else if dir.is_file() && mount.key.is_none() {
             // A writable single-file share: include the mount itself.
             locals.push(mount.local_prefix.clone());
@@ -3604,6 +3988,7 @@ async fn push(
     }
     locals.sort();
     locals.dedup();
+    state.dirs = visited_dirs;
 
     // Create remote directories for every parent path first.
     let mut dirs: BTreeSet<String> = BTreeSet::new();
@@ -3963,7 +4348,153 @@ fn conflict_path(local: &Path) -> PathBuf {
     local.with_file_name(format!("{name}.conflict-{stamp}"))
 }
 
-fn collect_files(
+/// Direct child files by parent relative path (`""` = sync root).
+fn files_by_parent(state: &State) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for rel in state.files.keys() {
+        out.entry(parent_rel(rel)).or_default().push(rel.clone());
+    }
+    out
+}
+
+/// Direct child directories by parent relative path (`""` = sync root).
+fn dirs_by_parent(state: &State) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for rel in state.dirs.keys() {
+        if !rel.is_empty() {
+            out.entry(parent_rel(rel)).or_default().push(rel.clone());
+        }
+    }
+    out
+}
+
+fn parent_rel(rel: &str) -> String {
+    rel.rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .unwrap_or_default()
+}
+
+fn relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default()
+}
+
+/// Collects local files that need pushing.
+///
+/// A directory whose mtime matches the last scan is not re-enumerated: its
+/// tracked files are stat'ed, its known subdirectories are visited with the
+/// same rule, and nothing else can have appeared without changing the
+/// directory mtime. New, removed, or renamed entries change the mtime and
+/// force a full `read_dir` of that directory.
+#[allow(clippy::too_many_arguments)]
+fn collect_changed_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    state: &State,
+    known_files: &BTreeMap<String, Vec<String>>,
+    known_dirs: &BTreeMap<String, Vec<String>>,
+    visited: &mut BTreeMap<String, i64>,
+    report: &mut SyncReport,
+) -> Result<(), SyncError> {
+    let rel_dir = relative_path(root, dir);
+    let mtime = match mtime_ns(dir) {
+        Ok(mtime) => mtime,
+        Err(SyncError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if state.dirs.get(&rel_dir) == Some(&mtime) {
+        report.dirs_cached += 1;
+        if let Some(files) = known_files.get(&rel_dir) {
+            for rel in files {
+                maybe_add_changed_file(root, rel, out, state)?;
+            }
+        }
+        if let Some(dirs) = known_dirs.get(&rel_dir) {
+            for child in dirs {
+                collect_changed_files(
+                    root,
+                    &root.join(child),
+                    out,
+                    state,
+                    known_files,
+                    known_dirs,
+                    visited,
+                    report,
+                )?;
+            }
+        }
+    } else {
+        report.dirs_walked += 1;
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            // Never follow symlinks: they can point outside the root (reading
+            // files we must not mirror) or form cycles (infinite recursion).
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == ".kolimi" {
+                continue;
+            }
+            // Shared files are read-only mirrors of someone else's tree.
+            if name == SHARED_MOUNT && dir == root {
+                continue;
+            }
+            if file_type.is_dir() {
+                collect_changed_files(
+                    root,
+                    &path,
+                    out,
+                    state,
+                    known_files,
+                    known_dirs,
+                    visited,
+                    report,
+                )?;
+            } else if file_type.is_file() {
+                let rel = relative_path(root, &path);
+                maybe_add_changed_file(root, &rel, out, state)?;
+            }
+        }
+    }
+    visited.insert(rel_dir, mtime);
+    Ok(())
+}
+
+fn maybe_add_changed_file(
+    root: &Path,
+    rel: &str,
+    out: &mut Vec<String>,
+    state: &State,
+) -> Result<(), SyncError> {
+    if state.conflicts.contains(rel) {
+        return Ok(());
+    }
+    let path = root.join(rel);
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let changed = match state.files.get(rel) {
+        Some(known) => {
+            known.deleted || known.size != metadata.len() || known.mtime_ns != mtime_ns(&path)?
+        }
+        None => true,
+    };
+    if changed {
+        out.push(rel.to_string());
+    }
+    Ok(())
+}
+
+/// Recursively lists every local file below `dir`. Used by share operations,
+/// which need the full subtree rather than the incremental change set.
+fn collect_all_files(
     root: &Path,
     dir: &Path,
     out: &mut Vec<String>,
@@ -3971,8 +4502,6 @@ fn collect_files(
 ) -> Result<(), SyncError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        // Never follow symlinks: they can point outside the root (reading
-        // files we must not mirror) or form cycles (infinite recursion).
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             continue;
@@ -3982,21 +4511,13 @@ fn collect_files(
         if name == ".kolimi" {
             continue;
         }
-        // Shared files are read-only mirrors of someone else's tree.
         if name == SHARED_MOUNT && dir == root {
             continue;
         }
         if file_type.is_dir() {
-            collect_files(root, &path, out, state)?;
+            collect_all_files(root, &path, out, state)?;
         } else if file_type.is_file() {
-            let rel = path
-                .strip_prefix(root)
-                .map_err(|_| std::io::Error::other("path outside root"))?
-                .to_string_lossy()
-                .to_string()
-                .replace('\\', "/");
-            // Local-only conflict copies (tracked by relative path) are never
-            // pushed back.
+            let rel = relative_path(root, &path);
             if state.conflicts.contains(&rel) {
                 continue;
             }
