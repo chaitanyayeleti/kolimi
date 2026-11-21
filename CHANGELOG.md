@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `GET /api/browse` now supports `limit` (default 1,000, max 5,000) and a
+  keyset `cursor`, returning `has_more` and `next_cursor`. The file list has
+  a **Load more** action instead of rendering an unbounded directory in one
+  response.
+- `kolimi-server audit prune --before <id> --to <file>` exports a JSONL
+  prefix, then prunes it and records an anchored checkpoint. `audit verify`
+  and `GET /api/audit/verify` resume from that anchor, so the retained tail
+  still proves linkage to the exported prefix.
+- A concurrent mixed WebDAV/browse load gate (16 clients × 10 rounds) runs
+  with the release performance tests.
+
+### Changed
+- Session and app-password timestamps (`last_seen_at`, `last_used_at`) are
+  refreshed at most once per minute instead of on every request. Credential
+  rows are still read on every request, so revocation stays immediate.
+- `docs/operations.md` now documents the single-node scaling profile,
+  current limits, and anchored audit retention.
+
 ## [0.6.0] - 2026-11-20
 
 ### Added

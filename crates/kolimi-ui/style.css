@@ -1408,6 +1408,16 @@ textarea:focus {
   font-size: var(--text-xs);
 }
 
+.load-more {
+  display: flex;
+  justify-content: center;
+  padding: 1rem 0 0.25rem;
+}
+
+.load-more button {
+  min-width: 8rem;
+}
+
 /* ---- public upload ("file request") page ---------------------------- */
 
 .upload-card {

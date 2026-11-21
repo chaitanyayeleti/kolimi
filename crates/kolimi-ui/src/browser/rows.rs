@@ -178,6 +178,9 @@ pub(crate) fn FileArea(
     context_menu: RwSignal<Option<(Entry, i32, i32)>>,
     lightbox: RwSignal<Option<Entry>>,
     can_write: Signal<bool>,
+    has_more: RwSignal<bool>,
+    loading_more: RwSignal<bool>,
+    on_load_more: Callback<()>,
     on_load: Callback<String>,
     on_mkdir: Callback<()>,
     on_open: Callback<Entry>,
@@ -284,7 +287,16 @@ pub(crate) fn FileArea(
             let count_label = move || {
                 let shown = visible.get().len();
                 let total = entries.get().len();
-                if shown == total {
+                if has_more.get() {
+                    if shown == total {
+                        format!("{total}+ {}", if total == 1 { "item" } else { "items" })
+                    } else {
+                        format!(
+                            "{shown} of {total}+ {}",
+                            if total == 1 { "item" } else { "items" }
+                        )
+                    }
+                } else if shown == total {
                     plural(shown, "item", "items")
                 } else {
                     format!("{shown} of {}", plural(total, "item", "items"))
@@ -442,6 +454,24 @@ pub(crate) fn FileArea(
                             .into_any()
                     }
                 }}
+
+                <Show when=move || has_more.get()>
+                    <div class="load-more">
+                        <button
+                            class="ghost"
+                            disabled=move || loading_more.get()
+                            on:click=move |_| on_load_more.run(())
+                        >
+                            {move || {
+                                if loading_more.get() {
+                                    "Loading…"
+                                } else {
+                                    "Load more"
+                                }
+                            }}
+                        </button>
+                    </div>
+                </Show>
             }
                 .into_any()
         }}

@@ -1471,7 +1471,9 @@ fn db_error(error: DbError) -> Response {
             (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
         }
         DbError::InvalidUsername(_) => bad_request("invalid username"),
-        DbError::Sqlx(_) | DbError::Migrate(_) => internal_error(),
+        DbError::Sqlx(_) | DbError::Migrate(_) | DbError::Io(_) | DbError::Audit(_) => {
+            internal_error()
+        }
     }
 }
 

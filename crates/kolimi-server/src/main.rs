@@ -168,6 +168,15 @@ enum AuditCommand {
     },
     /// Verify the hash chain (exit 1 if broken).
     Verify,
+    /// Export entries through an id, then prune them and record an anchor.
+    Prune {
+        /// Last entry id to export and remove.
+        #[arg(long)]
+        before: i64,
+        /// JSONL export path (must not exist).
+        #[arg(long)]
+        to: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -754,6 +763,22 @@ async fn audit_command(command: AuditCommand, data: PathBuf) -> Result<(), Box<d
                     std::process::exit(1);
                 }
             }
+            if let Some(anchor) = db.audit_anchor().await? {
+                println!(
+                    "anchor: entries through {} were pruned ({} total)",
+                    anchor.pruned_through, anchor.pruned_entries
+                );
+            }
+        }
+        AuditCommand::Prune { before, to } => {
+            let report = db.audit_export_and_prune(before, &to).await?;
+            println!(
+                "exported {} audit entries through {} to {} (anchor {})",
+                report.exported,
+                report.pruned_through,
+                to.display(),
+                report.anchor_hash
+            );
         }
     }
     Ok(())

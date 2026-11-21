@@ -303,12 +303,19 @@ pub async fn verify_audit(
         return response;
     }
     match state.db.audit_verify().await {
-        Ok(verify) => Json(json!({
-            "ok": verify.first_bad.is_none(),
-            "entries": verify.entries,
-            "first_bad": verify.first_bad,
-        }))
-        .into_response(),
+        Ok(verify) => {
+            let anchor = state.db.audit_anchor().await.ok().flatten();
+            Json(json!({
+                "ok": verify.first_bad.is_none(),
+                "entries": verify.entries,
+                "first_bad": verify.first_bad,
+                "anchor": anchor.map(|anchor| json!({
+                    "pruned_through": anchor.pruned_through,
+                    "pruned_entries": anchor.pruned_entries,
+                })),
+            }))
+            .into_response()
+        }
         Err(_) => api::internal_error(),
     }
 }

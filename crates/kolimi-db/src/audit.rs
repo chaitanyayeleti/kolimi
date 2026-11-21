@@ -7,9 +7,12 @@
 //! linear. The log is tamper-evident, not fail-closed: callers decide
 //! whether an append failure aborts the audited operation.
 
+use std::path::Path;
+
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqliteConnection;
+use tokio::io::AsyncWriteExt;
 
 use futures_util::StreamExt;
 
@@ -58,6 +61,46 @@ pub struct AuditVerify {
     pub entries: u64,
     /// First entry id whose hash or link does not match, if any.
     pub first_bad: Option<i64>,
+}
+
+/// The last pruned audit entry. Verification starts from this trust point.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct AuditAnchor {
+    /// Last entry removed by retention.
+    pub pruned_through: i64,
+    /// Hash of that entry; the next retained row's `prev_hash`.
+    pub hash: Vec<u8>,
+    /// Total entries removed by retention.
+    pub pruned_entries: i64,
+    /// Last prune time in Unix milliseconds.
+    pub updated_at: i64,
+}
+
+/// Result of exporting and pruning an audit prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditPruneReport {
+    /// Entries written to the export file.
+    pub exported: u64,
+    /// Last pruned entry id.
+    pub pruned_through: i64,
+    /// Anchor hash (hex) for the export boundary.
+    pub anchor_hash: String,
+}
+
+/// One JSONL line in an audit export. `details_raw` preserves the exact
+/// string covered by the chain hash; `details` is a convenience view.
+#[derive(Serialize)]
+struct AuditExportEntry<'a> {
+    id: i64,
+    ts: i64,
+    actor_id: Option<i64>,
+    actor: Option<&'a str>,
+    action: &'a str,
+    subject: &'a str,
+    details: Value,
+    details_raw: &'a str,
+    prev_hash: String,
+    hash: String,
 }
 
 fn chain_hash(
@@ -189,13 +232,205 @@ impl Db {
         .await?)
     }
 
-    /// Recomputes the whole chain and reports the first inconsistency.
+    /// The current retention anchor, if entries have been pruned.
+    pub async fn audit_anchor(&self) -> Result<Option<AuditAnchor>, DbError> {
+        Ok(sqlx::query_as::<_, AuditAnchor>(
+            "SELECT pruned_through, hash, pruned_entries, updated_at
+             FROM audit_anchor WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Exports entries up to `before` as JSONL and prunes them, recording an
+    /// anchor so the retained tail still verifies.
+    ///
+    /// The export is written and fsynced before the delete commits. At least
+    /// the newest entry is always retained, so SQLite cannot reuse its id
+    /// after the table becomes empty.
+    pub async fn audit_export_and_prune(
+        &self,
+        before: i64,
+        to: &Path,
+    ) -> Result<AuditPruneReport, DbError> {
+        let _guard = self.audit_lock.lock().await;
+        if before <= 0 {
+            return Err(DbError::Audit(
+                "--before must be a positive entry id".into(),
+            ));
+        }
+        if tokio::fs::try_exists(to).await? {
+            return Err(DbError::Audit(format!(
+                "refusing to overwrite existing export {}",
+                to.display()
+            )));
+        }
+        if let Some(parent) = to.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let Some(file_name) = to.file_name().and_then(|name| name.to_str()) else {
+            return Err(DbError::Audit("export path has no filename".into()));
+        };
+        let temp = to.with_file_name(format!(".{file_name}.tmp-{}", now_millis()));
+        let result = self.audit_export_and_prune_inner(before, to, &temp).await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temp).await;
+        }
+        result
+    }
+
+    async fn audit_export_and_prune_inner(
+        &self,
+        before: i64,
+        to: &Path,
+        temp: &Path,
+    ) -> Result<AuditPruneReport, DbError> {
+        let mut tx = self.pool.begin().await?;
+        let anchor = sqlx::query_as::<_, AuditAnchor>(
+            "SELECT pruned_through, hash, pruned_entries, updated_at
+             FROM audit_anchor WHERE id = 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let from = anchor.as_ref().map(|a| a.pruned_through).unwrap_or(0);
+        if before <= from {
+            return Err(DbError::Audit(format!(
+                "entries through {from} were already pruned"
+            )));
+        }
+        let max_id: Option<i64> = sqlx::query_scalar("SELECT MAX(id) FROM audit_log")
+            .fetch_one(&mut *tx)
+            .await?;
+        let Some(max_id) = max_id else {
+            return Err(DbError::Audit("the audit log is empty".into()));
+        };
+        if before >= max_id {
+            return Err(DbError::Audit(format!(
+                "refusing to prune the newest entry; use --before less than {max_id}"
+            )));
+        }
+
+        let mut expected_prev = anchor
+            .as_ref()
+            .map(|anchor| anchor.hash.clone())
+            .unwrap_or_default();
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temp)
+            .await?;
+        let mut exported = 0u64;
+        let mut last_id = 0i64;
+        let mut last_hash = Vec::new();
+        {
+            let mut rows = sqlx::query_as::<_, AuditEntry>(
+                "SELECT * FROM audit_log WHERE id > ? AND id <= ? ORDER BY id",
+            )
+            .bind(from)
+            .bind(before)
+            .fetch(&mut *tx);
+            while let Some(row) = rows.next().await {
+                let row = row?;
+                let expected = chain_hash(
+                    &expected_prev,
+                    row.ts,
+                    row.actor_id,
+                    row.actor.as_deref(),
+                    &row.action,
+                    &row.subject,
+                    &row.details,
+                );
+                if row.prev_hash != expected_prev || row.hash != expected {
+                    return Err(DbError::Audit(format!(
+                        "chain mismatch at audit entry {}; refusing to prune",
+                        row.id
+                    )));
+                }
+                let details = serde_json::from_str(&row.details)
+                    .unwrap_or_else(|_| Value::String(row.details.clone()));
+                let export = AuditExportEntry {
+                    id: row.id,
+                    ts: row.ts,
+                    actor_id: row.actor_id,
+                    actor: row.actor.as_deref(),
+                    action: &row.action,
+                    subject: &row.subject,
+                    details,
+                    details_raw: &row.details,
+                    prev_hash: hex::encode(&row.prev_hash),
+                    hash: hex::encode(&row.hash),
+                };
+                let mut line = serde_json::to_vec(&export)
+                    .map_err(|error| DbError::Audit(error.to_string()))?;
+                line.push(b'\n');
+                file.write_all(&line).await?;
+                exported += 1;
+                last_id = row.id;
+                last_hash = row.hash.clone();
+                expected_prev = row.hash;
+            }
+        }
+        if exported == 0 {
+            return Err(DbError::Audit(format!(
+                "no audit entries found between {from} and {before}"
+            )));
+        }
+        // The retained tail must link to the anchor we are about to write.
+        let next_prev: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT prev_hash FROM audit_log WHERE id > ? ORDER BY id LIMIT 1")
+                .bind(before)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some(next_prev) = next_prev
+            && next_prev != last_hash
+        {
+            return Err(DbError::Audit(
+                "retained audit tail does not link to the pruned prefix".into(),
+            ));
+        }
+
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(temp, to).await?;
+
+        sqlx::query("DELETE FROM audit_log WHERE id <= ?")
+            .bind(last_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO audit_anchor (id, pruned_through, hash, pruned_entries, updated_at)
+             VALUES (1, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                 pruned_through = excluded.pruned_through,
+                 hash = excluded.hash,
+                 pruned_entries = audit_anchor.pruned_entries + excluded.pruned_entries,
+                 updated_at = excluded.updated_at",
+        )
+        .bind(last_id)
+        .bind(&last_hash)
+        .bind(exported as i64)
+        .bind(now_millis())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(AuditPruneReport {
+            exported,
+            pruned_through: last_id,
+            anchor_hash: hex::encode(last_hash),
+        })
+    }
+
+    /// Recomputes the retained chain, starting at the retention anchor.
     pub async fn audit_verify(&self) -> Result<AuditVerify, DbError> {
-        // Stream rows instead of loading the whole log into memory: the
-        // audit table grows without bound.
-        let mut rows = sqlx::query_as::<_, AuditEntry>("SELECT * FROM audit_log ORDER BY id")
-            .fetch(&self.pool);
-        let mut expected_prev: Vec<u8> = Vec::new();
+        let anchor = self.audit_anchor().await?;
+        let from = anchor.as_ref().map(|a| a.pruned_through).unwrap_or(0);
+        let mut expected_prev = anchor.map(|a| a.hash).unwrap_or_default();
+        let mut rows =
+            sqlx::query_as::<_, AuditEntry>("SELECT * FROM audit_log WHERE id > ? ORDER BY id")
+                .bind(from)
+                .fetch(&self.pool);
         let mut entries = 0;
         while let Some(row) = rows.next().await {
             let row = row?;
@@ -228,7 +463,7 @@ impl Db {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use crate::Db;
 
@@ -375,5 +610,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db.audit_verify().await.unwrap().first_bad, Some(3));
+    }
+
+    #[tokio::test]
+    async fn export_and_prune_records_an_anchor_that_verifies() {
+        let (dir, db) = db().await;
+        for name in ["a", "b", "c", "d", "e"] {
+            db.audit_append(None, Some("cli"), "user.add", name, &json!({}))
+                .await
+                .unwrap();
+        }
+        let path = dir.path().join("audit.jsonl");
+        let report = db.audit_export_and_prune(3, &path).await.unwrap();
+        assert_eq!(report.exported, 3);
+        assert_eq!(report.pruned_through, 3);
+        assert_eq!(report.anchor_hash.len(), 64);
+
+        let export = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(export.lines().count(), 3);
+        let first: Value = serde_json::from_str(export.lines().next().unwrap()).unwrap();
+        assert_eq!(first["subject"], "a");
+        assert_eq!(first["hash"].as_str().unwrap().len(), 64);
+        assert!(first["details_raw"].is_string());
+
+        let anchor = db.audit_anchor().await.unwrap().unwrap();
+        assert_eq!(anchor.pruned_through, 3);
+        assert_eq!(anchor.pruned_entries, 3);
+        let verify = db.audit_verify().await.unwrap();
+        assert_eq!(verify.entries, 2);
+        assert_eq!(verify.first_bad, None);
+
+        db.audit_append(None, Some("cli"), "user.add", "f", &json!({}))
+            .await
+            .unwrap();
+        let verify = db.audit_verify().await.unwrap();
+        assert_eq!(verify.entries, 3);
+        assert_eq!(verify.first_bad, None);
+    }
+
+    #[tokio::test]
+    async fn prune_refuses_newest_entry_and_existing_export() {
+        let (dir, db) = db().await;
+        for name in ["a", "b"] {
+            db.audit_append(None, Some("cli"), "user.add", name, &json!({}))
+                .await
+                .unwrap();
+        }
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, "keep me").unwrap();
+        assert!(db.audit_export_and_prune(1, &path).await.is_err());
+        std::fs::remove_file(&path).unwrap();
+
+        // Keeping the newest row is mandatory.
+        assert!(db.audit_export_and_prune(2, &path).await.is_err());
+        assert!(db.audit_anchor().await.unwrap().is_none());
+        assert_eq!(db.audit_list(10, None).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn prune_refuses_a_tampered_prefix() {
+        let (dir, db) = db().await;
+        for name in ["a", "b", "c"] {
+            db.audit_append(None, Some("cli"), "user.add", name, &json!({}))
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE audit_log SET subject = 'mallory' WHERE id = 2")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let path = dir.path().join("audit.jsonl");
+        assert!(db.audit_export_and_prune(2, &path).await.is_err());
+        assert!(db.audit_anchor().await.unwrap().is_none());
+        assert_eq!(db.audit_list(10, None).await.unwrap().len(), 3);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn verify_checks_the_tail_against_the_anchor() {
+        let (dir, db) = db().await;
+        for name in ["a", "b", "c", "d"] {
+            db.audit_append(None, Some("cli"), "user.add", name, &json!({}))
+                .await
+                .unwrap();
+        }
+        let path = dir.path().join("audit.jsonl");
+        db.audit_export_and_prune(2, &path).await.unwrap();
+        sqlx::query("UPDATE audit_log SET subject = 'mallory' WHERE id = 3")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let verify = db.audit_verify().await.unwrap();
+        assert_eq!(verify.first_bad, Some(3));
     }
 }

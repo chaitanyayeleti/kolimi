@@ -18,6 +18,12 @@ use crate::{
     hardening,
 };
 
+/// How often a successful request refreshes `last_seen_at` / `last_used_at`.
+/// Throttling this write avoids a SQLite write transaction on every WebDAV,
+/// sync, or browse request; credential revocation still reads the row on
+/// every request and therefore stays immediate.
+const AUTH_TOUCH_INTERVAL_MILLIS: i64 = 60_000;
+
 /// Authentication middleware: resolves the caller from Basic credentials,
 /// a bearer token, or a session cookie, and attaches the [`CurrentUser`].
 ///
@@ -279,10 +285,8 @@ async fn authenticate_basic(
     // already represents a second, revocable credential for one device.
     let app_hash = token::hash_token(password);
     if let Ok(Some(app)) = state.db.find_app_password(username, &app_hash).await {
-        if app
-            .expires_at
-            .is_some_and(|at| at <= kolimi_db::now_millis())
-        {
+        let now = kolimi_db::now_millis();
+        if app.expires_at.is_some_and(|at| at <= now) {
             return Err(unauthorized());
         }
         let Ok(Some(user)) = state.db.get_user(app.user_id).await else {
@@ -296,10 +300,12 @@ async fn authenticate_basic(
         let Ok(scopes) = crate::app_scope::ScopeSet::parse(&app.scopes) else {
             return Err(unauthorized());
         };
-        let _ = state
-            .db
-            .touch_app_password(app.id, kolimi_db::now_millis())
-            .await;
+        if app
+            .last_used_at
+            .is_none_or(|last| now.saturating_sub(last) >= AUTH_TOUCH_INTERVAL_MILLIS)
+        {
+            let _ = state.db.touch_app_password(app.id, now).await;
+        }
         return Ok((
             CurrentUser {
                 user_id: user.id,
@@ -407,7 +413,9 @@ async fn authenticate_token(state: &AppState, raw_token: &str) -> Result<Current
     if user.disabled {
         return Err(unauthorized());
     }
-    let _ = state.db.touch_session(session.id, now).await;
+    if now.saturating_sub(session.last_seen_at) >= AUTH_TOUCH_INTERVAL_MILLIS {
+        let _ = state.db.touch_session(session.id, now).await;
+    }
 
     Ok(CurrentUser {
         user_id: user.id,

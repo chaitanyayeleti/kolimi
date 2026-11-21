@@ -24,7 +24,7 @@ mod search_state;
 mod sharing;
 
 pub use app_passwords::AppPassword;
-pub use audit::{AuditEntry, AuditPageQuery, AuditVerify};
+pub use audit::{AuditAnchor, AuditEntry, AuditPageQuery, AuditPruneReport, AuditVerify};
 pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
 pub use devices::{Device, Enrollment, MAX_DEVICE_KEY_BYTES};
 pub use e2ee::{MAX_KEYRING_BYTES, MAX_WRAPPED_KEY_BYTES};
@@ -59,6 +59,12 @@ pub enum DbError {
     /// The username is not acceptable.
     #[error("invalid username: {0}")]
     InvalidUsername(String),
+    /// Filesystem failure while exporting audit entries.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    /// Invalid audit-retention request.
+    #[error("audit error: {0}")]
+    Audit(String),
 }
 
 static SQLITE_ERRORS: AtomicU64 = AtomicU64::new(0);
@@ -1393,6 +1399,33 @@ impl Db {
         )
         .bind(user_id)
         .bind(parent_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Lists one page of a directory's children after `after` (exclusive).
+    ///
+    /// Names are unique within a parent, so the name is a stable keyset
+    /// cursor. The caller asks for `limit + 1` to detect another page.
+    pub async fn children_page(
+        &self,
+        user_id: i64,
+        parent_id: i64,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Node>, DbError> {
+        Ok(sqlx::query_as::<_, Node>(
+            "SELECT * FROM nodes
+             WHERE user_id = ? AND parent_id = ? AND trashed_at IS NULL
+               AND (? IS NULL OR name > ?)
+             ORDER BY name
+             LIMIT ?",
+        )
+        .bind(user_id)
+        .bind(parent_id)
+        .bind(after)
+        .bind(after)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?)
     }

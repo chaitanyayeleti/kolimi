@@ -69,6 +69,9 @@ encryption passphrase; see [operations.md](operations.md#account-recovery).
 - Use **New folder**, the list/grid toggle, and search to navigate. The
   **Filter files** and **Sort files** controls keep folders first and let you
   narrow the list to folders, files, encrypted items, or received shares.
+- Large folders load 1,000 entries at a time; use **Load more** at the bottom
+  of the list to append the next page without rendering the whole directory
+  at once.
 - Tick row checkboxes for multi-select, then use the bulk bar to download,
   move, or trash the selection. Each row’s **Actions** menu has details,
   sharing, rename, versions, and delete.

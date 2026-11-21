@@ -297,6 +297,7 @@ async fn audit_api_filters_pages_and_verifies() {
     assert_eq!(verify["ok"], true);
     assert_eq!(verify["entries"], 3);
     assert!(verify["first_bad"].is_null());
+    assert!(verify["anchor"].is_null());
 
     // A broken chain is reported, not hidden.
     sqlx::query("UPDATE audit_log SET subject = 'tampered' WHERE id = 1")

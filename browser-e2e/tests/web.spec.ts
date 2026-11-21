@@ -10,6 +10,37 @@ const AUTH = {
   Authorization: "Basic " + Buffer.from(`alice:${PASS}`).toString("base64"),
 };
 
+type SyncTreeEntry = {
+  id: number;
+  path: string;
+  kind: string;
+  encrypted: boolean;
+};
+
+async function syncTreeEntries(
+  request: import("@playwright/test").APIRequestContext,
+): Promise<SyncTreeEntry[]> {
+  const entries: SyncTreeEntry[] = [];
+  let after = 0;
+  for (;;) {
+    const response = await request.get(
+      `${BASE}/api/sync/tree?after_id=${after}&limit=1000`,
+      { headers: AUTH },
+    );
+    expect(response.status()).toBe(200);
+    const body = (await response.json()) as {
+      entries: SyncTreeEntry[];
+      has_more: boolean;
+      last_id: number;
+    };
+    entries.push(...body.entries);
+    if (!body.has_more || body.last_id <= after) {
+      return entries;
+    }
+    after = body.last_id;
+  }
+}
+
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async ({ request }) => {
@@ -236,6 +267,40 @@ test("web phase 0 polish: dialog keyboard and mobile toolbar", async ({
     expect(uploadBox.x).toBeGreaterThanOrEqual(0);
     expect(uploadBox.x + uploadBox.width).toBeLessThanOrEqual(390);
   }
+});
+
+test("web large folders load in pages", async ({ page, request }) => {
+  const folder = `paged-${Date.now()}`;
+  const created = await request.fetch(`${BASE}/dav/${folder}`, {
+    method: "MKCOL",
+    headers: AUTH,
+  });
+  expect(created.status()).toBe(201);
+  for (let start = 0; start < 1001; start += 50) {
+    const batch = Array.from(
+      { length: Math.min(50, 1001 - start) },
+      (_, offset) => start + offset,
+    );
+    await Promise.all(
+      batch.map((index) =>
+        request.put(
+          `${BASE}/dav/${folder}/p-${String(index).padStart(4, "0")}.txt`,
+          {
+            headers: { ...AUTH, "content-type": "text/plain" },
+            data: "x",
+          },
+        ),
+      ),
+    );
+  }
+
+  await login(page);
+  await openFolder(page, folder);
+  await expect(page.getByText("1000+ items", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Load more", exact: true }).click();
+  await expect(page.getByText("1001 items", { exact: true })).toBeVisible();
+  await expect(page.getByText("p-1000.txt", { exact: true })).toBeVisible();
+  await request.delete(`${BASE}/dav/${folder}`, { headers: AUTH });
 });
 
 test("web empty folder offers upload and new folder actions", async ({
@@ -889,13 +954,7 @@ test("web E2EE upload stays ciphertext and decrypts in the browser", async ({
   await openFolder(page, "Team");
   await expect(page.getByText("note.txt", { exact: true }).first()).toBeVisible();
 
-  const beforeResponse = await request.get(`${BASE}/api/sync/tree?limit=1000`, {
-    headers: AUTH,
-  });
-  const beforeEntries = (await beforeResponse.json()).entries as Array<{
-    path: string;
-    kind: string;
-  }>;
+  const beforeEntries = await syncTreeEntries(request);
   const beforePaths = new Set(beforeEntries.map((entry) => entry.path));
   const teamPath = beforeEntries.find(
     (entry) => entry.kind === "dir" && entry.path.startsWith("/Private/"),
@@ -913,11 +972,7 @@ test("web E2EE upload stays ciphertext and decrypts in the browser", async ({
   let entries: TreeEntry[] = [];
   let uploaded: TreeEntry | undefined;
   for (let attempt = 0; attempt < 40 && !uploaded; attempt++) {
-    const afterResponse = await request.get(
-      `${BASE}/api/sync/tree?limit=1000`,
-      { headers: AUTH },
-    );
-    entries = (await afterResponse.json()).entries as TreeEntry[];
+    entries = await syncTreeEntries(request);
     uploaded = entries.find(
       (entry) =>
         entry.kind === "file" &&

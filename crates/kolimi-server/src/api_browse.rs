@@ -15,11 +15,20 @@ use serde_json::{Value, json};
 
 use crate::{AppState, api, audit};
 
+/// Default number of directory entries returned by `/api/browse`.
+pub const DEFAULT_BROWSE_LIMIT: i64 = 1000;
+/// Hard cap for `/api/browse` pages.
+pub const MAX_BROWSE_LIMIT: i64 = 5000;
+
 /// Query parameters for `/api/browse`.
 #[derive(Deserialize)]
 pub struct BrowseQuery {
     #[serde(default = "root_path")]
     path: String,
+    /// Page size (default 1000, max 5000).
+    limit: Option<i64>,
+    /// Last name from the previous page (keyset cursor).
+    cursor: Option<String>,
 }
 
 pub(crate) fn root_path() -> String {
@@ -37,6 +46,17 @@ pub async fn browse(
         Err(_) => return api::bad_request("invalid path"),
     };
     let parent = parent_of(&segments);
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_BROWSE_LIMIT)
+        .clamp(1, MAX_BROWSE_LIMIT);
+    let cursor = match query.cursor.as_deref() {
+        Some("") => return api::bad_request("cursor must not be empty"),
+        Some(value) if value.chars().count() > 255 || value.chars().any(char::is_control) => {
+            return api::bad_request("cursor is invalid");
+        }
+        value => value,
+    };
 
     // The virtual root of received shares.
     if segments.first().map(String::as_str) == Some(SHARED_MOUNT) && segments.len() == 1 {
@@ -49,48 +69,65 @@ pub async fn browse(
             "encrypted": false,
             "parent": "/",
             "entries": entries,
+            "has_more": false,
+            "next_cursor": Value::Null,
         }))
         .into_response();
     }
 
-    // The caller's own root also shows mounts.
+    // The caller's own root also shows mounts. Own entries are paginated;
+    // mounts are included on the first page only.
     if segments.is_empty() {
-        let mut entries = Vec::new();
+        let (_, children, has_more) = match state
+            .vfs
+            .list_access_page(user.user_id, "/", cursor, limit)
+            .await
+        {
+            Ok(page) => page,
+            Err(e) => return vfs_error(e),
+        };
+        let next_cursor = has_more
+            .then(|| children.last().map(|child| child.name.clone()))
+            .flatten();
+        let mut entries = Vec::with_capacity(children.len());
         let encrypted: std::collections::HashSet<i64> =
             match state.db.encrypted_node_ids(user.user_id).await {
                 Ok(ids) => ids.into_iter().collect(),
                 Err(_) => return api::internal_error(),
             };
-        match state.vfs.list_access(user.user_id, "/").await {
-            Ok((_, children)) => {
-                for child in children {
-                    entries.push(node_entry(
-                        &child,
-                        "",
-                        false,
-                        None,
-                        None,
-                        encrypted.contains(&child.id) || child.encrypted,
-                    ));
-                }
-            }
-            Err(e) => return vfs_error(e),
+        for child in children {
+            entries.push(node_entry(
+                &child,
+                "",
+                false,
+                None,
+                None,
+                encrypted.contains(&child.id) || child.encrypted,
+            ));
         }
-        match mount_entries(&state, user.user_id).await {
-            Ok(mounts) => entries.extend(mounts),
-            Err(_) => return api::internal_error(),
+        if cursor.is_none() {
+            match mount_entries(&state, user.user_id).await {
+                Ok(mounts) => entries.extend(mounts),
+                Err(_) => return api::internal_error(),
+            }
         }
         return Json(json!({
             "path": "/",
             "encrypted": false,
             "parent": Value::Null,
             "entries": entries,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
         }))
         .into_response();
     }
 
-    match state.vfs.list_access(user.user_id, &query.path).await {
-        Ok((access, children)) => {
+    match state
+        .vfs
+        .list_access_page(user.user_id, &query.path, cursor, limit)
+        .await
+    {
+        Ok((access, children, has_more)) => {
             let shared = access.owner_id != user.user_id;
             let owner = if shared {
                 state
@@ -116,6 +153,9 @@ pub async fn browse(
                 .path_is_encrypted(user.user_id, &query.path)
                 .await
                 .unwrap_or(true);
+            let next_cursor = has_more
+                .then(|| children.last().map(|child| child.name.clone()))
+                .flatten();
             let entries: Vec<Value> = children
                 .iter()
                 .map(|child| {
@@ -134,6 +174,8 @@ pub async fn browse(
                 "encrypted": inherited,
                 "parent": parent,
                 "entries": entries,
+                "has_more": has_more,
+                "next_cursor": next_cursor,
             }))
             .into_response()
         }

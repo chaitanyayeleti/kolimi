@@ -416,6 +416,93 @@ async fn app_password_can_be_rescoped_without_rotation() {
 }
 
 #[tokio::test]
+async fn repeated_requests_do_not_write_auth_timestamps() {
+    let (_dir, state, app) = setup().await;
+    let user_id = state.db.find_user(ALICE).await.unwrap().unwrap().id;
+    let app_token = create_app_password(&state, "throttle", "files:read", None).await;
+
+    // First use records last_used_at; the next request inside the window
+    // must not write it again.
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/browse?path=/",
+        None,
+        &[("authorization", basic(&app_token))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let first = state.db.list_app_passwords(user_id).await.unwrap()[0]
+        .last_used_at
+        .expect("first use should stamp the token");
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/browse?path=/",
+        None,
+        &[("authorization", basic(&app_token))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let second = state.db.list_app_passwords(user_id).await.unwrap()[0]
+        .last_used_at
+        .expect("timestamp remains set");
+    assert_eq!(
+        second, first,
+        "second request must not rewrite last_used_at"
+    );
+
+    // The same throttle applies to cookie sessions.
+    let (status, cookies) = login(&app).await;
+    assert_eq!(status, StatusCode::OK);
+    let session_token = cookie(&cookies, "kolimi_session");
+    let hash = token::hash_token(&session_token);
+    let session = state.db.find_session(&hash).await.unwrap().unwrap();
+    sqlx::query("UPDATE sessions SET last_seen_at = 0 WHERE id = ?")
+        .bind(session.id)
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/me/usage",
+        None,
+        &[("cookie", format!("kolimi_session={session_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let first = state
+        .db
+        .find_session(&hash)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_seen_at;
+    assert!(first > 0);
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/me/usage",
+        None,
+        &[("cookie", format!("kolimi_session={session_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let second = state
+        .db
+        .find_session(&hash)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_seen_at;
+    assert_eq!(
+        second, first,
+        "second request must not rewrite last_seen_at"
+    );
+}
+
+#[tokio::test]
 async fn mfa_setup_blocks_the_api_until_totp_is_enabled() {
     let (_dir, state, app) = setup().await;
     let alice = state.db.find_user(ALICE).await.unwrap().unwrap();

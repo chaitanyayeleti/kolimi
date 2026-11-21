@@ -216,3 +216,40 @@ async fn passkey_only_mode() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("audit chain ok"));
 }
+
+#[tokio::test]
+async fn cli_audit_prune_exports_and_verifies_from_the_anchor() {
+    let (dir, state, _app) = setup().await;
+    for name in ["a", "b", "c"] {
+        state
+            .db
+            .audit_append(None, Some("cli"), "user.add", name, &json!({}))
+            .await
+            .unwrap();
+    }
+    let export = dir.path().join("audit.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_kolimi-server"))
+        .args(["audit", "prune", "--before", "2", "--to"])
+        .arg(&export)
+        .env("KOLIMI_DATA", dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("exported 2 audit entries"));
+    let lines = std::fs::read_to_string(&export).unwrap();
+    assert_eq!(lines.lines().count(), 2);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kolimi-server"))
+        .args(["audit", "verify"])
+        .env("KOLIMI_DATA", dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("audit chain ok (1 entries)"), "{stdout}");
+    assert!(stdout.contains("anchor: entries through 2"), "{stdout}");
+}

@@ -151,6 +151,88 @@ async fn ten_thousand_metadata_changes_under_five_seconds() {
 
 #[tokio::test]
 #[ignore = "performance gate; run in release mode"]
+async fn concurrent_webdav_writes_and_browse_stay_healthy() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
+    state
+        .db
+        .create_user("alice", &hash_password(PASS).unwrap())
+        .await
+        .unwrap();
+    let server = start(state).await;
+    let client = reqwest::Client::new();
+
+    const WORKERS: usize = 16;
+    const ROUNDS: usize = 10;
+    let mut tasks = Vec::with_capacity(WORKERS);
+    for worker in 0..WORKERS {
+        let client = client.clone();
+        let url = server.url.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut samples = Vec::with_capacity(ROUNDS * 3);
+            let mut errors = 0u32;
+            for round in 0..ROUNDS {
+                let started = Instant::now();
+                let put = client
+                    .put(format!("{url}/dav/load-{worker}-{round}.txt"))
+                    .basic_auth("alice", Some(PASS))
+                    .body(format!("worker {worker} round {round}"))
+                    .send()
+                    .await
+                    .unwrap();
+                if put.status() != reqwest::StatusCode::CREATED {
+                    errors += 1;
+                }
+                samples.push(started.elapsed());
+
+                let started = Instant::now();
+                let get = client
+                    .get(format!("{url}/dav/load-{worker}-{round}.txt"))
+                    .basic_auth("alice", Some(PASS))
+                    .send()
+                    .await
+                    .unwrap();
+                if get.status() != reqwest::StatusCode::OK {
+                    errors += 1;
+                }
+                samples.push(started.elapsed());
+
+                let started = Instant::now();
+                let browse = client
+                    .get(format!("{url}/api/browse?path=/"))
+                    .basic_auth("alice", Some(PASS))
+                    .send()
+                    .await
+                    .unwrap();
+                if browse.status() != reqwest::StatusCode::OK {
+                    errors += 1;
+                }
+                samples.push(started.elapsed());
+            }
+            (samples, errors)
+        }));
+    }
+
+    let mut samples = Vec::new();
+    let mut errors = 0u32;
+    for task in tasks {
+        let (mut worker_samples, worker_errors) = task.await.unwrap();
+        samples.append(&mut worker_samples);
+        errors += worker_errors;
+    }
+    samples.sort();
+    let p95 = samples[(samples.len() as f64 * 0.95).floor() as usize];
+    println!(
+        "{WORKERS} clients x {ROUNDS} rounds: p95 {p95:?}, {} requests, {errors} errors",
+        samples.len()
+    );
+    assert_eq!(errors, 0, "mixed concurrent load returned errors");
+    assert!(p95 < Duration::from_secs(5), "p95 {p95:?} exceeded 5 s");
+    server.handle.abort();
+}
+
+#[tokio::test]
+#[ignore = "performance gate; run in release mode"]
 async fn metadata_p95_under_target() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();

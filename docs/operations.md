@@ -257,17 +257,31 @@ on-demand check.
 
 ## Audit log
 
-Append-only, hash-chained; every entry hashes the previous one, so
-edits, deletions and reordering are detectable.
+The retained log is append-only and hash-chained; every entry hashes the
+previous one, so edits, deletions and reordering are detectable. Pruned
+prefixes are exported and anchored.
 
 ```sh
 kolimi-server audit list --limit 50    # JSON lines, newest first
 kolimi-server audit verify             # exits 1 and names the first bad entry
+kolimi-server audit prune --before 12345 --to /backups/audit-2026-11-21.jsonl
 ```
+
+`audit prune` exports entries through `--before` to a new JSONL file, fsyncs
+it, then deletes those rows and records an **anchor** in the database. The
+anchor is the last pruned entry's hash; `audit verify` starts there, so the
+retained tail still proves it links to the exported prefix. The command
+refuses to overwrite an existing export, refuses to prune a prefix with a
+broken chain, and always keeps the newest entry so SQLite cannot reuse its
+id. The export is the only copy of the pruned entries — store it with the
+same care as the database. Prune in bounded batches (for example monthly),
+not in one giant delete.
 
 Administrators can read the same log over HTTP: `GET /api/audit` accepts
 `limit`, `before`, `action`, and `subject`, and `GET /api/audit/verify`
 recomputes the chain. Both are admin-only and never expose chain hashes.
+After retention, verify starts at the anchor and reports
+`anchor.pruned_through` / `anchor.pruned_entries`.
 
 Events cover logins and failures, logouts, passkeys, TOTP, password changes,
 profile edits, invite creation/revocation/acceptance, user administration,
@@ -384,6 +398,54 @@ admin panel marks near/over-quota accounts. `GET /api/users` accepts
   (`/api/groups/{name}/members`) are only visible to the group's members
   and administrators; wrapping E2EE keys for a group requires the sharer
   to be a member.
+
+## Scale and limits
+
+Kolimi is a **single-node, scale-up** server: one process, one SQLite
+database, one local blob directory. It is not an HA or multi-tenant cluster.
+Running a second replica against the same data is unsupported; the rate
+limiter, locks, SSE broker, and janitor are process-local.
+
+Useful current limits:
+
+| Area | Limit |
+| --- | --- |
+| Directory page | `/api/browse` default 1,000 entries, max 5,000 |
+| Sync/tree pages | 1,000 entries per response (`limit` up to 2,000) |
+| Chunk upload | 8 MiB request; manifest commit 64 MiB |
+| WebDAV upload | 16 GiB per request |
+| SSE streams | 64 concurrent, 30-minute lifetime |
+| Preview workers | 4 concurrent, 20 MiB input each |
+| SQLite | WAL, 8 pooled connections, one writer, 5 s busy timeout |
+| Audit retention | manual `audit prune`, anchored; no automatic policy |
+
+Successful authentication refreshes `last_seen_at` / `last_used_at` at most
+once per minute. The session or token row is still read on every request, so
+revocation and account disable take effect immediately; only the timestamp
+write is throttled.
+
+Directory reads are paginated, but `kolimi-sync` still builds a full remote
+tree snapshot per sync pass. Large trees therefore scale as
+`clients × files` per interval. The 10k-file delta/tree gates are in CI;
+treat 100k-file trees with many sync clients as a workload to measure, not a
+guaranteed profile.
+
+Backups are a full SQLite snapshot plus a full blob copy. At terabyte scale,
+plan the backup window, temporary space, and restore time explicitly.
+`verify` is a full re-hash; the janitor scrubs bounded batches in the
+background.
+
+A practical profile:
+
+- **1–50 users:** comfortable on one good node.
+- **50–500 users:** viable with NVMe storage, enough RAM, fast backups, and
+  attention to write concurrency and audit volume.
+- **500+ write-heavy users, HA, or public multi-tenant:** requires a
+  different storage/DB/event architecture, not just tuning.
+
+Read-heavy downloads, WebDAV/CalDAV, and small-directory browsing scale best.
+The first pressure points are concurrent SQLite writes, very large single
+directories, full-tree sync passes, and unbounded audit growth.
 
 ## E2EE and MLS operations
 

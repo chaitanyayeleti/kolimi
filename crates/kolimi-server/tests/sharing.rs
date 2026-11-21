@@ -979,6 +979,86 @@ async fn upload_only_links_reject_files_caps_and_encrypted_targets() {
 }
 
 #[tokio::test]
+async fn browse_pages_large_directories_without_duplicates() {
+    let server = setup().await;
+    mkdir(&server, ALICE, "/dav/big").await;
+    let alice = server.state.db.find_user(ALICE).await.unwrap().unwrap();
+    let big = server.state.vfs.resolve(alice.id, "/big").await.unwrap();
+    let now = kolimi_db::now_millis();
+    for index in 0..250 {
+        server
+            .state
+            .db
+            .insert_node(
+                alice.id,
+                Some(big.id),
+                &format!("file-{index:04}.txt"),
+                "file",
+                None,
+                1,
+                now,
+            )
+            .await
+            .unwrap();
+    }
+
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/browse?path=/big&limit=100", ALICE, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let first = json_body(&body);
+    let first_entries = first["entries"].as_array().unwrap();
+    assert_eq!(first_entries.len(), 100);
+    assert_eq!(first["has_more"], true);
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    assert_eq!(
+        first_entries.last().unwrap()["name"].as_str().unwrap(),
+        cursor
+    );
+
+    let (status, _, body) = send(
+        &server.app,
+        request(
+            "GET",
+            &format!("/api/browse?path=/big&limit=100&cursor={}", cursor),
+            ALICE,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let second = json_body(&body);
+    let second_entries = second["entries"].as_array().unwrap();
+    assert_eq!(second_entries.len(), 100);
+    assert_eq!(second["has_more"], true);
+    let names: std::collections::HashSet<&str> = first_entries
+        .iter()
+        .chain(second_entries.iter())
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert_eq!(names.len(), 200, "pages must not overlap");
+
+    let cursor = second["next_cursor"].as_str().unwrap().to_string();
+    let (status, _, body) = send(
+        &server.app,
+        request(
+            "GET",
+            &format!("/api/browse?path=/big&limit=100&cursor={}", cursor),
+            ALICE,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let third = json_body(&body);
+    assert_eq!(third["entries"].as_array().unwrap().len(), 50);
+    assert_eq!(third["has_more"], false);
+    assert_eq!(third["next_cursor"], Value::Null);
+}
+
+#[tokio::test]
 async fn shareable_lists_users_and_groups() {
     let server = setup().await;
     server.state.db.create_group("team").await.unwrap();

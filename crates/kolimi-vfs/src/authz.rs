@@ -343,6 +343,36 @@ impl Vfs {
         Ok((access, children))
     }
 
+    /// Lists one page of a directory through the permission engine.
+    ///
+    /// `after` is the last name from the previous page. The returned bool is
+    /// true when another page exists.
+    pub async fn list_access_page(
+        &self,
+        caller_id: i64,
+        raw: &str,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<(Access, Vec<Node>, bool), VfsError> {
+        let access = self.resolve_access(caller_id, raw).await?;
+        access.perm.require(Perm::Read)?;
+        if !access.node.is_dir() {
+            return Err(VfsError::ParentNotCollection);
+        }
+        let limit = limit.max(1);
+        let rows = self
+            .db
+            .children_page(access.owner_id, access.node.id, after, limit + 1)
+            .await?;
+        let has_more = rows.len() as i64 > limit;
+        let children = rows
+            .into_iter()
+            .take(limit as usize)
+            .map(Node::from_db)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((access, children, has_more))
+    }
+
     /// Reads dead properties through the permission engine.
     pub async fn dead_props_access(
         &self,

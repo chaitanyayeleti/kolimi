@@ -211,6 +211,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let quota_warn = RwSignal::new(Option::<u8>::None);
     let usage = RwSignal::new(Value::Null);
     let loading = RwSignal::new(false);
+    let next_cursor = RwSignal::new(Option::<String>::None);
+    let has_more = RwSignal::new(false);
+    let loading_more = RwSignal::new(false);
     // Whether the folder being shown is encrypted (so it can be hidden while
     // locked). Comes from the browse response, which inherits the folder flag.
     let folder_encrypted = RwSignal::new(false);
@@ -368,6 +371,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         selected.set(std::collections::HashSet::new());
         selecting.set(false);
         loading.set(true);
+        next_cursor.set(None);
+        has_more.set(false);
+        loading_more.set(false);
         let seq = load_seq.get_untracked().wrapping_add(1);
         load_seq.set(seq);
         spawn_local(async move {
@@ -375,7 +381,7 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
             received.set(mounts);
             shared_names.set(names);
             let shares = shared_names.get_untracked();
-            let url = format!("/api/browse?path={}", encode(&requested));
+            let url = format!("/api/browse?path={}&limit=1000", encode(&requested));
             let result = api::get(&url).await;
             // A newer navigation supersedes this response: don't apply it or
             // clear the loading state.
@@ -386,6 +392,8 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 Ok(r) if r.status == 200 => {
                     folder_encrypted.set(r.body["encrypted"].as_bool().unwrap_or(false));
                     entries.set(parse_entries(&r.body, master.as_ref(), &shares));
+                    next_cursor.set(r.body["next_cursor"].as_str().map(str::to_string));
+                    has_more.set(r.body["has_more"].as_bool().unwrap_or(false));
                     parent.set(
                         r.body
                             .get("parent")
@@ -427,6 +435,52 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                 ),
             }
             loading.set(false);
+        });
+    });
+
+    let load_more = Callback::new(move |_: ()| {
+        if loading_more.get_untracked() || !has_more.get_untracked() {
+            return;
+        }
+        let Some(cursor) = next_cursor.get_untracked() else {
+            return;
+        };
+        let requested = path.get_untracked();
+        let master = e2ee_master.get_untracked();
+        let shares = shared_names.get_untracked();
+        loading_more.set(true);
+        spawn_local(async move {
+            let url = format!(
+                "/api/browse?path={}&limit=1000&cursor={}",
+                encode(&requested),
+                encode(&cursor)
+            );
+            let result = api::get(&url).await;
+            // A navigation while the page was in flight wins.
+            if path.get_untracked() != requested || tab.get_untracked() != Tab::Files {
+                loading_more.set(false);
+                return;
+            }
+            match result {
+                Ok(r) if r.status == 200 => {
+                    let more = parse_entries(&r.body, master.as_ref(), &shares);
+                    entries.update(|list| {
+                        let mut seen: std::collections::HashSet<String> =
+                            list.iter().map(|entry| entry.path.clone()).collect();
+                        for entry in more {
+                            if seen.insert(entry.path.clone()) {
+                                list.push(entry);
+                            }
+                        }
+                    });
+                    next_cursor.set(r.body["next_cursor"].as_str().map(str::to_string));
+                    has_more.set(r.body["has_more"].as_bool().unwrap_or(false));
+                    error.set(String::new());
+                }
+                Ok(r) => error.set(r.error().unwrap_or("Could not load more files").to_string()),
+                Err(message) => error.set(message),
+            }
+            loading_more.set(false);
         });
     });
 
@@ -968,6 +1022,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                             context_menu=context_menu
                             lightbox=lightbox
                             can_write=can_write
+                            has_more=has_more
+                            loading_more=loading_more
+                            on_load_more=load_more
                             on_load=file_load
                             on_mkdir=top_mkdir
                             on_open=ctx_open

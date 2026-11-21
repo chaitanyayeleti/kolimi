@@ -79,10 +79,19 @@ kolimi-server backup --data DIR --to DIR   # online SQLite snapshot + blobs
 kolimi-server verify --data DIR            # full BLAKE3/chunk verification
 kolimi-server audit list [--limit N] [--before ID]
 kolimi-server audit verify                 # exit 1 on a broken hash chain
+kolimi-server audit prune --before ID --to audit.jsonl
+                                           # export + prune with an anchor
 ```
 
 `backup` is safe while the server is running. `verify` is the full
 on-demand check; the janitor also scrubs incrementally in the background.
+
+`audit prune` writes the selected prefix to a new JSONL file (it refuses to
+overwrite an existing path), fsyncs it, then deletes those rows and records
+an anchor in the database. At least the newest entry is retained.
+`audit verify` starts from that anchor, so the retained tail still proves
+its linkage to the exported prefix. Keep the export: it is the only copy of
+the pruned entries.
 
 ## `kolimi-sync`
 
@@ -201,6 +210,8 @@ Notes:
   `DELETE /api/me/sessions/{id}` revokes one; `DELETE /api/me/sessions`
   revokes all, or all others with `?keep_current=true`. Session tokens are
   never returned, and session/login responses use `Cache-Control: no-store`.
+  Last-seen timestamps refresh at most once per minute; the session row is
+  still checked on every request, so revocation is immediate.
 - `PATCH /api/me` updates the optional `display_name` and `email` profile
   fields. Email is informational only; Kolimi sends no mail.
 - Accounts marked `must_change_password` may only call `GET /api/me`,
@@ -220,6 +231,8 @@ Notes:
   the token it authenticated with. Creation/revocation accept a fresh
   `X-Reauth-Token`, or a session created within the last five minutes.
   HTTP Basic accepts an app password even when the account has TOTP.
+  `last_used_at` refreshes at most once per minute; the token row is still
+  read on every request, so deletion is immediate.
   `POST` accepts optional `scopes` (an array) and `expires_in_secs`
   (`0`/omitted = never). Omitted scopes default to `*` for compatibility.
   Scopes are `*`, `files:read`, `files:write`, `caldav:read`,
@@ -261,6 +274,15 @@ Notes:
   The response is `201` with the sanitized name and size; neither existing
   filenames nor the folder path are disclosed. Write links cannot be
   switched to read (or back) after creation; revoke and recreate instead.
+
+### Directory browsing
+
+`GET /api/browse?path=&limit=&cursor=` returns one page of a directory.
+`limit` defaults to 1,000 and is capped at 5,000. `cursor` is the last name
+from the previous page; the response carries `has_more` and `next_cursor`.
+Names are unique within a parent, so pages do not duplicate entries; an
+insert before the cursor appears on a refresh. `/Shared with me` itself and the mounts on the account root are small
+fixed lists: mounts appear on the first root page only.
 
 ### WebDAV / CalDAV / CardDAV
 
