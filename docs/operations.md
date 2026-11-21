@@ -239,6 +239,10 @@ kolimi-server backup --data /var/lib/kolimi --to /backups/kolimi-2026-10-11
 # Refresh an existing backup without copying unchanged blobs.
 kolimi-server backup --data /var/lib/kolimi --to /backups/kolimi-current --incremental
 
+# Keep the newest 7 marked backups in /backups and mirror to a mounted target.
+kolimi-server backup --data /var/lib/kolimi --to /backups/kolimi-2026-11-21 \
+  --incremental --retain 7 --offsite /mnt/offsite/kolimi
+
 # Integrity: verifies every manifest and chunk hash.
 kolimi-server verify --data /var/lib/kolimi
 ```
@@ -249,6 +253,14 @@ Blob files are immutable after commit, so hard links are safe. The SQLite
 snapshot is still a fresh consistent snapshot on every run. The backup is
 cumulative: blobs deleted from the source are not removed from the
 destination. Restore is the same as a full backup.
+
+Each backup writes `kolimi-backup.json`. `--retain N` prunes the oldest
+sibling directories that carry that marker, keeping the newest N; unmarked
+directories are never touched. `--offsite DIR` mirrors the completed backup
+to a second path using the same incremental blob copy, which can be a local
+mount of NFS, SMB, rclone, or an object-store FUSE mount. The offsite copy is
+updated in place (blobs, `kolimi.db`, marker); retention applies to the
+primary timestamped directories.
 
 Restore: stop the server, replace the data directory with the backup,
 start the server (migrations run at startup), then `verify`.
@@ -268,30 +280,38 @@ on-demand check.
 ## Audit log
 
 The retained log is append-only and hash-chained; every entry hashes the
-previous one, so edits, deletions and reordering are detectable. Pruned
-prefixes are exported and anchored.
+previous one, so edits, deletions and reordering are detectable. Sealed
+checkpoints commit to a contiguous range with a Merkle root and link to the
+previous checkpoint header. Pruned prefixes are exported and anchored.
 
 ```sh
 kolimi-server audit list --limit 50    # JSON lines, newest first
-kolimi-server audit verify             # exits 1 and names the first bad entry
-kolimi-server audit prune --before 12345 --to /backups/audit-2026-11-21.jsonl
+kolimi-server audit seal               # seal unsealed entries (batches of 4096)
+kolimi-server audit checkpoints        # headers, newest first
+kolimi-server audit verify             # entry chain + checkpoint headers/roots
+kolimi-server audit prune --checkpoint 12 --to /backups/audit-12.jsonl
+kolimi-server audit verify-export --file /backups/audit-12.jsonl
 ```
 
-`audit prune` exports entries through `--before` to a new JSONL file, fsyncs
-it, then deletes those rows and records an **anchor** in the database. The
-anchor is the last pruned entry's hash; `audit verify` starts there, so the
-retained tail still proves it links to the exported prefix. The command
-refuses to overwrite an existing export, refuses to prune a prefix with a
-broken chain, and always keeps the newest entry so SQLite cannot reuse its
-id. The export is the only copy of the pruned entries — store it with the
-same care as the database. Prune in bounded batches (for example monthly),
-not in one giant delete.
+`audit seal` creates one or more checkpoints over the unsealed tail; the
+janitor also seals automatically once 1,024 entries are pending. Checkpoint
+headers are retained forever; they are small and form the permanent history.
+A checkpoint commits to its entries with an RFC 6962-style Merkle root.
+
+`audit prune` exports a checkpoint's entries to a new JSONL bundle (header
+line plus one line per entry), fsyncs it, then deletes those rows and marks
+the header pruned. The bundle's header carries the Merkle root and checkpoint
+hash, so `audit verify-export` can check it independently. `audit verify`
+checks the entry chain from the anchor, every checkpoint header and link, and
+every Merkle root whose entries are still present. The command refuses to
+overwrite an existing export, refuses a checkpoint with a broken chain, and
+always keeps the newest entry so SQLite cannot reuse its id. Prune checkpoints
+in order and store each bundle with the same care as the database.
 
 Administrators can read the same log over HTTP: `GET /api/audit` accepts
 `limit`, `before`, `action`, and `subject`, and `GET /api/audit/verify`
-recomputes the chain. Both are admin-only and never expose chain hashes.
-After retention, verify starts at the anchor and reports
-`anchor.pruned_through` / `anchor.pruned_entries`.
+reports the entry chain, checkpoint counts, latest checkpoint, and anchor.
+Both are admin-only and never expose chain hashes.
 
 Events cover logins and failures, logouts, passkeys, TOTP, password changes,
 profile edits, invite creation/revocation/acceptance, user administration,
@@ -432,7 +452,7 @@ Useful current limits:
 | SSE streams | 64 concurrent, 30-minute lifetime |
 | Preview workers | 4 concurrent, 20 MiB input each |
 | SQLite | WAL, 8 pooled connections, one writer, 5 s busy timeout |
-| Audit retention | manual `audit prune`, anchored; no automatic policy |
+| Audit retention | manual `audit prune`, sealed checkpoint boundary; janitor seals automatically |
 
 Successful authentication refreshes `last_seen_at` / `last_used_at` at most
 once per minute. The session or token row is still read on every request, so

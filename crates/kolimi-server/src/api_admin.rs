@@ -308,7 +308,14 @@ pub async fn verify_audit(
             Json(json!({
                 "ok": verify.first_bad.is_none(),
                 "entries": verify.entries,
+                "checkpoints": verify.checkpoints,
+                "pruned_checkpoints": verify.pruned_checkpoints,
                 "first_bad": verify.first_bad,
+                "latest_checkpoint": verify.latest_checkpoint.map(|checkpoint| json!({
+                    "id": checkpoint.id,
+                    "last_entry_id": checkpoint.last_entry_id,
+                    "merkle_root": checkpoint.merkle_root,
+                })),
                 "anchor": anchor.map(|anchor| json!({
                     "pruned_through": anchor.pruned_through,
                     "pruned_entries": anchor.pruned_entries,

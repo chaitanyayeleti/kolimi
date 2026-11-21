@@ -78,12 +78,18 @@ shares.
 kolimi-server backup --data DIR --to DIR   # online SQLite snapshot + blobs
 kolimi-server backup --data DIR --to DIR --incremental
                                            # skip existing blobs; hard-link new ones
+kolimi-server backup --data DIR --to DIR --retain N --offsite DIR
+                                           # prune old marked backups; mirror offsite
 kolimi-server verify --data DIR            # full BLAKE3/chunk verification
 kolimi-server migrate-manifests           # move legacy flat manifests to fanout
 kolimi-server audit list [--limit N] [--before ID]
-kolimi-server audit verify                 # exit 1 on a broken hash chain
-kolimi-server audit prune --before ID --to audit.jsonl
-                                           # export + prune with an anchor
+kolimi-server audit verify                 # entry chain + checkpoint headers/roots
+kolimi-server audit seal [--batch N]       # seal unsealed entries
+kolimi-server audit checkpoints [--limit N]
+kolimi-server audit prune --checkpoint ID --to audit.jsonl
+                                           # export + prune a sealed checkpoint
+kolimi-server audit verify-export --file audit.jsonl
+                                           # verify a portable checkpoint bundle
 ```
 
 `backup` is safe while the server is running. `verify` is the full
@@ -97,6 +103,24 @@ filesystem (blob files are immutable after commit) and copied otherwise.
 The SQLite snapshot is still rewritten each run. The backup is cumulative:
 blobs deleted from the source are left in the destination for retention.
 Restore format is identical to a full backup.
+
+Each backup writes a `kolimi-backup.json` marker. `--retain N` prunes the
+oldest marked sibling backups; unmarked directories are never touched.
+`--offsite DIR` mirrors the completed backup (blobs, database snapshot,
+marker) to a second path, typically a mounted NFS/SMB/rclone target.
+
+### Audit checkpoints
+
+`audit seal` seals unsealed entries in batches (default 4,096); the janitor
+does the same automatically once 1,024 entries are pending. A checkpoint
+covers a contiguous entry range, carries an RFC 6962-style Merkle root, and
+links to the previous checkpoint header. Headers are never pruned.
+`audit prune --checkpoint ID` exports a JSONL bundle (header plus entries),
+fsyncs it, deletes those entry bodies, and marks the header pruned.
+`audit verify` checks the retained entry chain from the anchor, every
+checkpoint header/link, and every available Merkle root.
+`audit verify-export` verifies a bundle independently. `--before ID` remains
+as a compatibility alias when it matches a checkpoint's last entry id.
 
 `audit prune` writes the selected prefix to a new JSONL file (it refuses to
 overwrite an existing path), fsyncs it, then deletes those rows and records
@@ -319,7 +343,9 @@ the fallback for an unknown op/kind or an old server.
 `.kolimi/state.json`, skips `read_dir` for unchanged directories, and stats
 only their tracked files. A content edit in an unchanged directory is still
 detected; adding, removing, or renaming an entry changes the directory mtime
-and rescans that directory.
+and rescans that directory. A local rename with unchanged content becomes a
+server-side WebDAV MOVE, and deleting a local directory produces one DELETE
+for the whole subtree rather than one per file.
 
 ### WebDAV / CalDAV / CardDAV
 

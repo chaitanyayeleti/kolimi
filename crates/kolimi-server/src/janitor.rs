@@ -29,6 +29,8 @@ pub const RETENTION_BATCH: i64 = 100;
 pub const GC_BATCH: i64 = 50;
 /// Legacy flat manifests moved to the fanout layout per account per pass.
 pub const MIGRATE_BATCH: usize = 1000;
+/// Checkpoint batches the janitor may seal in one pass.
+pub const AUDIT_CHECKPOINTS_PER_PASS: u64 = 10;
 /// Accounts scrubbed per pass (each checks `SCRUB_BATCH` blobs).
 pub const SCRUB_USERS: i64 = 50;
 /// Usage counters recomputed from disk per pass (bounded; least-recently
@@ -82,6 +84,8 @@ pub struct Report {
     pub corrupt: u64,
     /// Usage counters recomputed from disk.
     pub reconciled: u64,
+    /// Audit checkpoints sealed this pass.
+    pub audit_checkpoints_sealed: u64,
 }
 
 /// Errors during a janitor pass.
@@ -160,6 +164,16 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
         .prune_mls_messages(
             now - MLS_MESSAGE_RETENTION_MILLIS,
             now - MLS_EPOCH_REPORT_FRESH_MILLIS,
+        )
+        .await?;
+
+    // Seal audit entries off the request path once enough have accumulated.
+    report.audit_checkpoints_sealed = state
+        .db
+        .audit_seal_pending(
+            kolimi_db::AUDIT_CHECKPOINT_ENTRIES,
+            kolimi_db::AUDIT_CHECKPOINT_BATCH,
+            AUDIT_CHECKPOINTS_PER_PASS,
         )
         .await?;
 
@@ -293,6 +307,9 @@ pub async fn run(state: AppState) {
                     .janitor_event("scrub_checked", report.scrubbed);
                 state.metrics.janitor_event("scrub_corrupt", report.corrupt);
                 state.metrics.janitor_event("reconciled", report.reconciled);
+                state
+                    .metrics
+                    .janitor_event("audit_checkpoints_sealed", report.audit_checkpoints_sealed);
                 if report != Report::default() {
                     tracing::info!(
                         retention_users = report.retention_users,
@@ -312,6 +329,7 @@ pub async fn run(state: AppState) {
                         scrubbed = report.scrubbed,
                         corrupt = report.corrupt,
                         reconciled = report.reconciled,
+                        audit_checkpoints_sealed = report.audit_checkpoints_sealed,
                         "janitor pass complete"
                     );
                 }

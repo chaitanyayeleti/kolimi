@@ -285,3 +285,177 @@ async fn metadata_p95_under_target() {
 
     server.handle.abort();
 }
+
+#[tokio::test]
+#[ignore = "soak gate; run in release mode"]
+async fn hundred_thousand_files_and_multi_client_soak() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
+    let user = state
+        .db
+        .create_user("alice", &hash_password(PASS).unwrap())
+        .await
+        .unwrap();
+    let root = state.db.root_node(user.id).await.unwrap();
+    let now = kolimi_db::now_millis();
+
+    // Seed 100k files and one change-feed row each in one transaction. The
+    // HTTP path is what this gate measures, so skip the per-event audit rows
+    // that the normal VFS path would add.
+    const FILES: usize = 100_000;
+    let seeding = Instant::now();
+    let mut tx = state.db.pool().begin().await.unwrap();
+    for index in 0..FILES {
+        let name = format!("f-{index:06}.txt");
+        sqlx::query(
+            "INSERT INTO nodes
+                 (user_id, parent_id, name, kind, content_id, size, created_at, modified_at)
+             VALUES (?, ?, ?, 'file', NULL, 1, ?, ?)",
+        )
+        .bind(user.id)
+        .bind(root.id)
+        .bind(&name)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO changes (user_id, path, from_path, op, content_id, size, modified_at)
+             VALUES (?, ?, NULL, 'upsert', NULL, 1, ?)",
+        )
+        .bind(user.id)
+        .bind(format!("/{name}"))
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    println!("seeded {FILES} files + changes in {:?}", seeding.elapsed());
+
+    let server = start(state).await;
+
+    // Full 100k-entry tree walk, 1000 per page.
+    let started = Instant::now();
+    let mut after = 0i64;
+    let mut entries = 0usize;
+    loop {
+        let (status, body) = get_json(&format!(
+            "{}/api/sync/tree?after_id={after}&limit=1000",
+            server.url
+        ))
+        .await;
+        assert_eq!(status, 200);
+        entries += body["entries"].as_array().unwrap().len();
+        after = body["last_id"].as_i64().unwrap();
+        if !body["has_more"].as_bool().unwrap_or(false) {
+            break;
+        }
+    }
+    let tree_time = started.elapsed();
+    println!("100k tree walk ({entries} entries): {tree_time:?}");
+    assert!(entries >= FILES);
+    assert!(
+        tree_time < Duration::from_secs(60),
+        "100k tree walk took {tree_time:?}"
+    );
+
+    // Full 100k-entry change feed, 1000 per page.
+    let started = Instant::now();
+    let mut since = 0i64;
+    let mut changes = 0usize;
+    loop {
+        let (status, body) = get_json(&format!(
+            "{}/api/sync/changes?since={since}&limit=1000",
+            server.url
+        ))
+        .await;
+        assert_eq!(status, 200);
+        changes += body["changes"].as_array().unwrap().len();
+        since = body["next_seq"].as_i64().unwrap();
+        if !body["has_more"].as_bool().unwrap_or(false) {
+            break;
+        }
+    }
+    let feed_time = started.elapsed();
+    println!("100k change feed ({changes} events): {feed_time:?}");
+    assert!(changes >= FILES);
+    assert!(
+        feed_time < Duration::from_secs(60),
+        "100k change feed took {feed_time:?}"
+    );
+
+    // 16 clients read tiny pages while 8 of them also write.
+    const CLIENTS: usize = 16;
+    const ROUNDS: usize = 10;
+    let client = reqwest::Client::new();
+    let mut tasks = Vec::with_capacity(CLIENTS);
+    for worker in 0..CLIENTS {
+        let client = client.clone();
+        let url = server.url.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut samples = Vec::with_capacity(ROUNDS * 2);
+            let mut errors = 0u32;
+            for round in 0..ROUNDS {
+                let started = Instant::now();
+                let browse = client
+                    .get(format!("{url}/api/browse?path=/&limit=100"))
+                    .basic_auth("alice", Some(PASS))
+                    .send()
+                    .await
+                    .unwrap();
+                if browse.status() != reqwest::StatusCode::OK {
+                    errors += 1;
+                }
+                samples.push(started.elapsed());
+
+                let started = Instant::now();
+                let changes = client
+                    .get(format!("{url}/api/sync/changes?since=0&limit=100"))
+                    .basic_auth("alice", Some(PASS))
+                    .send()
+                    .await
+                    .unwrap();
+                if changes.status() != reqwest::StatusCode::OK {
+                    errors += 1;
+                }
+                samples.push(started.elapsed());
+
+                if worker < 8 {
+                    let put = client
+                        .put(format!("{url}/dav/soak-{worker}-{round}.txt"))
+                        .basic_auth("alice", Some(PASS))
+                        .body("soak")
+                        .send()
+                        .await
+                        .unwrap();
+                    if put.status() != reqwest::StatusCode::CREATED {
+                        errors += 1;
+                    }
+                }
+            }
+            (samples, errors)
+        }));
+    }
+    let mut samples = Vec::new();
+    let mut errors = 0u32;
+    for task in tasks {
+        let (mut worker_samples, worker_errors) = task.await.unwrap();
+        samples.append(&mut worker_samples);
+        errors += worker_errors;
+    }
+    samples.sort();
+    let p95 = samples[(samples.len() as f64 * 0.95).floor() as usize];
+    println!(
+        "{CLIENTS} clients x {ROUNDS} rounds at 100k files: p95 {p95:?}, {} reads, {errors} errors",
+        samples.len()
+    );
+    assert_eq!(errors, 0, "multi-client soak returned errors");
+    assert!(
+        p95 < Duration::from_millis(500),
+        "multi-client p95 {p95:?} exceeded 500 ms"
+    );
+
+    server.handle.abort();
+}

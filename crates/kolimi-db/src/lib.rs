@@ -24,7 +24,11 @@ mod search_state;
 mod sharing;
 
 pub use app_passwords::AppPassword;
-pub use audit::{AuditAnchor, AuditEntry, AuditPageQuery, AuditPruneReport, AuditVerify};
+pub use audit::{
+    AUDIT_CHECKPOINT_BATCH, AUDIT_CHECKPOINT_ENTRIES, AuditAnchor, AuditCheckpoint,
+    AuditCheckpointHead, AuditEntry, AuditExportVerify, AuditPageQuery, AuditPruneReport,
+    AuditVerify,
+};
 pub use dav::{DavChange, DavCollection, DavObject, DavObjectMeta};
 pub use devices::{Device, Enrollment, MAX_DEVICE_KEY_BYTES};
 pub use e2ee::{MAX_KEYRING_BYTES, MAX_WRAPPED_KEY_BYTES};
@@ -2006,6 +2010,25 @@ impl Db {
             "SELECT * FROM nodes WHERE user_id = ? AND trashed_at IS NULL ORDER BY id",
         )
         .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// One keyset page of live nodes for the sync tree snapshot.
+    pub async fn live_nodes_page(
+        &self,
+        user_id: i64,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Node>, DbError> {
+        Ok(sqlx::query_as::<_, Node>(
+            "SELECT * FROM nodes
+             WHERE user_id = ? AND trashed_at IS NULL AND id > ?
+             ORDER BY id LIMIT ?",
+        )
+        .bind(user_id)
+        .bind(after_id)
+        .bind(limit.clamp(1, 5000))
         .fetch_all(&self.pool)
         .await?)
     }

@@ -187,6 +187,8 @@ pub struct SyncReport {
     pub conflicts: u64,
     /// Remote files deleted because they were deleted locally.
     pub removed_remote: u64,
+    /// Local files renamed with a server-side MOVE.
+    pub moved: u64,
     /// Files skipped this pass due to a per-file error (not fatal).
     pub failed: u64,
     /// Directories enumerated during incremental push.
@@ -202,6 +204,7 @@ impl SyncReport {
             && self.pushed == 0
             && self.removed_local == 0
             && self.removed_remote == 0
+            && self.moved == 0
             && self.conflicts == 0
             && self.failed == 0
     }
@@ -281,10 +284,15 @@ struct StateFile {
     size: u64,
     /// Local modification time in nanoseconds since the epoch.
     mtime_ns: i64,
-    /// Set when the local file disappeared after having been synced; the
-    /// pull pass must not resurrect it, and push propagates the deletion.
+    /// Set when the local file disappeared after having been synced; push
+    /// propagates the deletion. Pull keeps the tombstone so a later remote
+    /// edit cannot resurrect a file the user deleted.
     #[serde(default)]
     deleted: bool,
+    /// Set when pull saw a matching remote entry but the local file is gone.
+    /// Unlike `deleted`, this still allows push to detect a local rename.
+    #[serde(default)]
+    missing: bool,
     /// True for files that live under `Shared with me/` (read-only here;
     /// push never uploads or deletes them).
     #[serde(default)]
@@ -293,6 +301,12 @@ struct StateFile {
     /// file. Avoids a full tree walk on every push after the first sync.
     #[serde(default)]
     server_path: Option<String>,
+    /// Device id for local rename detection (Unix).
+    #[serde(default)]
+    dev: Option<u64>,
+    /// Inode number for local rename detection (Unix).
+    #[serde(default)]
+    ino: Option<u64>,
 }
 
 impl State {
@@ -2543,6 +2557,24 @@ impl Http {
         Ok(response.status().as_u16())
     }
 
+    async fn dav_move(&self, from: &str, to: &str) -> Result<u16, SyncError> {
+        let method = reqwest::Method::from_bytes(b"MOVE").map_err(|error| SyncError::Server {
+            status: 0,
+            path: format!("MOVE ({error})"),
+        })?;
+        let source = self.url(&format!("/dav{}", encode_path(from)));
+        let destination = self.url(&format!("/dav{}", encode_path(to)));
+        let response = self
+            .auth(
+                self.client
+                    .request(method, source)
+                    .header("Destination", destination),
+            )
+            .send()
+            .await?;
+        Ok(response.status().as_u16())
+    }
+
     async fn put_bytes(&self, path: &str, body: &[u8]) -> Result<u16, SyncError> {
         self.put_bytes_with_headers(path, body, &[]).await
     }
@@ -3037,10 +3069,11 @@ async fn pull(
                     if local.exists() {
                         return Ok(());
                     }
-                    // Synced before and gone locally: the user deleted it.
-                    // Mark a tombstone and let push propagate the deletion.
+                    // Synced before and gone locally: the user deleted or
+                    // renamed it. Mark it missing; push either moves it or
+                    // propagates the deletion.
                     if let Some(entry) = state.files.get_mut(rel) {
-                        entry.deleted = true;
+                        entry.missing = true;
                     }
                     return Ok(());
                 }
@@ -3053,13 +3086,14 @@ async fn pull(
                 // a known tradeoff — the server's content_id remains the
                 // authoritative conflict detector.
                 let locally_modified = !known.deleted
+                    && !known.missing
                     && match std::fs::metadata(&local) {
                         Ok(metadata) => {
                             metadata.len() != known.size || mtime_ns(&local)? != known.mtime_ns
                         }
                         Err(_) => false,
                     };
-                if known.deleted || locally_modified {
+                if known.deleted || known.missing || locally_modified {
                     return Ok(());
                 }
             } else if local.exists() || local.symlink_metadata().is_ok() {
@@ -3184,6 +3218,10 @@ async fn pull(
                 file.sync_all()?;
             }
             std::fs::rename(&tmp, &local)?;
+            let (dev, ino) = std::fs::metadata(&local)
+                .ok()
+                .map(|metadata| identity_fields(&metadata))
+                .unwrap_or((None, None));
             state.files.insert(
                 rel.clone(),
                 StateFile {
@@ -3191,8 +3229,11 @@ async fn pull(
                     size: data.len() as u64,
                     mtime_ns: mtime_ns(&local)?,
                     deleted: false,
+                    missing: false,
                     shared: file.shared,
                     server_path: Some(file.path.clone()),
+                    dev,
+                    ino,
                 },
             );
             report.pulled += 1;
@@ -3306,8 +3347,15 @@ async fn apply_incremental_changes(
                     }
                     match kind {
                         Some("dir") => {
-                            create_local_dir(config, state, report, &rel)?;
-                            state.created_dirs.insert(server_path.to_string());
+                            // A locally deleted directory may reappear in the
+                            // feed as our own earlier MKCOL. Do not recreate
+                            // it; push will delete it remotely.
+                            let locally_deleted = state.dirs.contains_key(&rel)
+                                && !config.local_dir.join(&rel).exists();
+                            if !locally_deleted {
+                                create_local_dir(config, state, report, &rel)?;
+                                state.created_dirs.insert(server_path.to_string());
+                            }
                         }
                         Some("file") => {
                             let Some(content_id) = change["content_id"].as_str() else {
@@ -3549,6 +3597,9 @@ fn apply_remote_delete(
     state
         .keys
         .retain(|path, _| path != rel && !path.starts_with(&prefix));
+    state
+        .dirs
+        .retain(|path, _| path != rel && !path.starts_with(&prefix));
     Ok(())
 }
 
@@ -3590,7 +3641,37 @@ fn apply_remote_move(
     safe_rel(to_rel)?;
     let from_local = config.local_dir.join(from_rel);
     let to_local = config.local_dir.join(to_rel);
+    let from_meta = std::fs::symlink_metadata(&from_local).ok();
+    let is_dir = from_meta
+        .as_ref()
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(kind == Some("dir"));
     if to_local.exists() || std::fs::symlink_metadata(&to_local).is_ok() {
+        // The local move may already be applied: this is the owner's next
+        // pass replaying its own change-feed MOVE. Only accept that when the
+        // source is gone and the destination is already tracked.
+        let destination_tracked = state.files.contains_key(to_rel)
+            || state
+                .files
+                .keys()
+                .any(|path| path.starts_with(&format!("{to_rel}/")));
+        if from_meta.is_none() && destination_tracked {
+            if is_dir {
+                move_state_subtree(state, from_rel, to_rel, from_server, to_server);
+            } else {
+                if let Some(mut known) = state.files.remove(from_rel) {
+                    known.server_path = Some(to_server.to_string());
+                    state.files.insert(to_rel.to_string(), known);
+                }
+                if let Some(file) = state.files.get_mut(to_rel) {
+                    file.server_path = Some(to_server.to_string());
+                }
+                if let Some(key) = state.keys.remove(from_rel) {
+                    state.keys.insert(to_rel.to_string(), key);
+                }
+            }
+            return Ok(true);
+        }
         return Ok(false);
     }
     if has_symlink_parent(&config.local_dir, &from_local)
@@ -3600,11 +3681,6 @@ fn apply_remote_move(
             "refusing to move /{from_rel} to /{to_rel}: a symlink is in the path"
         )));
     }
-    let from_meta = std::fs::symlink_metadata(&from_local).ok();
-    let is_dir = from_meta
-        .as_ref()
-        .map(|metadata| metadata.is_dir())
-        .unwrap_or(kind == Some("dir"));
     if let Some(parent) = to_local.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3660,6 +3736,24 @@ fn move_state_subtree(
         let suffix = &old_rel[prefix.len()..];
         state.keys.remove(&old_rel);
         state.keys.insert(format!("{to_rel}/{suffix}"), key);
+    }
+
+    let local_dirs: Vec<(String, String, i64)> = state
+        .dirs
+        .iter()
+        .filter(|(path, _)| *path == from_rel || path.starts_with(&prefix))
+        .map(|(path, mtime)| {
+            let new_rel = if path == from_rel {
+                to_rel.to_string()
+            } else {
+                format!("{to_rel}/{}", &path[prefix.len()..])
+            };
+            (path.clone(), new_rel, *mtime)
+        })
+        .collect();
+    for (old_path, new_path, mtime) in local_dirs {
+        state.dirs.remove(&old_path);
+        state.dirs.insert(new_path, mtime);
     }
 
     let from_prefix = from_server.trim_end_matches('/');
@@ -3990,6 +4084,30 @@ async fn push(
     locals.dedup();
     state.dirs = visited_dirs;
 
+    // Deleted tracked files keyed by inode, for local rename detection.
+    // Ambiguous identities (hard links) are dropped.
+    let mut rename_candidates: BTreeMap<(u64, u64), Option<String>> = BTreeMap::new();
+    for (rel, known) in &state.files {
+        if known.deleted || known.shared {
+            continue;
+        }
+        let local = config.local_dir.join(rel);
+        if local.exists() || local.symlink_metadata().is_ok() {
+            continue;
+        }
+        let (Some(dev), Some(ino)) = (known.dev, known.ino) else {
+            continue;
+        };
+        match rename_candidates.entry((dev, ino)) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some(rel.clone()));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.insert(None);
+            }
+        }
+    }
+
     // Create remote directories for every parent path first.
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     if !root.is_empty() {
@@ -4025,8 +4143,10 @@ async fn push(
         let local_path = config.local_dir.join(&rel);
         let metadata = std::fs::metadata(&local_path)?;
         let mtime = mtime_ns(&local_path)?;
-        if let Some(known) = state.files.get(&rel)
+        let known = state.files.get(&rel).cloned();
+        if let Some(known) = &known
             && !known.deleted
+            && !known.missing
             && known.size == metadata.len()
             && known.mtime_ns == mtime
         {
@@ -4054,11 +4174,55 @@ async fn push(
             mkcol(http, parent).await?;
             state.created_dirs.insert(parent.clone());
         }
+        // A local rename keeps the inode and the content unchanged. Move the
+        // remote node instead of deleting and re-uploading it.
+        if known
+            .as_ref()
+            .is_none_or(|known| known.deleted || known.missing)
+            && let Some((dev, ino)) = file_identity(&metadata)
+            && let Some(Some(old_rel)) = rename_candidates.remove(&(dev, ino))
+            && let Some(old) = state.files.get(&old_rel).cloned()
+            && old.size == metadata.len()
+            && old.mtime_ns == mtime
+            && policy.covers(&old_rel) == (policy.covers(&rel) || shared.is_some())
+        {
+            let old_server = old
+                .server_path
+                .clone()
+                .or_else(|| stored_paths.get(&old_rel).cloned())
+                .or_else(|| remote_rel(root, &old_rel, policy, e2ee).ok());
+            if let Some(old_server) = old_server {
+                let status = http.dav_move(&old_server, &remote_path).await?;
+                if status == 201 || status == 204 {
+                    state.files.remove(&old_rel);
+                    if let Some(key) = state.keys.remove(&old_rel) {
+                        state.keys.insert(rel.clone(), key);
+                    }
+                    let (dev, ino) = identity_fields(&metadata);
+                    state.files.insert(
+                        rel.clone(),
+                        StateFile {
+                            content_id: old.content_id,
+                            size: metadata.len(),
+                            mtime_ns: mtime,
+                            deleted: false,
+                            missing: false,
+                            shared: shared.is_some() || old.shared,
+                            server_path: Some(remote_path.clone()),
+                            dev,
+                            ino,
+                        },
+                    );
+                    report.moved += 1;
+                    continue;
+                }
+            }
+        }
         // Pre-check: when we have a known content_id, fetch the current
         // remote manifest and compare before uploading any chunks. If the
         // server moved on, take the 409-conflict path locally (keep the
         // server version, preserve local edits) without uploading.
-        if let Some(known) = state.files.get(&rel).cloned() {
+        if let Some(known) = known {
             let manifest_path = format!("/api/files/manifest?path={}", encode(&remote_path));
             let (status, manifest_value) = http.get_json(&manifest_path).await?;
             if status == 200
@@ -4230,6 +4394,7 @@ async fn push(
                     mls.record_file_key(http, &e2ee.master, &remote_path, key)
                         .await?;
                 }
+                let (dev, ino) = identity_fields(&metadata);
                 state.files.insert(
                     rel,
                     StateFile {
@@ -4237,8 +4402,11 @@ async fn push(
                         size: metadata.len(),
                         mtime_ns: mtime,
                         deleted: false,
+                        missing: false,
                         shared: shared.is_some(),
                         server_path: Some(remote_path.clone()),
+                        dev,
+                        ino,
                     },
                 );
                 report.pushed += 1;
@@ -4274,15 +4442,46 @@ async fn push(
     // Local deletions propagate: any known file that is gone locally (and
     // was not already removed by pull) is deleted remotely. Read-only
     // received shares are never deleted; a writable MLS share is.
-    let deleted: Vec<(String, bool)> = state
+    //
+    // Group by the shallowest missing ancestor directory so deleting a whole
+    // local folder is one DELETE instead of one per file. A group is only
+    // used when every tracked file below it is missing locally.
+    let missing: Vec<(String, bool)> = state
         .files
         .iter()
         .filter(|(rel, _)| !config.local_dir.join(rel.as_str()).exists())
         .map(|(rel, known)| (rel.clone(), known.shared))
         .collect();
-    for (rel, was_shared) in deleted {
+    let missing_set: HashSet<String> = missing.iter().map(|(rel, _)| rel.clone()).collect();
+    let mut groups: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    for (rel, was_shared) in missing {
+        let key = missing_ancestor(config, &rel).unwrap_or_else(|| rel.clone());
+        groups.entry(key).or_default().push((rel, was_shared));
+    }
+    let mut final_groups: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    for (key, files) in groups {
+        let is_dir = files[0].0 != key;
+        let prefix = format!("{key}/");
+        let all_missing = !is_dir
+            || state
+                .files
+                .keys()
+                .filter(|path| path.starts_with(&prefix))
+                .all(|path| missing_set.contains(path));
+        if all_missing {
+            final_groups.insert(key, files);
+        } else {
+            for (rel, was_shared) in files {
+                final_groups.insert(rel.clone(), vec![(rel, was_shared)]);
+            }
+        }
+    }
+
+    for (key, files) in final_groups {
+        let group_is_dir = files[0].0 != key;
+        let was_shared = files[0].1;
         let target = if was_shared {
-            match shared_mount_for(&shared_writes, &rel) {
+            match shared_mount_for(&shared_writes, &key) {
                 // Recipients cannot delete a share's mount root; for a
                 // single-file share the root *is* the file, so leave it to
                 // the next pull to restore the local copy.
@@ -4291,21 +4490,43 @@ async fn push(
                 None => continue,
             }
         } else {
-            format!("{root}/{rel}")
+            format!("{root}/{key}")
         };
         let path = format!("/dav{}", encode_path(&target));
         let status = http.delete(&path).await?;
         if status != 204 && status != 404 {
             return Err(SyncError::Server { status, path });
         }
-        if let (Some(mls), Some(e2ee)) = (mls.as_deref_mut(), e2ee) {
+        if !group_is_dir && let (Some(mls), Some(e2ee)) = (mls.as_deref_mut(), e2ee) {
             mls.remove_file_key(http, &e2ee.master, &target).await?;
         }
-        state.files.remove(&rel);
-        state.keys.remove(&rel);
-        report.removed_remote += 1;
+        for (rel, _) in &files {
+            state.files.remove(rel);
+            state.keys.remove(rel);
+        }
+        report.removed_remote += files.len() as u64;
     }
     Ok(())
+}
+
+/// The shallowest ancestor directory of `rel` that is missing locally.
+/// Returns `None` when the file itself is missing but its parent exists.
+fn missing_ancestor(config: &SyncConfig, rel: &str) -> Option<String> {
+    let mut parts = rel.split('/').peekable();
+    let mut prefix = String::new();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            break;
+        }
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(part);
+        if !config.local_dir.join(&prefix).exists() {
+            return Some(prefix);
+        }
+    }
+    None
 }
 
 async fn mkcol(http: &Http, dir: &str) -> Result<(), SyncError> {
@@ -4533,6 +4754,27 @@ fn mtime_ns(path: &Path) -> Result<i64, SyncError> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos() as i64)
         .unwrap_or(1))
+}
+
+/// Stable file identity for rename detection. `None` on platforms without
+/// inode numbers (renames then fall back to delete + upload).
+fn file_identity(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+fn identity_fields(metadata: &std::fs::Metadata) -> (Option<u64>, Option<u64>) {
+    file_identity(metadata)
+        .map(|(dev, ino)| (Some(dev), Some(ino)))
+        .unwrap_or((None, None))
 }
 
 #[cfg(test)]

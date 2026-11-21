@@ -160,30 +160,44 @@ pub async fn tree(
 ) -> Response {
     let after_id = query.after_id.unwrap_or(0).max(0);
     let limit = page_limit(query.limit);
-    let nodes = match state.db.all_live_nodes(user.user_id).await {
+    let mut nodes = match state
+        .db
+        .live_nodes_page(user.user_id, after_id, limit + 1)
+        .await
+    {
         Ok(nodes) => nodes,
         Err(_) => return internal_error(),
     };
+    let has_more = nodes.len() as i64 > limit;
+    nodes.truncate(limit as usize);
     let encrypted: std::collections::HashSet<i64> =
         match state.db.encrypted_node_ids(user.user_id).await {
             Ok(ids) => ids.into_iter().collect(),
             // Never report ciphertext as plaintext on a DB error.
             Err(_) => return internal_error(),
         };
+    let ids: Vec<i64> = nodes.iter().map(|node| node.id).collect();
+    let paths = match state
+        .db
+        .node_paths_with_encryption(user.user_id, &ids)
+        .await
+    {
+        Ok(paths) => paths,
+        Err(_) => return internal_error(),
+    };
 
-    let mut info: HashMap<i64, (Option<i64>, String)> = HashMap::new();
-    for node in &nodes {
-        info.insert(node.id, (node.parent_id, node.name.clone()));
-    }
-    let mut memo: HashMap<i64, String> = HashMap::new();
-
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(nodes.len());
     let mut last_id = after_id;
-    for node in nodes.iter().filter(|node| node.id > after_id) {
-        if entries.len() as i64 >= limit {
-            break;
-        }
-        let path = path_for(node.id, &info, &mut memo);
+    for node in &nodes {
+        let (path, inherited_encrypted) = paths
+            .get(&node.id)
+            .map(|(path, _, encrypted)| (path.clone(), *encrypted))
+            .unwrap_or_default();
+        let path = if path.is_empty() {
+            "/".to_string()
+        } else {
+            path
+        };
         entries.push(json!({
             "id": node.id,
             "path": path,
@@ -195,11 +209,10 @@ pub async fn tree(
             // Files: they have a wrapped key. Folders: the folder itself is
             // declared encrypted. Either way this is the policy clients use
             // to decide whether a path needs client-side encryption.
-            "encrypted": encrypted.contains(&node.id) || node.encrypted,
+            "encrypted": inherited_encrypted || encrypted.contains(&node.id) || node.encrypted,
         }));
         last_id = node.id;
     }
-    let has_more = nodes.iter().any(|node| node.id > last_id);
     json_response(
         StatusCode::OK,
         json!({ "entries": entries, "last_id": last_id, "has_more": has_more }),
@@ -211,32 +224,6 @@ fn etag_for(node: &kolimi_db::Node) -> String {
         Some(hex) => format!("\"{hex}\""),
         None => format!("\"d{}\"", node.modified_at),
     }
-}
-
-fn path_for(
-    id: i64,
-    info: &HashMap<i64, (Option<i64>, String)>,
-    memo: &mut HashMap<i64, String>,
-) -> String {
-    if let Some(path) = memo.get(&id) {
-        return path.clone();
-    }
-    let Some((parent, name)) = info.get(&id) else {
-        return String::new();
-    };
-    let base = match parent {
-        Some(parent) => path_for(*parent, info, memo),
-        None => String::new(),
-    };
-    let path = if name.is_empty() {
-        "/".to_string()
-    } else if base.is_empty() || base == "/" {
-        format!("/{name}")
-    } else {
-        format!("{base}/{name}")
-    };
-    memo.insert(id, path.clone());
-    path
 }
 
 /// `GET /api/sync/shared-tree` — files shared with the caller.

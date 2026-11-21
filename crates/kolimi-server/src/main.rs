@@ -1,6 +1,12 @@
 //! Kolimi server binary: `serve` (default) plus user management CLI.
 
-use std::{error::Error, io::BufRead, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    error::Error,
+    io::BufRead,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use clap::{Args, Parser, Subcommand};
 use kolimi_server::{AppState, build_app};
@@ -51,6 +57,12 @@ enum Command {
         /// Skip blobs already present; hard-link new ones when possible.
         #[arg(long)]
         incremental: bool,
+        /// Keep the newest N marked backups in the destination's parent.
+        #[arg(long, default_value_t = 0)]
+        retain: usize,
+        /// Optional second destination, e.g. a mounted offsite target.
+        #[arg(long, env = "KOLIMI_BACKUP_OFFSITE")]
+        offsite: Option<PathBuf>,
     },
     /// Verify the integrity of every stored file and version.
     Verify,
@@ -171,16 +183,37 @@ enum AuditCommand {
         #[arg(long)]
         before: Option<i64>,
     },
-    /// Verify the hash chain (exit 1 if broken).
+    /// Verify the hash chain and every sealed checkpoint.
     Verify,
-    /// Export entries through an id, then prune them and record an anchor.
+    /// Seal unsealed entries into audit checkpoints.
+    Seal {
+        /// Maximum entries per checkpoint batch.
+        #[arg(long, default_value_t = 4096)]
+        batch: i64,
+    },
+    /// List sealed checkpoint headers.
+    Checkpoints {
+        /// Maximum number of headers.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Export a sealed checkpoint and prune its entry bodies.
     Prune {
-        /// Last entry id to export and remove.
+        /// Checkpoint id to export and prune.
+        #[arg(long, conflicts_with = "before")]
+        checkpoint: Option<i64>,
+        /// Legacy alias: the entry id where a sealed checkpoint ends.
         #[arg(long)]
-        before: i64,
+        before: Option<i64>,
         /// JSONL export path (must not exist).
         #[arg(long)]
         to: PathBuf,
+    },
+    /// Verify a sealed checkpoint export bundle.
+    VerifyExport {
+        /// JSONL bundle written by `audit prune`.
+        #[arg(long)]
+        file: PathBuf,
     },
 }
 
@@ -266,7 +299,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(Command::Serve(args)) => serve(args, data).await,
         Some(Command::User { command }) => user_command(command, data).await,
         Some(Command::Group { command }) => group_command(command, data).await,
-        Some(Command::Backup { to, incremental }) => backup(data, to, incremental).await,
+        Some(Command::Backup {
+            to,
+            incremental,
+            retain,
+            offsite,
+        }) => backup(data, to, incremental, retain, offsite).await,
         Some(Command::Verify) => verify(data).await,
         Some(Command::MigrateManifests) => migrate_manifests(data).await,
         Some(Command::Audit { command }) => audit_command(command, data).await,
@@ -688,7 +726,13 @@ async fn group_command(command: GroupCommand, data: PathBuf) -> Result<(), Box<d
     Ok(())
 }
 
-async fn backup(data: PathBuf, to: PathBuf, incremental: bool) -> Result<(), Box<dyn Error>> {
+async fn backup(
+    data: PathBuf,
+    to: PathBuf,
+    incremental: bool,
+    retain: usize,
+    offsite: Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
     tokio::fs::create_dir_all(&to).await?;
     let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
     let db_target = to.join("kolimi.db");
@@ -715,7 +759,124 @@ async fn backup(data: PathBuf, to: PathBuf, incremental: bool) -> Result<(), Box
             to.display()
         );
     }
+    write_backup_marker(&to).await?;
+
+    if let Some(offsite) = offsite {
+        let stats = mirror_backup(&to, &offsite).await?;
+        println!(
+            "offsite mirror complete: {} linked + {} copied blobs, {} already present, {} bytes copied, written to {}",
+            stats.linked,
+            stats.copied,
+            stats.skipped,
+            stats.bytes_copied,
+            offsite.display()
+        );
+    }
+
+    if retain > 0 {
+        let pruned = prune_backups(&to, retain).await?;
+        if pruned > 0 {
+            println!("retention: pruned {pruned} old backup(s), keeping {retain}");
+        }
+    }
     Ok(())
+}
+
+const BACKUP_MARKER: &str = "kolimi-backup.json";
+
+/// Writes the marker that identifies a directory as a Kolimi backup. Only
+/// marked directories are eligible for retention pruning.
+async fn write_backup_marker(dir: &Path) -> Result<(), Box<dyn Error>> {
+    let marker = serde_json::json!({
+        "format": "kolimi-backup",
+        "version": 1,
+        "created_at": kolimi_db::now_millis(),
+    });
+    let temp = dir.join(format!(".{BACKUP_MARKER}.tmp-{}", kolimi_db::now_millis()));
+    let target = dir.join(BACKUP_MARKER);
+    tokio::fs::write(&temp, marker.to_string()).await?;
+    if tokio::fs::try_exists(&target).await? {
+        tokio::fs::remove_file(&target).await?;
+    }
+    tokio::fs::rename(&temp, &target).await?;
+    Ok(())
+}
+
+/// Mirrors a completed backup to a second directory. The destination is
+/// normally a mount point for NFS, SMB, rclone, or an object-store FUSE
+/// mount; blobs are hard-linked when the filesystem supports it.
+async fn mirror_backup(
+    source: &Path,
+    dest: &Path,
+) -> Result<kolimi_store::BlobCopyStats, Box<dyn Error>> {
+    tokio::fs::create_dir_all(dest).await?;
+
+    let store = kolimi_store::BlobStore::open(source.join("blobs")).await?;
+    let stats = store.copy_tree_incremental_to(&dest.join("blobs")).await?;
+
+    let db_source = source.join("kolimi.db");
+    let db_target = dest.join("kolimi.db");
+    let temp = dest.join(format!(".kolimi.db.tmp-{}", kolimi_db::now_millis()));
+    tokio::fs::copy(&db_source, &temp).await?;
+    {
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&temp)
+            .await?;
+        file.sync_all().await?;
+    }
+    if tokio::fs::try_exists(&db_target).await? {
+        tokio::fs::remove_file(&db_target).await?;
+    }
+    tokio::fs::rename(&temp, &db_target).await?;
+    tokio::fs::copy(source.join(BACKUP_MARKER), dest.join(BACKUP_MARKER)).await?;
+    Ok(stats)
+}
+
+/// Prunes the oldest marked sibling backups, keeping the newest `retain`.
+async fn prune_backups(target: &Path, retain: usize) -> Result<usize, Box<dyn Error>> {
+    if retain == 0 {
+        return Ok(0);
+    }
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let mut backups: Vec<(i64, String, PathBuf)> = Vec::new();
+    let mut entries = match tokio::fs::read_dir(parent).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        if !entry.file_type().await?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(marker) = tokio::fs::read_to_string(path.join(BACKUP_MARKER)).await else {
+            continue;
+        };
+        let Ok(marker) = serde_json::from_str::<serde_json::Value>(&marker) else {
+            continue;
+        };
+        if marker["format"] != "kolimi-backup" {
+            continue;
+        }
+        backups.push((
+            marker["created_at"].as_i64().unwrap_or(0),
+            entry.file_name().to_string_lossy().to_string(),
+            path,
+        ));
+    }
+    // Newest first; the name breaks ties when two backups share a millisecond.
+    backups.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    let mut pruned = 0;
+    for (_, _, path) in backups.into_iter().skip(retain) {
+        if path == target {
+            continue;
+        }
+        tokio::fs::remove_dir_all(&path).await?;
+        println!("pruned old backup {}", path.display());
+        pruned += 1;
+    }
+    Ok(pruned)
 }
 
 async fn verify(data: PathBuf) -> Result<(), Box<dyn Error>> {
@@ -788,14 +949,23 @@ async fn audit_command(command: AuditCommand, data: PathBuf) -> Result<(), Box<d
         AuditCommand::Verify => {
             let verify = db.audit_verify().await?;
             match verify.first_bad {
-                None => println!("audit chain ok ({} entries)", verify.entries),
+                None => println!(
+                    "audit chain ok ({} entries, {} checkpoints, {} pruned)",
+                    verify.entries, verify.checkpoints, verify.pruned_checkpoints
+                ),
                 Some(id) => {
                     eprintln!(
-                        "audit chain BROKEN at entry {id} ({} entries checked)",
-                        verify.entries
+                        "audit chain BROKEN at entry {id} ({} entries, {} checkpoints checked)",
+                        verify.entries, verify.checkpoints
                     );
                     std::process::exit(1);
                 }
+            }
+            if let Some(latest) = verify.latest_checkpoint {
+                println!(
+                    "latest checkpoint: {} through entry {} (root {})",
+                    latest.id, latest.last_entry_id, latest.merkle_root
+                );
             }
             if let Some(anchor) = db.audit_anchor().await? {
                 println!(
@@ -804,16 +974,84 @@ async fn audit_command(command: AuditCommand, data: PathBuf) -> Result<(), Box<d
                 );
             }
         }
-        AuditCommand::Prune { before, to } => {
-            let report = db.audit_export_and_prune(before, &to).await?;
+        AuditCommand::Seal { batch } => {
+            let mut sealed = 0u64;
+            while let Some(checkpoint) = db.audit_seal(batch).await? {
+                println!(
+                    "sealed checkpoint {}: entries {}..={} ({} entries, root {})",
+                    checkpoint.id,
+                    checkpoint.first_entry_id,
+                    checkpoint.last_entry_id,
+                    checkpoint.entry_count,
+                    hex::encode(&checkpoint.merkle_root)
+                );
+                sealed += 1;
+            }
+            if sealed == 0 {
+                println!("no unsealed audit entries");
+            }
+        }
+        AuditCommand::Checkpoints { limit } => {
+            for checkpoint in db.audit_checkpoints(limit).await? {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": checkpoint.id,
+                        "first_entry_id": checkpoint.first_entry_id,
+                        "last_entry_id": checkpoint.last_entry_id,
+                        "entry_count": checkpoint.entry_count,
+                        "prev_checkpoint_hash": hex::encode(&checkpoint.prev_checkpoint_hash),
+                        "merkle_root": hex::encode(&checkpoint.merkle_root),
+                        "checkpoint_hash": hex::encode(&checkpoint.checkpoint_hash),
+                        "created_at": checkpoint.created_at,
+                        "pruned": checkpoint.entries_pruned_at.is_some(),
+                        "entries_pruned_at": checkpoint.entries_pruned_at,
+                    })
+                );
+            }
+        }
+        AuditCommand::Prune {
+            checkpoint,
+            before,
+            to,
+        } => {
+            let checkpoint_id = match (checkpoint, before) {
+                (Some(id), None) => id,
+                (None, Some(entry_id)) => db
+                    .audit_checkpoint_ending_at(entry_id)
+                    .await?
+                    .map(|checkpoint| checkpoint.id)
+                    .ok_or_else(|| {
+                        format!(
+                            "no sealed checkpoint ends at entry {entry_id}; run `audit seal` first"
+                        )
+                    })?,
+                _ => {
+                    return Err("specify exactly one of --checkpoint or --before".into());
+                }
+            };
+            let report = db
+                .audit_export_and_prune_checkpoint(checkpoint_id, &to)
+                .await?;
             println!(
-                "exported {} audit entries through {} to {} (anchor {})",
+                "exported {} audit entries through {} to {} (checkpoint {}, anchor {})",
                 report.exported,
                 report.pruned_through,
                 to.display(),
+                report.checkpoint_id.unwrap_or(checkpoint_id),
                 report.anchor_hash
             );
         }
+        AuditCommand::VerifyExport { file } => match db.audit_verify_export(&file).await {
+            Ok(verify) => println!(
+                "export ok: checkpoint {} with {} entries",
+                verify.checkpoint_id, verify.entries
+            ),
+            Err(error) => {
+                eprintln!("export BROKEN: {error}");
+                std::process::exit(1);
+            }
+        },
     }
     Ok(())
 }

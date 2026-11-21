@@ -1,6 +1,6 @@
 # RFC 0002 — Sync Protocol
 
-- **Status:** Implemented (server + `kolimi-sync`/desktop; mobile uses the FFI core) · Last verified: 0.6.0
+- **Status:** Implemented (server + `kolimi-sync`/desktop; mobile uses the FFI core) · Last verified: 0.7.0
 - **Milestone:** M2 (server), M5 (clients)
 - **Related:** RFC 0001 (Storage Engine), `docs/threat-model.md`
 
@@ -47,7 +47,8 @@ WebDAV compatibility is defined by the litmus test suite plus real clients
 - The push side keeps a directory-mtime index. Unchanged directories are not
   re-enumerated, their tracked files are stat'ed, and a changed directory is
   rescanned, so adding/removing/renaming entries is still detected without a
-  full walk.
+  full walk. A local rename with unchanged content is sent as a WebDAV MOVE;
+  a deleted local directory is sent as one DELETE for the subtree.
 - `GET /api/sync/head` returns the current `change_seq`. A client records it
   before a tree snapshot, then replays changes from that point, so a write
   during the snapshot is not lost.

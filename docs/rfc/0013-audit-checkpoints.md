@@ -1,10 +1,11 @@
 # RFC 0013 — Sealed audit checkpoints
 
-- **Status:** draft
+- **Status:** implemented (0.7.0)
 - **Date:** 2026-11-21
 - **Depends on:** the append-only audit log (`audit_log`), anchored retention
   (`audit_anchor`, migration 0034)
-- **Implementation:** not started
+- **Implementation:** migration `0037_audit_checkpoints.sql`; sealing,
+  verification, prune bundles, CLI, and janitor sealing
 
 ## Summary
 

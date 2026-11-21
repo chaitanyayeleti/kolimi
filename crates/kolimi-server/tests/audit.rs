@@ -220,16 +220,33 @@ async fn passkey_only_mode() {
 #[tokio::test]
 async fn cli_audit_prune_exports_and_verifies_from_the_anchor() {
     let (dir, state, _app) = setup().await;
-    for name in ["a", "b", "c"] {
+    for name in ["a", "b", "c", "d"] {
         state
             .db
             .audit_append(None, Some("cli"), "user.add", name, &json!({}))
             .await
             .unwrap();
     }
+    // Seal the four entries, then append a tail that must survive the prune.
+    let output = Command::new(env!("CARGO_BIN_EXE_kolimi-server"))
+        .args(["audit", "seal"])
+        .env("KOLIMI_DATA", dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    state
+        .db
+        .audit_append(None, Some("cli"), "user.add", "tail", &json!({}))
+        .await
+        .unwrap();
+
     let export = dir.path().join("audit.jsonl");
     let output = Command::new(env!("CARGO_BIN_EXE_kolimi-server"))
-        .args(["audit", "prune", "--before", "2", "--to"])
+        .args(["audit", "prune", "--before", "4", "--to"])
         .arg(&export)
         .env("KOLIMI_DATA", dir.path())
         .output()
@@ -239,9 +256,13 @@ async fn cli_audit_prune_exports_and_verifies_from_the_anchor() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("exported 2 audit entries"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("exported 4 audit entries through 4"),
+        "{stdout}"
+    );
     let lines = std::fs::read_to_string(&export).unwrap();
-    assert_eq!(lines.lines().count(), 2);
+    assert_eq!(lines.lines().count(), 5, "header plus four entries");
 
     let output = Command::new(env!("CARGO_BIN_EXE_kolimi-server"))
         .args(["audit", "verify"])
@@ -250,6 +271,22 @@ async fn cli_audit_prune_exports_and_verifies_from_the_anchor() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("audit chain ok (1 entries)"), "{stdout}");
-    assert!(stdout.contains("anchor: entries through 2"), "{stdout}");
+    assert!(
+        stdout.contains("audit chain ok (1 entries, 1 checkpoints, 1 pruned)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("anchor: entries through 4"), "{stdout}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kolimi-server"))
+        .args(["audit", "verify-export", "--file"])
+        .arg(&export)
+        .env("KOLIMI_DATA", dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("export ok"));
 }

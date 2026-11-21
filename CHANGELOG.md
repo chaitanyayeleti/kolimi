@@ -4,9 +4,23 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.0] - 2026-11-21
 
 ### Added
+- Sealed audit checkpoints (RFC 0013): `audit seal`, `audit checkpoints`,
+  `audit prune --checkpoint`, and `audit verify-export`. Checkpoints carry an
+  RFC 6962-style Merkle root and link to the previous header; headers are
+  retained forever while entry bodies can be exported and pruned. `audit
+  verify` and `GET /api/audit/verify` verify the entry chain, every header,
+  links, and available roots. The janitor seals automatically at 1,024
+  pending entries.
+- Backup retention and offsite mirroring: `--retain N` prunes the oldest
+  marked sibling backups, and `--offsite DIR` mirrors the completed backup to
+  a mounted second target. Each backup writes `kolimi-backup.json`.
+- A 100k-file/multi-client soak gate now covers a 100k tree walk, a 100k
+  change feed, and 16 clients × 10 rounds of mixed reads/writes at 100k
+  files. `/api/sync/tree` now pages directly in SQLite instead of loading the
+  whole namespace per page (100k walk: ~37s → ~2.6s in the release gate).
 - `kolimi-sync` pushes incrementally: it caches directory mtimes in
   `.kolimi/state.json`, skips `read_dir` for unchanged directories, and
   stats only their tracked files. Content edits are still caught; new,
@@ -14,6 +28,8 @@ follow [Semantic Versioning](https://semver.org/).
 - The sync client now applies directory creation, moves, and deletes from
   the change feed instead of falling back to a full tree reconciliation.
   Only an unknown op/kind or an old server triggers the full snapshot.
+- A local rename with unchanged content is pushed as a server-side WebDAV
+  MOVE; deleting a local directory is pushed as one DELETE for the subtree.
 - `kolimi-server migrate-manifests` moves legacy flat manifests into the
   fanout layout; the janitor also migrates them in bounded per-account
   batches and reports `kolimi_janitor_events_total{kind="manifests_migrated"}`.
@@ -59,7 +75,8 @@ follow [Semantic Versioning](https://semver.org/).
   refreshed at most once per minute instead of on every request. Credential
   rows are still read on every request, so revocation stays immediate.
 - `docs/operations.md` now documents the single-node scaling profile,
-  current limits, and anchored audit retention.
+  current limits, sealed audit checkpoints, and backup retention/offsite.
+- Server and desktop are released as the paired **0.7.0** versions.
 
 ## [0.6.0] - 2026-11-20
 

@@ -1,6 +1,6 @@
 # Kolimi Threat Model
 
-- **Status:** Living document. Last reviewed for **0.6.0**.
+- **Status:** Living document. Last reviewed for **0.7.0**.
 - **Related:** RFC 0001 (Storage), RFC 0002 (Sync), ROADMAP safety gates.
 
 ## Assets

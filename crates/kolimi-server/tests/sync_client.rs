@@ -26,6 +26,8 @@ struct Server {
     chunk_puts: Arc<AtomicUsize>,
     /// Number of full `/api/sync/tree` walks.
     tree_gets: Arc<AtomicUsize>,
+    /// Number of WebDAV DELETE requests.
+    dav_deletes: Arc<AtomicUsize>,
 }
 
 /// Counts chunk uploads so a test can prove a delta push skips chunks the
@@ -53,6 +55,18 @@ async fn count_tree_gets(
     next.run(request).await
 }
 
+/// Counts WebDAV DELETE requests so directory batching can be asserted.
+async fn count_dav_deletes(
+    State(counter): State<Arc<AtomicUsize>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() == Method::DELETE && request.uri().path().starts_with("/dav/") {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+    next.run(request).await
+}
+
 async fn start_server() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
@@ -63,6 +77,7 @@ async fn start_server() -> Server {
         .unwrap();
     let chunk_puts = Arc::new(AtomicUsize::new(0));
     let tree_gets = Arc::new(AtomicUsize::new(0));
+    let dav_deletes = Arc::new(AtomicUsize::new(0));
     let app = build_app(state)
         .layer(axum::middleware::from_fn_with_state(
             chunk_puts.clone(),
@@ -71,6 +86,10 @@ async fn start_server() -> Server {
         .layer(axum::middleware::from_fn_with_state(
             tree_gets.clone(),
             count_tree_gets,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            dav_deletes.clone(),
+            count_dav_deletes,
         ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -83,6 +102,7 @@ async fn start_server() -> Server {
         handle,
         chunk_puts,
         tree_gets,
+        dav_deletes,
     }
 }
 
@@ -327,6 +347,68 @@ async fn incremental_pull_skips_full_tree_for_file_edits() {
         "a delete must use the change feed"
     );
     assert!(!mirror.join("renamed").exists());
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn local_rename_uses_server_move() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let seed = root.path().join("seed");
+    let mirror = root.path().join("mirror");
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::create_dir_all(&mirror).unwrap();
+    std::fs::write(seed.join("old.txt"), b"same content").unwrap();
+    sync_once(&config(&server.url, &seed)).await.unwrap();
+    sync_once(&config(&server.url, &mirror)).await.unwrap();
+
+    std::fs::rename(seed.join("old.txt"), seed.join("new.txt")).unwrap();
+    let report = sync_once(&config(&server.url, &seed)).await.unwrap();
+    assert_eq!(report.moved, 1, "{report:?}");
+    assert_eq!(report.pushed, 0, "{report:?}");
+    assert_eq!(report.removed_remote, 0, "{report:?}");
+
+    server.tree_gets.store(0, Ordering::SeqCst);
+    let report = sync_once(&config(&server.url, &mirror)).await.unwrap();
+    assert!(report.is_quiescent(), "{report:?}");
+    assert_eq!(
+        server.tree_gets.load(Ordering::SeqCst),
+        0,
+        "the mirror applies the move from the change feed"
+    );
+    assert!(!mirror.join("old.txt").exists());
+    assert_eq!(
+        std::fs::read(mirror.join("new.txt")).unwrap(),
+        b"same content"
+    );
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn local_directory_delete_uses_one_dav_delete() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let seed = root.path().join("seed");
+    let mirror = root.path().join("mirror");
+    std::fs::create_dir_all(seed.join("sub")).unwrap();
+    std::fs::create_dir_all(&mirror).unwrap();
+    for index in 0..4 {
+        std::fs::write(seed.join(format!("sub/file-{index}.txt")), b"x").unwrap();
+    }
+    sync_once(&config(&server.url, &seed)).await.unwrap();
+    sync_once(&config(&server.url, &mirror)).await.unwrap();
+
+    std::fs::remove_dir_all(seed.join("sub")).unwrap();
+    server.dav_deletes.store(0, Ordering::SeqCst);
+    let report = sync_once(&config(&server.url, &seed)).await.unwrap();
+    assert_eq!(report.removed_remote, 4, "{report:?}");
+    assert_eq!(
+        server.dav_deletes.load(Ordering::SeqCst),
+        1,
+        "one DELETE for the whole directory"
+    );
 
     server.handle.abort();
 }

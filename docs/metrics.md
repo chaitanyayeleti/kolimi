@@ -82,7 +82,7 @@ with the token:
 ```sh
 docker run ... \
   -e KOLIMI_METRICS_TOKEN=paste-the-token-here \
-  ghcr.io/chaitanyayeleti/kolimi:0.6.0
+  ghcr.io/chaitanyayeleti/kolimi:0.7.0
 ```
 
 ### Kubernetes / Helm
@@ -225,7 +225,7 @@ Janitor event kinds include `retention_users`, `trash_purged`,
 `manifests_migrated`, `scrub_users`, `link_sessions_expired`,
 `enrollments_expired`, `mls_key_packages_pruned`, `mls_devices_pruned`,
 `mls_messages_pruned`, `mls_keyrings_pruned`, `scrub_checked`,
-`scrub_corrupt`, and `reconciled`.
+`scrub_corrupt`, `reconciled`, and `audit_checkpoints_sealed`.
 
 The janitor and indexer now schedule bounded per-account batches: accounts
 with expired trash/versions or an uncollected delete go first, then the
