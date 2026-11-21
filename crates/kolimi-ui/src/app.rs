@@ -419,7 +419,7 @@ fn PasswordChange(view: RwSignal<View>) -> impl IntoView {
         ev.prevent_default();
         let new = new_password.get_untracked();
         if new.chars().count() < 8 {
-            error.set("Use at least 8 characters for the new password".to_string());
+            error.set("Use at least 10 characters for the new password".to_string());
             return;
         }
         if new != confirm_password.get_untracked() {
@@ -429,7 +429,10 @@ fn PasswordChange(view: RwSignal<View>) -> impl IntoView {
         let password_value = current_password.get_untracked();
         let code_value = code.get_untracked();
         if password_value.is_empty() && code_value.is_empty() {
-            error.set("Confirm your current password or a two-factor code".to_string());
+            error.set(
+                "Confirm your current password and, if two-factor is enabled, a current code"
+                    .to_string(),
+            );
             return;
         }
         busy.set(true);
@@ -572,7 +575,7 @@ fn InvitePage() -> impl IntoView {
             return;
         };
         if password.get_untracked().chars().count() < 8 {
-            error.set("Use at least 8 characters for the password".to_string());
+            error.set("Use at least 10 characters for the password".to_string());
             return;
         }
         if password.get_untracked() != confirm.get_untracked() {

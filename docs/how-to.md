@@ -36,7 +36,8 @@ See [operations.md](operations.md#users) for the admin workflow.
 
 ### Create a user with a temporary password
 
-1. Open **Admin → Users** and create the account.
+1. Open **Admin → Users** and create the account. Confirm your own admin
+   password (and a current two-factor code, if enabled) when prompted.
 2. Enable **Require password change at next sign-in** if you are handing
    over a temporary password.
 3. Give the user the password out of band. They change it at first sign-in
@@ -51,7 +52,8 @@ accounts are.
    open **Settings → Passkeys**.
 2. For TOTP, scan the QR code, enter the six-digit code, and store the ten
    one-time recovery codes.
-3. For a passkey, name it and confirm your account password.
+3. For a passkey, name it and confirm your account password (and a current
+   TOTP/recovery code if two-factor is enabled).
 
 Removing the last passkey from a passwordless account is refused.
 
@@ -71,11 +73,14 @@ The CLI refuses to remove the password if the account has no passkey.
 3. Choose an access preset: **Sync client**, **Files read-only**,
    **Files read/write**, **Calendars & contacts**, or **Full access**.
    Prefer the narrowest preset; full access can manage the account.
-4. Choose an expiry (never, 30 days, 90 days, or 1 year) and create it.
+4. Choose an expiry (90 days by default, or never/30 days/1 year) and
+   create it. Creating a **Full access** token asks for a fresh
+   re-authentication proof; the narrower presets do not.
 5. Copy the token immediately; it is shown once.
 6. Paste it into the WebDAV, CalDAV, desktop, or `kolimi-sync` client.
 7. Revoke it here when the device is lost or retired.
 
+New tokens default to the **Sync client** scopes and a 90-day lifetime.
 Existing tokens created before scopes were introduced keep full access. If
 you want least privilege, revoke and reissue them. App passwords work with
 HTTP Basic even when TOTP is enabled or the account is passkey-only. See
@@ -84,7 +89,9 @@ HTTP Basic even when TOTP is enabled or the account is passkey-only. See
 ### Change your password or revoke sessions
 
 Open **Settings → Account**. A password change asks for your current
-password or a two-factor code and signs out your other sessions. The same
+password and, if two-factor is enabled, a current TOTP/recovery code, and
+signs out your other sessions. Passwords must be at least 10 characters and
+are checked against a small common-password blocklist. The same
 panel labels sessions and revokes one or all other devices.
 
 ### Recover a locked-out account

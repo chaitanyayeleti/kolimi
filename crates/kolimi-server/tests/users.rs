@@ -166,7 +166,7 @@ async fn setup() -> (tempfile::TempDir, AppState, Router) {
 
 #[tokio::test]
 async fn listing_and_creation_are_admin_only() {
-    let (_dir, _state, app) = setup().await;
+    let (_dir, state, app) = setup().await;
 
     let (status, body) =
         request(&app, "GET", "/api/users", Some(&basic("alice", PASS)), None).await;
@@ -187,18 +187,31 @@ async fn listing_and_creation_are_admin_only() {
         "POST",
         "/api/users",
         Some(&basic("bob", PASS)),
-        Some(json!({ "username": "mallory", "password": "pw123456" })),
+        Some(json!({ "username": "mallory", "password": "pw12345678" })),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Admin creates a user.
-    let (status, body) = request(
+    // Even an administrator cannot create an account from a session alone.
+    let (status, _) = request(
         &app,
         "POST",
         "/api/users",
         Some(&basic("alice", PASS)),
-        Some(json!({ "username": "carol", "password": "pw123456" })),
+        Some(json!({ "username": "dave", "password": "pw12345678" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(state.db.find_user("dave").await.unwrap().is_none());
+
+    // Admin creates a user with a fresh re-auth token.
+    let (status, body) = admin_mutation(
+        &app,
+        "POST",
+        "/api/users",
+        "alice",
+        PASS,
+        Some(json!({ "username": "carol", "password": "pw12345678" })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -510,12 +523,13 @@ async fn delete_removes_the_user_and_cascades() {
     assert!(!names.contains(&"bob"), "{body}");
 
     // An admin can be deleted when another enabled admin remains.
-    request(
+    admin_mutation(
         &app,
         "POST",
         "/api/users",
-        Some(&basic("alice", PASS)),
-        Some(json!({ "username": "carol", "password": "pw123456" })),
+        "alice",
+        PASS,
+        Some(json!({ "username": "carol", "password": "pw12345678" })),
     )
     .await;
     let carol = state.db.find_user("carol").await.unwrap().unwrap();
@@ -535,7 +549,7 @@ async fn delete_removes_the_user_and_cascades() {
         "DELETE",
         "/api/users/alice",
         "carol",
-        "pw123456",
+        "pw12345678",
         None,
     )
     .await;
@@ -587,14 +601,15 @@ async fn admin_search_create_and_detail() {
         .collect();
     assert_eq!(names, ["bob"], "{body}");
 
-    let (status, body) = request(
+    let (status, body) = admin_mutation(
         &app,
         "POST",
         "/api/users",
-        Some(&basic("alice", PASS)),
+        "alice",
+        PASS,
         Some(json!({
             "username": "carol",
-            "password": "pw123456",
+            "password": "pw12345678",
             "admin": true,
             "quota_bytes": 4096,
         })),

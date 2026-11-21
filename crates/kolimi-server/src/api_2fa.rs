@@ -23,8 +23,10 @@ pub struct ReauthRequest {
 
 /// `POST /api/reauth` — prove presence for a sensitive account change.
 ///
-/// Accepts the account password or, when TOTP is enrolled, a current code
-/// (or a recovery code). Returns a single-use token valid for five minutes.
+/// Without TOTP the account password is sufficient. With TOTP enrolled it
+/// requires both the password and a current code (or a one-time recovery
+/// code), so a stolen session plus a reused password cannot bypass the
+/// second factor. Returns a single-use token valid for five minutes.
 pub async fn reauth(
     State(state): State<AppState>,
     crate::hardening::ClientIp(ip): crate::hardening::ClientIp,
@@ -42,37 +44,53 @@ pub async fn reauth(
     let Some(account) = state.db.get_user(user.user_id).await.ok().flatten() else {
         return api::unauthorized("invalid credentials");
     };
-    let password_ok = req
-        .password
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .is_some_and(|candidate| {
-            password::verify_password(&account.password_hash, candidate).unwrap_or(false)
-        });
-    let mut verified = password_ok;
-    if !verified && let Some(code) = req.code.as_deref().filter(|value| !value.is_empty()) {
-        let totp = state.db.totp_secret(user.user_id).await.ok().flatten();
-        if let Some((secret_b32, last_step)) = totp
-            && let Ok(secret) = totp::TotpSecret::from_base32(&secret_b32)
-        {
-            let now = (kolimi_db::now_millis() / 1000) as u64;
-            if let Some(step) = totp::verify(&secret, code, now, last_step.map(|step| step as u64))
-            {
-                verified = state
-                    .db
-                    .consume_totp_step(user.user_id, step)
-                    .await
-                    .unwrap_or(false);
+    // A DB error must not silently downgrade an account from two factors to
+    // one; treat an unreadable TOTP row as a failed re-authentication.
+    let totp = match state.db.totp_secret(user.user_id).await {
+        Ok(totp) => totp,
+        Err(_) => return api::internal_error(),
+    };
+    let password = req.password.as_deref().filter(|value| !value.is_empty());
+    let code = req.code.as_deref().filter(|value| !value.is_empty());
+    let password_ok = password.is_some_and(|candidate| {
+        password::verify_password(&account.password_hash, candidate).unwrap_or(false)
+    });
+    let (verified, method) = match totp {
+        Some((secret_b32, last_step)) => {
+            // With TOTP enrolled, re-authentication requires both the
+            // password and a current code (or a one-time recovery code).
+            // Password-only re-auth would let a stolen session plus a
+            // reused password bypass the second factor.
+            let mut verified = false;
+            let mut method = "password+totp";
+            if password_ok && let Some(code) = code {
+                if let Ok(secret) = totp::TotpSecret::from_base32(&secret_b32) {
+                    let now = (kolimi_db::now_millis() / 1000) as u64;
+                    if let Some(step) =
+                        totp::verify(&secret, code, now, last_step.map(|step| step as u64))
+                    {
+                        verified = state
+                            .db
+                            .consume_totp_step(user.user_id, step)
+                            .await
+                            .unwrap_or(false);
+                    }
+                }
+                if !verified {
+                    verified = state
+                        .db
+                        .consume_recovery_code(user.user_id, &totp::hash_recovery_code(code))
+                        .await
+                        .unwrap_or(false);
+                    if verified {
+                        method = "password+recovery";
+                    }
+                }
             }
+            (verified, method)
         }
-        if !verified {
-            verified = state
-                .db
-                .consume_recovery_code(user.user_id, &totp::hash_recovery_code(code))
-                .await
-                .unwrap_or(false);
-        }
-    }
+        None => (password_ok, "password"),
+    };
     if !verified {
         state.lockout.record_failure(&lockout_key);
         audit(
@@ -96,7 +114,7 @@ pub async fn reauth(
         Some(&user.username),
         "auth.reauth",
         &user.username,
-        json!({}),
+        json!({ "method": method }),
     )
     .await;
     Json(json!({
@@ -218,13 +236,29 @@ pub async fn enable(
         return api::internal_error();
     }
     let _ = state.db.set_must_setup_mfa(user.user_id, false).await;
+    // A session created before enrollment must not survive it: the owner
+    // may have enabled TOTP precisely because the old session is suspect.
+    // Keep only the session that just proved the new factor; Basic/API
+    // callers have no session and therefore drop every browser session.
+    let sessions_revoked = match user.session_hash {
+        Some(hash) => state
+            .db
+            .delete_user_sessions_except(user.user_id, hash.as_slice())
+            .await
+            .unwrap_or(0),
+        None => state
+            .db
+            .delete_user_sessions(user.user_id)
+            .await
+            .unwrap_or(0),
+    };
     audit(
         &state,
         Some(user.user_id),
         Some(&user.username),
         "totp.enable",
         &user.username,
-        json!({}),
+        json!({ "sessions_revoked": sessions_revoked }),
     )
     .await;
     Json(json!({ "recovery_codes": codes })).into_response()

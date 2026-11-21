@@ -326,11 +326,12 @@ pub async fn change_passphrase(
     master: &MasterKey,
     new_passphrase: &str,
     account_password: &str,
+    account_code: &str,
 ) -> Result<(), String> {
     if new_passphrase.is_empty() {
         return Err("Enter a new passphrase".to_string());
     }
-    let reauth_token = api::reauth(account_password, "").await?;
+    let reauth_token = api::reauth(account_password, account_code).await?;
     let mut keyring = load_keyring().await?;
     keyring
         .verify(master)

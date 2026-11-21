@@ -4,6 +4,30 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+- Re-authentication now requires both the account password and a current
+  TOTP/recovery code when TOTP is enrolled. Password-only re-auth could let a
+  stolen session plus a reused password bypass the second factor.
+- Creating a user (including an administrator), invite, group, or group
+  membership now requires a fresh `X-Reauth-Token`, matching account updates
+  and deletion.
+- Enabling TOTP or registering a passkey revokes every other session, so a
+  session that predates the new factor cannot survive it.
+- App passwords default to the least-privilege `files:read,files:write,sync`
+  scopes and a 90-day lifetime. A full `*` token requires explicit scopes and
+  a fresh re-authentication token.
+- Public-link metadata, listings, uploads, and downloads are served with
+  `Cache-Control: no-store`; the app sends `X-Frame-Options: DENY`,
+  COOP/CORP, and `form-action 'none'` in its CSP.
+
+### Changed
+- Passwords must be at least 10 characters and are checked against a small
+  common-password blocklist.
+- The web UI and API docs prompt for both factors during re-auth; the CLI
+  reads `KOLIMI_REAUTH_CODE` when rotating an E2EE keyring on a TOTP account.
+
 ## [0.7.1] - 2026-11-21
 
 ### Added

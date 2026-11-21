@@ -127,8 +127,8 @@ pub async fn delete_with(url: &str, extra: Option<(&str, &str)>) -> Result<ApiRe
     to_api(response).await
 }
 
-/// Exchanges the account password or a two-factor/recovery code for a
-/// short-lived re-authentication token.
+/// Exchanges the account password (and, when TOTP is enabled, a current
+/// two-factor/recovery code) for a short-lived re-authentication token.
 pub async fn reauth(password: &str, code: &str) -> Result<String, String> {
     let mut body = serde_json::json!({});
     if !password.is_empty() {

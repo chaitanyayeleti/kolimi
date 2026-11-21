@@ -222,7 +222,9 @@ pub async fn security_headers(State(state): State<AppState>, req: Request, next:
     // API and session responses must never be cached: a cached `/api/me`
     // after logout makes a signed-out browser look signed in, and a cached
     // browse listing hides changes.
-    let is_api = req.uri().path().starts_with("/api/");
+    let path = req.uri().path().to_string();
+    let is_api = path.starts_with("/api/");
+    let is_public = path.starts_with("/public/");
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
     if is_api {
@@ -234,6 +236,21 @@ pub async fn security_headers(State(state): State<AppState>, req: Request, next:
     headers
         .entry(REFERRER_POLICY)
         .or_insert(HeaderValue::from_static("no-referrer"));
+    // CSP already says frame-ancestors 'none'; keep the legacy header
+    // consistent instead of leaving it at Traefik's SAMEORIGIN.
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers
+        .entry(HeaderName::from_static("cross-origin-opener-policy"))
+        .or_insert(HeaderValue::from_static("same-origin"));
+    headers
+        .entry(HeaderName::from_static("cross-origin-resource-policy"))
+        .or_insert(HeaderValue::from_static(if is_public {
+            // Public links are capability URLs and may be embedded by the
+            // owner elsewhere; the token is the gate.
+            "cross-origin"
+        } else {
+            "same-origin"
+        }));
     if state.secure_cookies {
         headers.entry(HSTS).or_insert(HeaderValue::from_static(
             "max-age=31536000; includeSubDomains",

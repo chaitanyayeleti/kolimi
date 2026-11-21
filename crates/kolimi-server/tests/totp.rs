@@ -100,6 +100,43 @@ fn csrf_token_from(cookies: &[String]) -> String {
         .to_string()
 }
 
+async fn send_cookie(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    cookie: &str,
+    csrf: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::COOKIE, cookie);
+    if matches!(method, "POST" | "PATCH" | "PUT" | "DELETE") {
+        builder = builder.header("x-csrf-token", csrf);
+    }
+    let body = match body {
+        Some(value) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(value.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 fn current_code(secret: &TotpSecret) -> String {
     secret.code_at((kolimi_db::now_millis() / 1000) as u64)
 }
@@ -320,13 +357,25 @@ async fn totp_cannot_be_re_enrolled_from_a_session() {
     let secret = TotpSecret::from_base32(begin["secret"].as_str().unwrap()).unwrap();
     let first_secret = begin["secret"].as_str().unwrap().to_string();
     let code = current_code(&secret);
-    let (status, _) = post(
-        &app,
-        "/api/totp/enable",
-        &json!({ "secret": begin["secret"], "code": code }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    // Enable through the cookie session so that it is the session kept by
+    // the enrollment session-revocation rule.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/totp/enable")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie_header)
+                .header("x-csrf-token", &csrf)
+                .body(Body::from(
+                    json!({ "secret": begin["secret"], "code": code }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 
     // A session without a current factor must not replace the secret (and
     // thereby lock the real user out of their own second factor).
@@ -437,4 +486,120 @@ async fn totp_session_token_authenticates_bearer_requests() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn reauth_requires_both_factors_when_totp_is_enabled() {
+    let (_dir, _state, app) = setup().await;
+
+    // Create the session before enrollment so it survives enable and can be
+    // used for the re-auth attempts.
+    let (status, cookies) = login_session(&app, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie = cookies.join("; ");
+    let csrf = csrf_token_from(&cookies);
+
+    let (_, begin) = post(&app, "/api/totp/begin", &json!({})).await;
+    let secret = TotpSecret::from_base32(begin["secret"].as_str().unwrap()).unwrap();
+    let enable_code = current_code(&secret);
+    let (status, enabled) = send_cookie(
+        &app,
+        "POST",
+        "/api/totp/enable",
+        &cookie,
+        &csrf,
+        Some(json!({ "secret": begin["secret"], "code": enable_code })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    let recovery = enabled["recovery_codes"].as_array().unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Password alone is not enough.
+    let (status, body) = send_cookie(
+        &app,
+        "POST",
+        "/api/reauth",
+        &cookie,
+        &csrf,
+        Some(json!({ "password": PASS })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    // A code alone is not enough either. Next step is inside the accepted
+    // clock-skew window and was not consumed by enable.
+    let code = secret.code_at((kolimi_db::now_millis() / 1000) as u64 + 30);
+    let (status, body) = send_cookie(
+        &app,
+        "POST",
+        "/api/reauth",
+        &cookie,
+        &csrf,
+        Some(json!({ "code": code })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    // Password plus that fresh TOTP code succeeds.
+    let (status, body) = send_cookie(
+        &app,
+        "POST",
+        "/api/reauth",
+        &cookie,
+        &csrf,
+        Some(json!({ "password": PASS, "code": code })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["token"].as_str().is_some(), "{body}");
+
+    // Password plus a recovery code succeeds and consumes the code.
+    let (status, body) = send_cookie(
+        &app,
+        "POST",
+        "/api/reauth",
+        &cookie,
+        &csrf,
+        Some(json!({ "password": PASS, "code": recovery })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn totp_enrollment_revokes_other_sessions() {
+    let (_dir, _state, app) = setup().await;
+
+    let (status, first) = login_session(&app, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, second) = login_session(&app, None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let first_cookie = first.join("; ");
+    let first_csrf = csrf_token_from(&first);
+    let second_cookie = second.join("; ");
+    let second_csrf = csrf_token_from(&second);
+
+    let (_, begin) = post(&app, "/api/totp/begin", &json!({})).await;
+    let secret = TotpSecret::from_base32(begin["secret"].as_str().unwrap()).unwrap();
+    let code = current_code(&secret);
+    let (status, body) = send_cookie(
+        &app,
+        "POST",
+        "/api/totp/enable",
+        &first_cookie,
+        &first_csrf,
+        Some(json!({ "secret": begin["secret"], "code": code })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The session that enabled TOTP survives; every other session is gone.
+    let (status, _) = send_cookie(&app, "GET", "/api/me", &first_cookie, &first_csrf, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send_cookie(&app, "GET", "/api/me", &second_cookie, &second_csrf, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

@@ -52,7 +52,9 @@ kolimi-server user quota alice BYTES|unlimited|default
 kolimi-server user usage alice [--reconcile]
 ```
 
-The first account created is an administrator. `user delete` removes the
+Passwords must be at least 10 characters and are checked against a small
+common-password blocklist; there is no self-service reset. The first account
+created is an administrator. `user delete` removes the
 account, its tree, shares, DAV data, E2EE keys and blobs; audit rows are
 preserved with a null actor. The last enabled administrator cannot be
 disabled, demoted or deleted.
@@ -208,6 +210,9 @@ Required for a normal sync:
 Use an app password for TOTP or passkey-only accounts; the CLI cannot answer
 an interactive TOTP prompt. Pass it through `KOLIMI_PASSWORD` or
 `--password`. See [clients.md](clients.md#kolimi-sync-cli) for examples.
+When `kolimi-sync` needs to rotate an existing keyring, it re-authenticates
+with the account password; if the account has TOTP, set
+`KOLIMI_REAUTH_CODE` to a current TOTP or recovery code for that command.
 
 E2EE:
 
@@ -304,10 +309,12 @@ Notes:
   Basic is deliberately rejected); most other API endpoints and WebDAV
   accept HTTP Basic for scripts and DAV clients.
 - `POST /api/me/password` requires `X-Reauth-Token` from
-  `POST /api/reauth`. Re-authentication accepts `{"password"}` or a TOTP /
-  recovery `{"code"}` and returns a single-use token valid for five minutes;
-  passkey-only sessions use `/api/reauth/passkey/begin|finish` instead. It
-  keeps the current session and revokes the others.
+  `POST /api/reauth`. Without TOTP, `{"password"}` is sufficient. With TOTP
+  enrolled, send **both** `{"password"}` and `{"code"}` (a current TOTP code
+  or a one-time recovery code); a password alone is refused. The token is
+  single-use and valid for five minutes. Passkey-only sessions use
+  `/api/reauth/passkey/begin|finish` instead. It keeps the current session
+  and revokes the others.
 - `GET /api/me/sessions` lists the caller's live sessions with creation,
   last-seen, IP, `User-Agent`, and optional label metadata.
   `PATCH /api/me/sessions/{id}` sets or clears `label`;
@@ -332,13 +339,17 @@ Notes:
   (the plaintext token is returned once), `PATCH /api/me/app-passwords/{id}`
   renames/rescopes/changes expiry, `DELETE /api/me/app-passwords/{id}`
   revokes one, and `DELETE /api/me/app-passwords/current` lets a device revoke
-  the token it authenticated with. Creation/revocation accept a fresh
-  `X-Reauth-Token`, or a session created within the last five minutes.
-  HTTP Basic accepts an app password even when the account has TOTP.
+  the token it authenticated with. Omitting `scopes` grants the least
+  privilege (`files:read,files:write,sync`); `*` must be explicit and needs a
+  re-auth token. Omitting `expires_in_secs` sets a 90-day lifetime; `0` means
+  never. Scoped creation/revocation accepts a fresh `X-Reauth-Token` or a
+  session created within the last five minutes; a full `*` token always
+  requires the re-auth token. HTTP Basic accepts an app password even when
+  the account has TOTP.
   `last_used_at` refreshes at most once per minute; the token row is still
   read on every request, so deletion is immediate.
   `POST` accepts optional `scopes` (an array) and `expires_in_secs`
-  (`0`/omitted = never). Omitted scopes default to `*` for compatibility.
+  (`0` = never; omitted = 90 days). Omitted scopes default to the least-privilege `files:read,files:write,sync`; `*` must be explicit and re-authenticated.
   Scopes are `*`, `files:read`, `files:write`, `caldav:read`,
   `caldav:write`, `carddav:read`, `carddav:write`, and `sync`; write implies
   read. Scoped tokens are deny-by-default: account administration, passkeys,
@@ -352,10 +363,12 @@ Notes:
   `GET|POST /api/invites` and `DELETE /api/invites/{id}`; responses never
   include stored hashes or a previously generated token.
 - Admin `GET /api/users` accepts `q=` for a case-insensitive username search.
-  `PATCH`/`DELETE /api/users/{username}`, recovery, and force sign-out
-  require a fresh `X-Reauth-Token` from `POST /api/reauth`; recovery returns
-  a generated password once with `Cache-Control: no-store` and is
-  rate-limited per client.
+  `POST /api/users` creates an account and, like `PATCH`/`DELETE`, recovery,
+  force sign-out, invites, groups, and group membership, requires a fresh
+  `X-Reauth-Token` from `POST /api/reauth`; recovery returns a generated
+  password once with `Cache-Control: no-store` and is rate-limited per
+  client. Admin account creation also requires the token even for a
+  non-admin account.
 - Admin group routes are `GET|POST /api/groups`,
   `DELETE /api/groups/{name}`, and
   `POST|DELETE /api/groups/{name}/members/{username}`. `GET /api/audit`

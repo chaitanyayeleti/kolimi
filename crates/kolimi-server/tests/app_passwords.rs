@@ -169,10 +169,23 @@ async fn app_password_works_with_totp_and_can_revoke_itself() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    // Omitting `scopes` is least privilege, not full access, and the token
+    // gets a finite default lifetime.
+    assert_ne!(body["scopes"], json!(["*"]), "{body}");
+    assert!(body["expires_at"].as_i64().is_some(), "{body}");
     let app_password = body["token"].as_str().unwrap().to_string();
 
     // The app password authenticates even though TOTP is enrolled, while the
-    // account password alone still does not.
+    // account password alone still does not. It cannot reach account admin.
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        "/api/users",
+        None,
+        &[("authorization", basic(&app_password))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _, _) = send(
         &app,
         "GET",
@@ -326,7 +339,7 @@ async fn scoped_app_passwords_enforce_least_privilege() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // A token with no explicit scopes is still full access (compatibility).
+    // A token explicitly created with `*` is full access.
     let full = create_app_password(&state, "legacy", "*", None).await;
     let (status, _, _) = send(
         &app,

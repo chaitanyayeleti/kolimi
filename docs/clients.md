@@ -33,7 +33,7 @@ address unless that is the account name).
 
 Use an **app password** for every non-browser client: WebDAV, CalDAV,
 CardDAV, `kolimi-sync`, and background desktop sync. An app password is a
-long-lived, per-device credential that can be revoked independently of the
+per-device credential that expires after 90 days by default and can be revoked independently of the
 account password. The server stores only a BLAKE3 digest.
 
 Create one in the web app:
@@ -52,7 +52,7 @@ Notes:
   chunks, keyring/MLS, and the share metadata needed to maintain encrypted
   shared folders. **Calendars & contacts** covers only those DAV trees.
   **Full access** is required for account administration and token
-  management. Existing tokens without scopes keep full access.
+  management. New tokens default to the sync scopes; existing tokens without scopes keep full access.
 - App passwords work with HTTP Basic even when the account has TOTP
   enrolled, and they are the only password path for passkey-only accounts.
 - They do not work for the web UI session login; use the web sign-in page.

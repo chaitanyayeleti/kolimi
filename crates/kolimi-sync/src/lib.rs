@@ -1951,12 +1951,16 @@ async fn reauthenticate(http: &Http, config: &SyncConfig) -> Result<String, Sync
                 .to_string(),
         ));
     }
-    let (status, body) = http
-        .post_json(
-            "/api/reauth",
-            &serde_json::json!({ "password": config.password }),
-        )
-        .await?;
+    // Accounts with TOTP must supply the current code as well as the
+    // password. Non-interactive daemons can set KOLIMI_REAUTH_CODE for the
+    // short window in which they rotate the keyring.
+    let mut body = serde_json::json!({ "password": config.password });
+    if let Ok(code) = std::env::var("KOLIMI_REAUTH_CODE")
+        && !code.trim().is_empty()
+    {
+        body["code"] = serde_json::json!(code.trim());
+    }
+    let (status, body) = http.post_json("/api/reauth", &body).await?;
     if status != 200 {
         return Err(SyncError::Server {
             status,

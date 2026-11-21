@@ -19,7 +19,8 @@ struct Assets;
 
 const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
      style-src 'self'; img-src 'self' data:; connect-src 'self'; \
-     object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+     object-src 'none'; base-uri 'none'; form-action 'none'; \
+     frame-ancestors 'none'";
 
 /// `GET /` — redirect to the app.
 pub async fn root() -> Response {

@@ -819,10 +819,16 @@ pub struct NewUserRequest {
 pub async fn create_user(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<NewUserRequest>,
 ) -> Response {
     if !user.is_admin {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    // Creating an account (especially another administrator) is a
+    // credential-management action: a session alone must not do it.
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
     }
     if req.quota_bytes.is_some_and(|quota| quota < 0) {
         return bad_request("quota_bytes must be >= 0");

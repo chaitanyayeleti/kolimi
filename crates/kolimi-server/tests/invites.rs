@@ -30,9 +30,23 @@ async fn request(
     auth: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    request_with_reauth(app, method, uri, auth, None, body).await
+}
+
+async fn request_with_reauth(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    auth: Option<&str>,
+    reauth: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(value) = auth {
         builder = builder.header(header::AUTHORIZATION, value);
+    }
+    if let Some(value) = reauth {
+        builder = builder.header("X-Reauth-Token", value);
     }
     let body = match body {
         Some(value) => {
@@ -52,6 +66,19 @@ async fn request(
         .unwrap();
     let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, value)
+}
+
+async fn reauth_token(app: &Router, auth: &str) -> String {
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/reauth",
+        Some(auth),
+        Some(json!({ "password": PASS })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["token"].as_str().unwrap().to_string()
 }
 
 async fn request_cookie(
@@ -146,11 +173,13 @@ async fn setup() -> (tempfile::TempDir, AppState, Router) {
 }
 
 async fn create_invite(app: &Router, auth: &str, username: &str) -> (StatusCode, Value) {
-    request(
+    let token = reauth_token(app, auth).await;
+    request_with_reauth(
         app,
         "POST",
         "/api/invites",
         Some(auth),
+        Some(&token),
         Some(json!({
             "username": username,
             "display_name": "Invited Person",
@@ -185,6 +214,17 @@ async fn invite_flow_creates_the_account_once() {
     let (status, _) = request(&app, "GET", "/api/invites", Some(&bob), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = create_invite(&app, &bob, "carol").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // An admin session without a fresh proof is refused too.
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/invites",
+        Some(&alice),
+        Some(json!({ "username": "nope" })),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     let (status, created) = create_invite(&app, &alice, "carol").await;
@@ -325,11 +365,13 @@ async fn invites_can_be_revoked_and_expire() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _) = request(
+    let proof = reauth_token(&app, &alice).await;
+    let (status, _) = request_with_reauth(
         &app,
         "DELETE",
         &format!("/api/invites/{id}"),
         Some(&alice),
+        Some(&proof),
         None,
     )
     .await;
@@ -386,12 +428,14 @@ async fn invites_can_be_revoked_and_expire() {
 async fn forced_password_change_blocks_the_api_until_replaced() {
     let (_dir, state, app) = setup().await;
     let alice = basic("alice", PASS);
+    let proof = reauth_token(&app, &alice).await;
 
-    let (status, created) = request(
+    let (status, created) = request_with_reauth(
         &app,
         "POST",
         "/api/users",
         Some(&alice),
+        Some(&proof),
         Some(json!({
             "username": "bob",
             "password": PASS,

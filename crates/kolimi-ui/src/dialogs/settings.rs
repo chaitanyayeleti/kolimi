@@ -65,6 +65,7 @@ pub(crate) fn SettingsPage(
     let new_pass = RwSignal::new(String::new());
     let new_confirm = RwSignal::new(String::new());
     let account_pass = RwSignal::new(String::new());
+    let account_code = RwSignal::new(String::new());
     let recovery = RwSignal::new(Option::<String>::None);
     let migrate_mls = move |_| {
         let Some(master) = master.get_untracked() else {
@@ -217,9 +218,17 @@ pub(crate) fn SettingsPage(
             error.set("Confirm your account password".to_string());
             return;
         }
+        let account_code_value = account_code.get_untracked();
         busy.set(true);
         spawn_local(async move {
-            match crate::e2ee::change_passphrase(&unlocked, &pass, &account_password).await {
+            match crate::e2ee::change_passphrase(
+                &unlocked,
+                &pass,
+                &account_password,
+                &account_code_value,
+            )
+            .await
+            {
                 Ok(()) => {
                     error.set(String::new());
                     notice.set("Passphrase changed — use the new one next time".to_string());
@@ -227,6 +236,7 @@ pub(crate) fn SettingsPage(
                     new_pass.set(String::new());
                     new_confirm.set(String::new());
                     account_pass.set(String::new());
+                    account_code.set(String::new());
                 }
                 Err(e) => error.set(e),
             }
@@ -577,6 +587,15 @@ pub(crate) fn SettingsPage(
                             on:input=move |ev| account_pass.set(event_target_value(&ev))
                         />
                     </label>
+                    <label>
+                        "Two-factor / recovery code (if enabled)"
+                        <input
+                            type="text"
+                            autocomplete="one-time-code"
+                            prop:value=move || account_code.get()
+                            on:input=move |ev| account_code.set(event_target_value(&ev))
+                        />
+                    </label>
                     <div class="row-actions">
                         <button class="primary" disabled=move || busy.get() on:click=change_pass>
                             {move || if busy.get() { "Saving…" } else { "Save new passphrase" }}
@@ -588,6 +607,7 @@ pub(crate) fn SettingsPage(
                                 new_pass.set(String::new());
                                 new_confirm.set(String::new());
                                 account_pass.set(String::new());
+                                account_code.set(String::new());
                                 error.set(String::new());
                             }
                         >

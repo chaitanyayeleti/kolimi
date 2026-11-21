@@ -9,7 +9,7 @@
 use axum::{
     Extension, Json,
     extract::{Path, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use kolimi_auth::{CurrentUser, password, token};
@@ -100,10 +100,15 @@ pub struct NewInviteRequest {
 pub async fn create_invite(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<NewInviteRequest>,
 ) -> Response {
     if !user.is_admin {
         return forbidden();
+    }
+    // An invite creates an account, so a session alone must not mint one.
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
     }
     let username = req.username.trim();
     if let Err(error) = validate_username(username) {
@@ -192,10 +197,14 @@ pub async fn list_invites(
 pub async fn revoke_invite(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Response {
     if !user.is_admin {
         return forbidden();
+    }
+    if let Err(response) = crate::reauth::require(&state, user.user_id, &headers) {
+        return response;
     }
     let invite = match state.db.invite_by_id(id).await {
         Ok(Some(invite)) => invite,

@@ -98,7 +98,7 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
     let app_passwords = RwSignal::new(Vec::<Value>::new());
     let new_app_name = RwSignal::new(String::new());
     let new_app_preset = RwSignal::new("sync".to_string());
-    let new_app_expiry = RwSignal::new("0".to_string());
+    let new_app_expiry = RwSignal::new("7776000".to_string());
     let new_app_password = RwSignal::new(Option::<String>::None);
 
     let load = Callback::new(move |_: ()| {
@@ -244,7 +244,10 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
         let password = reauth_password.get_untracked();
         let code = reauth_code.get_untracked();
         if password.is_empty() && code.is_empty() {
-            error.set("Enter your account password or a two-factor code".to_string());
+            error.set(
+                "Enter your account password and, if two-factor is enabled, a current code"
+                    .to_string(),
+            );
             return;
         }
         busy.set(true);
@@ -506,7 +509,7 @@ pub(crate) fn PasskeysPanel() -> impl IntoView {
                                 <div class="reauth">
                                     <p class="muted">
                                         {format!(
-                                            "Confirm your account password (or a two-factor code) to {description}.",
+                                            "Confirm your account password (and a current code if two-factor is enabled) to {description}.",
                                         )}
                                     </p>
                                     <label>

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use kolimi_auth::CurrentUser;
@@ -23,6 +23,19 @@ use crate::{AppState, api, audit};
 /// Rejects callers that are not administrators.
 fn require_admin(user: &CurrentUser) -> Option<Response> {
     (!user.is_admin).then(|| api::forbidden("administrator access required"))
+}
+
+/// Group mutations change who can reach group shares, so they require the
+/// same fresh proof of presence as account changes.
+fn require_admin_mutation(
+    state: &AppState,
+    user: &CurrentUser,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    if let Some(response) = require_admin(user) {
+        return Some(response);
+    }
+    crate::reauth::require(state, user.user_id, headers).err()
 }
 
 fn group_json(group: &Group, members: &[String]) -> Value {
@@ -76,9 +89,10 @@ pub struct NewGroupRequest {
 pub async fn create_group(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<NewGroupRequest>,
 ) -> Response {
-    if let Some(response) = require_admin(&user) {
+    if let Some(response) = require_admin_mutation(&state, &user, &headers) {
         return response;
     }
     let name = req.name.trim();
@@ -111,9 +125,10 @@ pub async fn create_group(
 pub async fn delete_group(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Response {
-    if let Some(response) = require_admin(&user) {
+    if let Some(response) = require_admin_mutation(&state, &user, &headers) {
         return response;
     }
     let Some(group) = state.db.group_by_name(&name).await.ok().flatten() else {
@@ -141,9 +156,10 @@ pub async fn delete_group(
 pub async fn add_group_member(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Path((name, username)): Path<(String, String)>,
 ) -> Response {
-    if let Some(response) = require_admin(&user) {
+    if let Some(response) = require_admin_mutation(&state, &user, &headers) {
         return response;
     }
     let Some(group) = state.db.group_by_name(&name).await.ok().flatten() else {
@@ -178,9 +194,10 @@ pub async fn add_group_member(
 pub async fn remove_group_member(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Path((name, username)): Path<(String, String)>,
 ) -> Response {
-    if let Some(response) = require_admin(&user) {
+    if let Some(response) = require_admin_mutation(&state, &user, &headers) {
         return response;
     }
     let Some(group) = state.db.group_by_name(&name).await.ok().flatten() else {

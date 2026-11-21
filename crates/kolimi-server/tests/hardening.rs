@@ -164,12 +164,12 @@ async fn group_roster_is_scoped_to_members_and_admins() {
     let (_dir, state, app) = setup_state(false).await;
     let bob = state
         .db
-        .create_user("bob", &hash_password("pw123456").unwrap())
+        .create_user("bob", &hash_password("pw12345678").unwrap())
         .await
         .unwrap();
     state
         .db
-        .create_user("mallory", &hash_password("pw123456").unwrap())
+        .create_user("mallory", &hash_password("pw12345678").unwrap())
         .await
         .unwrap();
     let group = state.db.create_group("team").await.unwrap();
@@ -180,7 +180,7 @@ async fn group_roster_is_scoped_to_members_and_admins() {
         get_status(
             &app,
             "/api/groups/team/members",
-            Some(&basic("bob", "pw123456"))
+            Some(&basic("bob", "pw12345678"))
         )
         .await,
         StatusCode::OK
@@ -199,7 +199,7 @@ async fn group_roster_is_scoped_to_members_and_admins() {
         get_status(
             &app,
             "/api/groups/team/members",
-            Some(&basic("mallory", "pw123456"))
+            Some(&basic("mallory", "pw12345678"))
         )
         .await,
         StatusCode::FORBIDDEN

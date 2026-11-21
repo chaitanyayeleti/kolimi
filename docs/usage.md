@@ -43,7 +43,7 @@ Open **Settings** in the sidebar.
 - **Account** — change the login password, edit the optional display name and
   email, label sessions (for example “Work laptop”), and revoke individual
   sessions or all other devices. A password change asks for the current
-  password or a two-factor code and signs out other sessions.
+  password and, if two-factor is enabled, a current code, and signs out other sessions.
 - **Encryption** — create or unlock the encryption keyring. The recovery
   phrase is shown once; store it offline. Changing the passphrase replaces
   the account keyring. **Encrypt existing names** renames already-encrypted
@@ -51,10 +51,10 @@ Open **Settings** in the sidebar.
 - **Sharing** — upgrade legacy per-file folder shares to MLS groups.
 - **Devices** — review MLS devices and revoke one that is lost or untrusted.
 - **Passkeys** — register or remove passkeys and enable TOTP/recovery codes.
-- **App passwords** — also under *Settings → Passkeys*: long-lived,
+- **App passwords** — also under *Settings → Passkeys*: per-device, expiring,
   per-device credentials for WebDAV, CalDAV/CardDAV, and sync clients. Choose
   a preset (Sync client, Files read-only, Files read/write, Calendars &
-  contacts, or Full access) and an optional expiry. The token is shown once;
+  contacts, or Full access) and a 90-day default expiry. The token is shown once;
   revoke it here when a device is lost. App passwords work even when TOTP is
   enabled or the account is passkey-only. Full access can manage the account,
   so prefer the narrowest preset that works.

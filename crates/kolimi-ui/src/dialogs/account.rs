@@ -112,7 +112,7 @@ pub(crate) fn AccountPanel() -> impl IntoView {
     let change_password = move |_| {
         let new = new_password.get_untracked();
         if new.chars().count() < 8 {
-            error.set("Use at least 8 characters for the new password".to_string());
+            error.set("Use at least 10 characters for the new password".to_string());
             return;
         }
         if new != confirm_password.get_untracked() {
@@ -122,7 +122,10 @@ pub(crate) fn AccountPanel() -> impl IntoView {
         let password_value = current_password.get_untracked();
         let code_value = code.get_untracked();
         if password_value.is_empty() && code_value.is_empty() {
-            error.set("Confirm your account password or a two-factor code".to_string());
+            error.set(
+                "Confirm your account password and, if two-factor is enabled, a current code"
+                    .to_string(),
+            );
             return;
         }
         busy.set(true);
@@ -349,7 +352,7 @@ pub(crate) fn AccountPanel() -> impl IntoView {
             <div class="reauth">
                 <h3>"Change password"</h3>
                 <p class="muted">
-                    "Confirm your current password or a two-factor code. Other sessions will be signed out."
+                    "Confirm your current password and, if two-factor is enabled, a current code. Other sessions will be signed out."
                 </p>
                 <label>
                     "Current password"

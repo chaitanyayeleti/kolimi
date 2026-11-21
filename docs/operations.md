@@ -61,7 +61,7 @@ account, force sign-out, or reset a password. Password recovery generates a
 new password once (or accepts one) and by default drops sessions, clears TOTP
 and removes passkeys. Recovery, force sign-out, and every user edit or
 deletion (quota, role, disable/enable, delete) require the admin's own
-password or a two-factor code. Password recovery also asks the admin to type
+password and, if two-factor is enabled, a current code. Password recovery also asks the admin to type
 the target username.
 
 The **Groups** tab lists every group and its members and can create, delete,
@@ -94,16 +94,21 @@ Passkeys panel instructions.
 Passkeys are registered in the web UI (**Settings → Passkeys**). A
 passkey-only account signs in through WebAuthn; password login is rejected
 (and audited). Adding or removing a passkey asks for the account password
-(or a current TOTP/recovery code); changing the E2EE passphrase and
-replacing the keyring use the same short-lived re-authentication proof.
+and, when TOTP is enabled, a current TOTP/recovery code; changing the E2EE
+passphrase and replacing the keyring use the same short-lived
+re-authentication proof. Enabling TOTP or adding a passkey revokes every
+other session, so a session created before the new factor cannot survive it.
 Removing the last passkey on a passwordless account is refused to prevent
 self-lockout.
 
 Device clients should use an **app password** rather than the account
 password. Create one in **Settings → Passkeys → App passwords**, name it for
-the device, and copy the token shown once. App passwords are long-lived,
+the device, and copy the token shown once. App passwords expire after 90
+days by default (`0` requests a non-expiring token explicitly), are
 individually revocable, and work with WebDAV/CalDAV/CardDAV and `kolimi-sync`
-even when TOTP is enabled or the account is passkey-only. The server stores
+even when TOTP is enabled or the account is passkey-only. Omitting scopes
+grants the least privilege (`files:read,files:write,sync`); full `*` access
+must be requested explicitly and needs a fresh re-authentication token. The server stores
 only a BLAKE3 digest; the last-used time is shown in Settings. Revoke a
 device's app password immediately if it is lost. Desktop Accounts & Sync
 creates one automatically after login and revokes it on sign-out.
@@ -137,31 +142,36 @@ The same operations are available to an authenticated administrator over
 HTTP (JSON API, `Authorization: Basic` with an app password, or a session
 cookie):
 
-Mutation calls need a fresh, single-use re-authentication token. This helper
-fetches one; call it again for every PATCH or DELETE. Use the admin's
-username with an app password (the `admin:pw` examples are placeholders);
-the account password only works over Basic when TOTP is not enrolled.
+Mutation calls — including creating a user, invite, group, or group
+membership — need a fresh, single-use re-authentication token. This helper
+fetches one; call it again for every mutation. Use the admin's username with
+an app password for Basic (the `admin:APP_PASSWORD` value is a placeholder).
+The JSON body carries the *account* password and, when TOTP is enrolled, a
+current TOTP or recovery code; both are required in that case. Omit `code`
+for an account without TOTP.
 
 ```sh
 reauth() {
-  curl -s -u admin:pw -X POST -H 'Content-Type: application/json' \
-    -d '{"password":"pw"}' https://…/api/reauth | jq -r .token
+  curl -s -u admin:APP_PASSWORD -X POST -H 'Content-Type: application/json' \
+    -d '{"password":"ACCOUNT_PASSWORD","code":"TOTP_OR_RECOVERY"}' \
+    https://…/api/reauth | jq -r .token
 }
 
-curl -u admin:pw https://cloud.example.com/api/users                 # list
-curl -u admin:pw -X POST -H 'Content-Type: application/json' \
+curl -u admin:APP_PASSWORD https://cloud.example.com/api/users        # list
+curl -u admin:APP_PASSWORD -X POST -H 'Content-Type: application/json' \
+  -H "X-Reauth-Token: $(reauth)" \
   -d '{"username":"alice","password":"…"}' https://…/api/users      # create
-curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
+curl -u admin:APP_PASSWORD -X PATCH -H 'Content-Type: application/json' \
   -H "X-Reauth-Token: $(reauth)" \
   -d '{"disabled":true}' https://…/api/users/alice                   # disable
-curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
+curl -u admin:APP_PASSWORD -X PATCH -H 'Content-Type: application/json' \
   -H "X-Reauth-Token: $(reauth)" \
   -d '{"admin":true}' https://…/api/users/alice                      # grant admin
-curl -u admin:pw -X DELETE -H "X-Reauth-Token: $(reauth)" \
+curl -u admin:APP_PASSWORD -X DELETE -H "X-Reauth-Token: $(reauth)" \
   https://…/api/users/alice                                          # delete
-curl -u admin:pw 'https://…/api/users?limit=100'                     # paginated list
-curl -u admin:pw https://…/api/users/alice/usage                     # fresh usage
-curl -u admin:pw -X PATCH -H 'Content-Type: application/json' \
+curl -u admin:APP_PASSWORD 'https://…/api/users?limit=100'                     # paginated list
+curl -u admin:APP_PASSWORD https://…/api/users/alice/usage                     # fresh usage
+curl -u admin:APP_PASSWORD -X PATCH -H 'Content-Type: application/json' \
   -H "X-Reauth-Token: $(reauth)" \
   -d '{"quota_bytes":10737418240}' https://…/api/users/alice          # set quota
 ```
@@ -218,14 +228,17 @@ The CLI details are in [reference.md](reference.md#kolimi-sync).
   before any data/API/WebDAV/sync surface opens (see Users above). Existing
   and CLI-created accounts are not forced.
 - **TOTP:** 6-digit RFC 6238 codes, ten one-time recovery codes shown once
-  at enrollment. Lost everything? `user totp-disable` (admin).
+  at enrollment. Enrollment revokes every other session. Lost everything?
+  `user totp-disable` (admin).
 - **Passkeys:** up to 20 per account; lost all of them? An admin
   can set a password (`user passwd`) and the user registers new ones.
-- **App passwords:** long-lived per-device Basic credentials for WebDAV,
+- **App passwords:** per-device Basic credentials for WebDAV,
   CalDAV/CardDAV, `kolimi-sync`, and desktop sync. Create or revoke them under
   **Settings → Passkeys → App passwords**; the token is shown once and the
-  server stores only a digest. They bypass TOTP by design, so revoke a lost
-  device promptly; admin recovery revokes every app password.
+  server stores only a digest. New tokens default to the `sync` scopes and a
+  90-day lifetime; full access requires an explicit `*`. They bypass TOTP by
+  design, so revoke a lost device promptly; admin recovery revokes every app
+  password.
 - **E2EE:** the keyring has passphrase + recovery code (+ optional passkey
   PRF) wraps. Losing **all** wraps means the data is unrecoverable —
   there is no server-side escrow by design.
@@ -250,7 +263,10 @@ kolimi-server verify --data /var/lib/kolimi
 `--incremental` skips files already in the destination and hard-links new
 ones when the backup is on the same filesystem; otherwise it copies them.
 Blob files are immutable after commit, so hard links are safe. The SQLite
-snapshot is still a fresh consistent snapshot on every run. The backup is
+snapshot is still a fresh consistent snapshot on every run. Backups contain
+password hashes, TOTP secrets, session metadata, audit rows, and wrapped
+E2EE material (not E2EE plaintext or the audit signing key); encrypt them at
+rest and restrict access. The backup is
 cumulative: blobs deleted from the source are not removed from the
 destination. Restore is the same as a full backup.
 

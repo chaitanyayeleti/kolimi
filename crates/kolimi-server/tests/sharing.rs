@@ -372,7 +372,7 @@ async fn link_share_password_expiry_and_revocation() {
             "PATCH",
             &format!("/api/shares/{share_id}"),
             ALICE,
-            &json!({ "password": "knownpass" }),
+            &json!({ "password": "knownpass1" }),
         ),
     )
     .await;
@@ -396,7 +396,7 @@ async fn link_share_password_expiry_and_revocation() {
             .method("POST")
             .uri(format!("/public/{token}/unlock"))
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(json!({ "password": "knownpass" }).to_string()))
+            .body(Body::from(json!({ "password": "knownpass1" }).to_string()))
             .unwrap(),
     )
     .await;
@@ -412,7 +412,7 @@ async fn link_share_password_expiry_and_revocation() {
         .to_string();
     assert!(cookie.starts_with(&format!("kolimi_link_{share_id}=")));
 
-    let (status, _, body) = send(
+    let (status, headers, body) = send(
         &server.app,
         Request::builder()
             .method("GET")
@@ -424,8 +424,9 @@ async fn link_share_password_expiry_and_revocation() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json_body(&body)["name"], "report.txt");
+    assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
 
-    let (status, _, body) = send(
+    let (status, headers, body) = send(
         &server.app,
         Request::builder()
             .method("GET")
@@ -437,6 +438,7 @@ async fn link_share_password_expiry_and_revocation() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, b"public data");
+    assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
     // No cookie: locked again.
     let (status, _, _) = send(
         &server.app,
@@ -516,7 +518,7 @@ async fn link_unlock_is_rate_limited() {
             "PATCH",
             &format!("/api/shares/{share_id}"),
             ALICE,
-            &json!({ "password": "hunter2" }),
+            &json!({ "password": "hunter2pass" }),
         ),
     )
     .await;
@@ -540,7 +542,7 @@ async fn link_unlock_is_rate_limited() {
             .method("POST")
             .uri(format!("/public/{token}/unlock"))
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(json!({ "password": "hunter2" }).to_string()))
+            .body(Body::from(json!({ "password": "hunter2pass" }).to_string()))
             .unwrap(),
     )
     .await;

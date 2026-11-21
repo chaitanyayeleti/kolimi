@@ -27,9 +27,23 @@ async fn request(
     auth: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    request_with_reauth(app, method, uri, auth, None, body).await
+}
+
+async fn request_with_reauth(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    auth: Option<&str>,
+    reauth: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(value) = auth {
         builder = builder.header(header::AUTHORIZATION, value);
+    }
+    if let Some(value) = reauth {
+        builder = builder.header("X-Reauth-Token", value);
     }
     let body = match body {
         Some(value) => {
@@ -49,6 +63,27 @@ async fn request(
         .unwrap();
     let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, value)
+}
+
+/// Performs an admin group mutation with a fresh single-use proof.
+async fn admin_request(
+    app: &Router,
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let alice_id = state.db.find_user("alice").await.unwrap().unwrap().id;
+    let token = state.reauth.issue(alice_id).unwrap();
+    request_with_reauth(
+        app,
+        method,
+        uri,
+        Some(&basic("alice", PASS)),
+        Some(&token),
+        body,
+    )
+    .await
 }
 
 async fn setup() -> (tempfile::TempDir, AppState, Router) {
@@ -93,21 +128,32 @@ async fn groups_crud_is_admin_only_and_audited() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
     }
 
-    // Create, duplicate, and list.
+    // An administrator session without a fresh proof is refused too.
     let (status, _) = request(
         &app,
         "POST",
         "/api/groups",
         Some(&alice),
+        Some(json!({ "name": "nope" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Create, duplicate, and list.
+    let (status, _) = admin_request(
+        &app,
+        &state,
+        "POST",
+        "/api/groups",
         Some(json!({ "name": "  " })),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, created) = request(
+    let (status, created) = admin_request(
         &app,
+        &state,
         "POST",
         "/api/groups",
-        Some(&alice),
         Some(json!({ "name": "team" })),
     )
     .await;
@@ -115,11 +161,11 @@ async fn groups_crud_is_admin_only_and_audited() {
     assert_eq!(created["name"], "team");
     assert_eq!(created["members"], json!([]));
 
-    let (status, _) = request(
+    let (status, _) = admin_request(
         &app,
+        &state,
         "POST",
         "/api/groups",
-        Some(&alice),
         Some(json!({ "name": "team" })),
     )
     .await;
@@ -134,63 +180,39 @@ async fn groups_crud_is_admin_only_and_audited() {
 
     // Membership is idempotent, visible in the overview, and removable.
     for _ in 0..2 {
-        let (status, _) = request(
-            &app,
-            "POST",
-            "/api/groups/team/members/bob",
-            Some(&alice),
-            None,
-        )
-        .await;
+        let (status, _) =
+            admin_request(&app, &state, "POST", "/api/groups/team/members/bob", None).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
     let (status, list) = request(&app, "GET", "/api/groups", Some(&alice), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(list["groups"][0]["members"], json!(["bob"]));
 
-    let (status, _) = request(
-        &app,
-        "DELETE",
-        "/api/groups/team/members/bob",
-        Some(&alice),
-        None,
-    )
-    .await;
+    let (status, _) =
+        admin_request(&app, &state, "DELETE", "/api/groups/team/members/bob", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     // Removing a non-member is still a success.
-    let (status, _) = request(
-        &app,
-        "DELETE",
-        "/api/groups/team/members/bob",
-        Some(&alice),
-        None,
-    )
-    .await;
+    let (status, _) =
+        admin_request(&app, &state, "DELETE", "/api/groups/team/members/bob", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (status, _) = request(
-        &app,
-        "POST",
-        "/api/groups/nope/members/bob",
-        Some(&alice),
-        None,
-    )
-    .await;
+    let (status, _) =
+        admin_request(&app, &state, "POST", "/api/groups/nope/members/bob", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _) = request(
+    let (status, _) = admin_request(
         &app,
+        &state,
         "POST",
         "/api/groups/team/members/nobody",
-        Some(&alice),
         None,
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Deleting the group is audited under the real administrator.
-    let (status, _) = request(&app, "DELETE", "/api/groups/team", Some(&alice), None).await;
+    let (status, _) = admin_request(&app, &state, "DELETE", "/api/groups/team", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = request(&app, "DELETE", "/api/groups/team", Some(&alice), None).await;
+    let (status, _) = admin_request(&app, &state, "DELETE", "/api/groups/team", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let entries = state.db.audit_list(100, None).await.unwrap();
@@ -219,24 +241,18 @@ async fn audit_api_filters_pages_and_verifies() {
     let alice = basic("alice", PASS);
 
     for name in ["team", "ops"] {
-        let (status, _) = request(
+        let (status, _) = admin_request(
             &app,
+            &state,
             "POST",
             "/api/groups",
-            Some(&alice),
             Some(json!({ "name": name })),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
     }
-    let (status, _) = request(
-        &app,
-        "POST",
-        "/api/groups/team/members/bob",
-        Some(&alice),
-        None,
-    )
-    .await;
+    let (status, _) =
+        admin_request(&app, &state, "POST", "/api/groups/team/members/bob", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, audit) = request(&app, "GET", "/api/audit", Some(&alice), None).await;

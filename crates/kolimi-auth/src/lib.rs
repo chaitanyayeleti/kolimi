@@ -26,6 +26,9 @@ pub enum AuthError {
     /// The password does not meet policy.
     #[error("password must be at least {0} characters")]
     WeakPassword(usize),
+    /// The password is a well-known or breached default.
+    #[error("choose a less common password")]
+    CommonPassword,
     /// Randomness generation failed.
     #[error("randomness error: {0}")]
     Random(String),

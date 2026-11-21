@@ -148,13 +148,28 @@ pub async fn register_finish(
     {
         Ok(row) => {
             let _ = state.db.set_must_setup_mfa(user.user_id, false).await;
+            // A passkey is a new long-lived credential. Drop sessions that
+            // predate it so a session attacker cannot keep one alive after
+            // the owner adds a stronger factor.
+            let sessions_revoked = match user.session_hash {
+                Some(hash) => state
+                    .db
+                    .delete_user_sessions_except(user.user_id, hash.as_slice())
+                    .await
+                    .unwrap_or(0),
+                None => state
+                    .db
+                    .delete_user_sessions(user.user_id)
+                    .await
+                    .unwrap_or(0),
+            };
             audit(
                 &state,
                 Some(user.user_id),
                 Some(&user.username),
                 "passkey.add",
                 &row.name,
-                json!({}),
+                json!({ "sessions_revoked": sessions_revoked }),
             )
             .await;
             (

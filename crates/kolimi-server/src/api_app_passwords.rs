@@ -17,16 +17,23 @@ use serde_json::{Value, json};
 use crate::app_scope::ScopeSet;
 use crate::{AppState, api, audit};
 
-/// A freshly authenticated session may create its first app password without
+/// A freshly authenticated session may create a scoped app password without
 /// a second confirmation. This is what lets passkey-only desktop clients link
-/// a web session; older sessions must re-authenticate.
+/// a web session; older sessions and full-access tokens must re-authenticate.
 const FRESH_SESSION_MILLIS: i64 = 5 * 60 * 1000;
+/// Least-privilege scopes for clients that omit `scopes`. File sync and the
+/// E2EE/MLS endpoints are enough for the desktop and CLI; account
+/// administration and CalDAV/CardDAV require an explicit scope.
+const DEFAULT_SCOPES: &[&str] = &["files:read", "files:write", "sync"];
+/// Default lifetime for a new app password (90 days). `expires_in_secs: 0`
+/// still means "never expires", but clients must ask for that explicitly.
+const DEFAULT_TTL_SECS: i64 = 90 * 24 * 60 * 60;
 
 #[derive(Deserialize)]
 pub struct CreateRequest {
     name: String,
-    /// Protocol scopes. Omitted = full access (`*`) for compatibility with
-    /// clients that predate scopes.
+    /// Protocol scopes. Omitted = least privilege
+    /// (`files:read,files:write,sync`); full `*` access must be explicit.
     scopes: Option<Vec<String>>,
     /// `None` or `0` = never expires, else lifetime in seconds.
     expires_in_secs: Option<i64>,
@@ -47,16 +54,17 @@ fn valid_name(name: &str) -> bool {
 
 fn parse_scopes(scopes: Option<Vec<String>>) -> Result<ScopeSet, String> {
     match scopes {
-        // Backward compatible default: existing clients that only send a
-        // name keep the full access they had before scopes existed.
-        None => Ok(ScopeSet::full()),
+        // Least privilege by default. A client that needs account
+        // administration must ask for `*` explicitly (and re-authenticate).
+        None => ScopeSet::from_values(DEFAULT_SCOPES.iter().map(|scope| (*scope).to_string())),
         Some(values) => ScopeSet::from_values(values),
     }
 }
 
 fn expiry_from(secs: Option<i64>) -> Result<Option<i64>, String> {
     match secs {
-        None | Some(0) => Ok(None),
+        None => Ok(Some(kolimi_db::now_millis() + DEFAULT_TTL_SECS * 1000)),
+        Some(0) => Ok(None),
         Some(secs) if secs > 0 => Ok(Some(kolimi_db::now_millis() + secs * 1000)),
         Some(_) => Err("expires_in_secs must be >= 0".to_string()),
     }
@@ -116,9 +124,6 @@ pub async fn create(
     headers: HeaderMap,
     Json(req): Json<CreateRequest>,
 ) -> Response {
-    if let Err(response) = require_fresh_or_reauth(&state, &user, &headers).await {
-        return response;
-    }
     let name = req.name.trim();
     if !valid_name(name) {
         return api::bad_request("name must be 1-64 printable characters");
@@ -127,6 +132,16 @@ pub async fn create(
         Ok(scopes) => scopes,
         Err(message) => return api::bad_request(&message),
     };
+    // Full account access is never granted from a merely fresh session;
+    // it needs the same proof as a password or passkey change.
+    let auth = if scopes.is_full() {
+        crate::reauth::require(&state, user.user_id, &headers)
+    } else {
+        require_fresh_or_reauth(&state, &user, &headers).await
+    };
+    if let Err(response) = auth {
+        return response;
+    }
     let expires_at = match expiry_from(req.expires_in_secs) {
         Ok(expires_at) => expires_at,
         Err(message) => return api::bad_request(&message),
@@ -174,9 +189,6 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(req): Json<UpdateRequest>,
 ) -> Response {
-    if let Err(response) = require_fresh_or_reauth(&state, &user, &headers).await {
-        return response;
-    }
     let name = match req.name.as_deref().map(str::trim) {
         Some(name) if !valid_name(name) => {
             return api::bad_request("name must be 1-64 printable characters");
@@ -186,11 +198,20 @@ pub async fn update(
     };
     let scopes = match req.scopes {
         Some(values) => match ScopeSet::from_values(values) {
-            Ok(scopes) => Some(scopes.to_storage()),
+            Ok(scopes) => Some(scopes),
             Err(message) => return api::bad_request(&message),
         },
         None => None,
     };
+    let auth = if scopes.as_ref().is_some_and(ScopeSet::is_full) {
+        crate::reauth::require(&state, user.user_id, &headers)
+    } else {
+        require_fresh_or_reauth(&state, &user, &headers).await
+    };
+    if let Err(response) = auth {
+        return response;
+    }
+    let scopes = scopes.map(|scopes| scopes.to_storage());
     let expires_at = match req.expires_in_secs {
         Some(secs) => match expiry_from(Some(secs)) {
             Ok(value) => Some(value),

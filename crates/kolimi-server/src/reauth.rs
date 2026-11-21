@@ -113,7 +113,7 @@ fn reauth_required() -> Response {
     (
         StatusCode::FORBIDDEN,
         Json(json!({
-            "error": "re-authentication required; confirm your password or a two-factor code"
+            "error": "re-authentication required; confirm your password and, if enabled, a two-factor code"
         })),
     )
         .into_response()

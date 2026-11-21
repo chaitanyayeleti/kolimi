@@ -138,6 +138,25 @@ cargo vet --locked
   files set environment variables explicitly, so a variable only in `.env`
   does not reach the container unless the service references it.
 
+## Auth and credentials
+
+- `POST /api/reauth` must require **both** the account password and a current
+  TOTP/recovery code when TOTP is enrolled; password-only re-auth would let a
+  stolen session plus a reused password bypass the second factor. Accounts
+  without TOTP still use password-only; passkey-only accounts use
+  `/api/reauth/passkey/*`.
+- Every admin mutation needs a fresh `X-Reauth-Token`, including user
+  creation, invites, groups, and group membership. Do not add a new
+  privileged route without `crate::reauth::require`.
+- Enabling TOTP or registering a passkey revokes every other session; keep
+  the current session only. A session that predates the new factor must not
+  survive it.
+- App passwords default to `files:read,files:write,sync` and a 90-day
+  lifetime. A full `*` token needs explicit scopes plus a re-auth token.
+- Passwords are at least 10 characters and pass a small common-password
+  blocklist (`kolimi-auth/src/password.rs`). Keep link-password hashing
+  mapped to `400`, not `500`, for policy failures.
+
 ## Audit log and signing
 
 - `crates/kolimi-db/src/audit.rs` owns the hash chain, sealed checkpoints,

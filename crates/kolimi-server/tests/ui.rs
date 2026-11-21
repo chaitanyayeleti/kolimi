@@ -63,6 +63,17 @@ async fn serves_app_shell_assets_and_public_pages() {
         );
         assert!(headers.contains_key("content-security-policy"));
         assert!(headers.contains_key("x-content-type-options"));
+        assert_eq!(headers.get("x-frame-options").unwrap(), "DENY", "{uri}");
+        assert_eq!(
+            headers.get("cross-origin-opener-policy").unwrap(),
+            "same-origin",
+            "{uri}"
+        );
+        assert_eq!(
+            headers.get("cross-origin-resource-policy").unwrap(),
+            "same-origin",
+            "{uri}"
+        );
         assert!(!body.is_empty());
     }
 
@@ -75,7 +86,16 @@ async fn serves_app_shell_assets_and_public_pages() {
         .to_str()
         .unwrap();
     assert!(csp.contains("style-src 'self';"), "{csp}");
+    assert!(csp.contains("form-action 'none'"), "{csp}");
     assert!(!csp.contains("'unsafe-inline'"), "{csp}");
+
+    // Public capability URLs may be embedded elsewhere, so their CORP is
+    // cross-origin even though the app shell is same-origin.
+    let (_, headers, _) = get(&app, "/public/nonexistent").await;
+    assert_eq!(
+        headers.get("cross-origin-resource-policy").unwrap(),
+        "cross-origin"
+    );
 
     // Missing files under /app 404 rather than falling back to HTML.
     let (status, _, _) = get(&app, "/app/nope.js").await;

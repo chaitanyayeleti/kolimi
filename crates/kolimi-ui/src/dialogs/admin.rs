@@ -77,6 +77,39 @@ fn random_password() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Password + optional TOTP/recovery code for a sensitive admin action.
+///
+/// The server requires both factors when TOTP is enrolled, so the UI asks
+/// for both here rather than letting a stale session act alone.
+#[component]
+fn ReauthFields(password: RwSignal<String>, code: RwSignal<String>) -> impl IntoView {
+    view! {
+        <div class="reauth">
+            <p class="muted">
+                "Confirm your account password. If two-factor is enabled, also enter a current code or recovery code."
+            </p>
+            <label>
+                "Your password"
+                <input
+                    type="password"
+                    autocomplete="current-password"
+                    prop:value=move || password.get()
+                    on:input=move |ev| password.set(event_target_value(&ev))
+                />
+            </label>
+            <label>
+                "Two-factor / recovery code"
+                <input
+                    type="text"
+                    autocomplete="one-time-code"
+                    prop:value=move || code.get()
+                    on:input=move |ev| code.set(event_target_value(&ev))
+                />
+            </label>
+        </div>
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AdminTab {
     Users,
@@ -448,6 +481,8 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
     let email = RwSignal::new(String::new());
     let admin = RwSignal::new(false);
     let must_change_password = RwSignal::new(true);
+    let reauth_password = RwSignal::new(String::new());
+    let reauth_code = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
 
@@ -464,18 +499,32 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
             error.set("Username is required".to_string());
             return;
         }
-        if pass.chars().count() < 8 {
-            error.set("Use at least 8 characters for the password".to_string());
+        if pass.chars().count() < 10 {
+            error.set("Use at least 10 characters for the password".to_string());
             return;
         }
         if pass != confirm.get_untracked() {
             error.set("The password and confirmation do not match".to_string());
             return;
         }
+        let confirm_password = reauth_password.get_untracked();
+        if confirm_password.is_empty() {
+            error.set("Confirm your own account password".to_string());
+            return;
+        }
+        let reauth_code = reauth_code.get_untracked();
         busy.set(true);
         error.set(String::new());
         spawn_local(async move {
-            match api::send_json(
+            let token = match api::reauth(&confirm_password, &reauth_code).await {
+                Ok(token) => token,
+                Err(message) => {
+                    error.set(message);
+                    busy.set(false);
+                    return;
+                }
+            };
+            match api::send_json_with(
                 "POST",
                 "/api/users",
                 &json!({
@@ -486,6 +535,7 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
                     "email": email.get_untracked(),
                     "must_change_password": must_change_password.get_untracked(),
                 }),
+                Some(("x-reauth-token", token.as_str())),
             )
             .await
             {
@@ -579,6 +629,7 @@ fn CreateUserDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl In
             <p class="muted">
                 "New users must also set up an authenticator app or a passkey on their first sign-in."
             </p>
+            <ReauthFields password=reauth_password code=reauth_code/>
             <ErrorText message=error/>
             <div class="row-actions">
                 <button class="primary" on:click=submit disabled=move || busy.get()>
@@ -677,7 +728,10 @@ fn UserDetailDialog(
             let password = reauth_password.get_untracked();
             let code = reauth_code.get_untracked();
             if password.is_empty() && code.is_empty() {
-                error.set("Enter your account password or a two-factor code".to_string());
+                error.set(
+                    "Enter your account password and, if two-factor is enabled, a current code"
+                        .to_string(),
+                );
                 return;
             }
             let name = username.clone();
@@ -1075,7 +1129,7 @@ fn UserDetailDialog(
                                 <h3>"Confirm admin action"</h3>
                                 <p class="muted">
                                     {format!(
-                                        "Confirm your admin password or a two-factor code to {description}.",
+                                        "Confirm your admin password and, if two-factor is enabled, a current code to {description}.",
                                     )}
                                 </p>
                                 {requires_username
@@ -1239,6 +1293,9 @@ fn InvitesPanel() -> impl IntoView {
     let create_open = RwSignal::new(false);
     let created_link = RwSignal::new(Option::<String>::None);
     let created_user = RwSignal::new(String::new());
+    let revoke_pending = RwSignal::new(Option::<i64>::None);
+    let revoke_password = RwSignal::new(String::new());
+    let revoke_code = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
 
     let load = Callback::new(move |_: ()| {
@@ -1274,13 +1331,38 @@ fn InvitesPanel() -> impl IntoView {
         load.run(());
     });
 
-    let revoke = Callback::new(move |id: i64| {
+    let confirm_revoke = Callback::new(move |_: ()| {
+        let Some(id) = revoke_pending.get_untracked() else {
+            return;
+        };
+        let password = revoke_password.get_untracked();
+        if password.is_empty() {
+            error.set("Confirm your own account password".to_string());
+            return;
+        }
+        let code = revoke_code.get_untracked();
         busy.set(true);
         error.set(String::new());
         spawn_local(async move {
-            match api::delete(&format!("/api/invites/{id}")).await {
+            let token = match api::reauth(&password, &code).await {
+                Ok(token) => token,
+                Err(message) => {
+                    error.set(message);
+                    busy.set(false);
+                    return;
+                }
+            };
+            match api::delete_with(
+                &format!("/api/invites/{id}"),
+                Some(("x-reauth-token", token.as_str())),
+            )
+            .await
+            {
                 Ok(response) if response.status == 204 => {
                     notice.set("Invite revoked.".to_string());
+                    revoke_pending.set(None);
+                    revoke_password.set(String::new());
+                    revoke_code.set(String::new());
                     load.run(());
                 }
                 Ok(response) => error.set(
@@ -1407,7 +1489,7 @@ fn InvitesPanel() -> impl IntoView {
                             <span class="row-actions">
                                 <button
                                     class="danger"
-                                    on:click=move |_| revoke.run(id)
+                                    on:click=move |_| revoke_pending.set(Some(id))
                                     disabled=move || busy.get()
                                 >
                                     "Revoke"
@@ -1434,6 +1516,44 @@ fn InvitesPanel() -> impl IntoView {
                     }
                 })
         }}
+        {move || {
+            revoke_pending
+                .get()
+                .map(|_| {
+                    view! {
+                        <Modal
+                            title="Revoke invite"
+                            on_close=Callback::new(move |_: ()| {
+                                revoke_pending.set(None);
+                                revoke_password.set(String::new());
+                                revoke_code.set(String::new());
+                            })
+                        >
+                            <ReauthFields password=revoke_password code=revoke_code/>
+                            <ErrorText message=error/>
+                            <div class="row-actions">
+                                <button
+                                    class="danger"
+                                    on:click=move |_| confirm_revoke.run(())
+                                    disabled=move || busy.get()
+                                >
+                                    {move || if busy.get() { "Revoking…" } else { "Revoke invite" }}
+                                </button>
+                                <button
+                                    class="ghost"
+                                    on:click=move |_| {
+                                        revoke_pending.set(None);
+                                        revoke_password.set(String::new());
+                                        revoke_code.set(String::new());
+                                    }
+                                >
+                                    "Cancel"
+                                </button>
+                            </div>
+                        </Modal>
+                    }
+                })
+        }}
     }
 }
 
@@ -1447,6 +1567,8 @@ fn CreateInviteDialog(
     let display_name = RwSignal::new(String::new());
     let email = RwSignal::new(String::new());
     let expires = RwSignal::new("604800".to_string());
+    let reauth_password = RwSignal::new(String::new());
+    let reauth_code = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
 
@@ -1456,6 +1578,12 @@ fn CreateInviteDialog(
             error.set("Username is required".to_string());
             return;
         }
+        let confirm_password = reauth_password.get_untracked();
+        if confirm_password.is_empty() {
+            error.set("Confirm your own account password".to_string());
+            return;
+        }
+        let reauth_code_value = reauth_code.get_untracked();
         busy.set(true);
         error.set(String::new());
         spawn_local(async move {
@@ -1468,7 +1596,22 @@ fn CreateInviteDialog(
                     .parse::<i64>()
                     .unwrap_or(604_800),
             });
-            match api::send_json("POST", "/api/invites", &body).await {
+            let token = match api::reauth(&confirm_password, &reauth_code_value).await {
+                Ok(token) => token,
+                Err(message) => {
+                    error.set(message);
+                    busy.set(false);
+                    return;
+                }
+            };
+            match api::send_json_with(
+                "POST",
+                "/api/invites",
+                &body,
+                Some(("x-reauth-token", token.as_str())),
+            )
+            .await
+            {
                 Ok(response) if response.status == 201 => {
                     let url = response.body["url"]
                         .as_str()
@@ -1537,6 +1680,7 @@ fn CreateInviteDialog(
             <p class="muted">
                 "The link is shown once after creation. The account does not exist until the link is accepted."
             </p>
+            <ReauthFields password=reauth_password code=reauth_code/>
             <ErrorText message=error/>
             <div class="row-actions">
                 <button class="primary" on:click=submit disabled=move || busy.get()>
@@ -1694,6 +1838,8 @@ fn GroupsPanel() -> impl IntoView {
 #[component]
 fn CreateGroupDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl IntoView {
     let name = RwSignal::new(String::new());
+    let reauth_password = RwSignal::new(String::new());
+    let reauth_code = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
 
@@ -1703,10 +1849,31 @@ fn CreateGroupDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl I
             error.set("Group name is required".to_string());
             return;
         }
+        let confirm_password = reauth_password.get_untracked();
+        if confirm_password.is_empty() {
+            error.set("Confirm your own account password".to_string());
+            return;
+        }
+        let reauth_code_value = reauth_code.get_untracked();
         busy.set(true);
         error.set(String::new());
         spawn_local(async move {
-            match api::send_json("POST", "/api/groups", &json!({ "name": value })).await {
+            let token = match api::reauth(&confirm_password, &reauth_code_value).await {
+                Ok(token) => token,
+                Err(message) => {
+                    error.set(message);
+                    busy.set(false);
+                    return;
+                }
+            };
+            match api::send_json_with(
+                "POST",
+                "/api/groups",
+                &json!({ "name": value }),
+                Some(("x-reauth-token", token.as_str())),
+            )
+            .await
+            {
                 Ok(response) if response.status == 201 => {
                     on_created.run(());
                     on_close.run(());
@@ -1734,6 +1901,7 @@ fn CreateGroupDialog(on_close: Callback<()>, on_created: Callback<()>) -> impl I
                     on:input=move |ev| name.set(event_target_value(&ev))
                 />
             </label>
+            <ReauthFields password=reauth_password code=reauth_code/>
             <ErrorText message=error/>
             <div class="row-actions">
                 <button class="primary" on:click=submit disabled=move || busy.get()>
@@ -1757,6 +1925,8 @@ fn GroupDetailDialog(
     let members = RwSignal::new(Vec::<String>::new());
     let new_member = RwSignal::new(String::new());
     let delete_name = RwSignal::new(String::new());
+    let reauth_password = RwSignal::new(String::new());
+    let reauth_code = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
     let notice = RwSignal::new(String::new());
@@ -1799,11 +1969,32 @@ fn GroupDetailDialog(
             return;
         }
         let group = add_name.clone();
+        let confirm_password = reauth_password.get_untracked();
+        if confirm_password.is_empty() {
+            error.set("Confirm your own account password".to_string());
+            return;
+        }
+        let reauth_code_value = reauth_code.get_untracked();
         busy.set(true);
         error.set(String::new());
         spawn_local(async move {
+            let token = match api::reauth(&confirm_password, &reauth_code_value).await {
+                Ok(token) => token,
+                Err(message) => {
+                    error.set(message);
+                    busy.set(false);
+                    return;
+                }
+            };
             let url = format!("/api/groups/{}/members/{}", encode(&group), encode(&member));
-            match api::send_json("POST", &url, &json!({})).await {
+            match api::send_json_with(
+                "POST",
+                &url,
+                &json!({}),
+                Some(("x-reauth-token", token.as_str())),
+            )
+            .await
+            {
                 Ok(response) if response.status == 204 => {
                     new_member.set(String::new());
                     notice.set(format!("Added {member}."));
@@ -1825,11 +2016,25 @@ fn GroupDetailDialog(
     let remove_name = name.clone();
     let remove_member = Callback::new(move |member: String| {
         let group = remove_name.clone();
+        let confirm_password = reauth_password.get_untracked();
+        if confirm_password.is_empty() {
+            error.set("Confirm your own account password".to_string());
+            return;
+        }
+        let reauth_code_value = reauth_code.get_untracked();
         busy.set(true);
         error.set(String::new());
         spawn_local(async move {
+            let token = match api::reauth(&confirm_password, &reauth_code_value).await {
+                Ok(token) => token,
+                Err(message) => {
+                    error.set(message);
+                    busy.set(false);
+                    return;
+                }
+            };
             let url = format!("/api/groups/{}/members/{}", encode(&group), encode(&member));
-            match api::delete(&url).await {
+            match api::delete_with(&url, Some(("x-reauth-token", token.as_str()))).await {
                 Ok(response) if response.status == 204 => {
                     notice.set(format!("Removed {member}."));
                     load.run(());
@@ -1855,10 +2060,29 @@ fn GroupDetailDialog(
                 return;
             }
             let group = group.clone();
+            let confirm_password = reauth_password.get_untracked();
+            if confirm_password.is_empty() {
+                error.set("Confirm your own account password".to_string());
+                return;
+            }
+            let reauth_code_value = reauth_code.get_untracked();
             busy.set(true);
             error.set(String::new());
             spawn_local(async move {
-                match api::delete(&format!("/api/groups/{}", encode(&group))).await {
+                let token = match api::reauth(&confirm_password, &reauth_code_value).await {
+                    Ok(token) => token,
+                    Err(message) => {
+                        error.set(message);
+                        busy.set(false);
+                        return;
+                    }
+                };
+                match api::delete_with(
+                    &format!("/api/groups/{}", encode(&group)),
+                    Some(("x-reauth-token", token.as_str())),
+                )
+                .await
+                {
                     Ok(response) if response.status == 204 => {
                         on_changed.run(());
                         on_close.run(());
@@ -1881,6 +2105,7 @@ fn GroupDetailDialog(
         <Modal title=format!("Group — {name}") on_close=on_close>
             <ErrorText message=error/>
             <Notice message=notice/>
+            <ReauthFields password=reauth_password code=reauth_code/>
             <p class="muted">
                 "Changing membership does not rotate MLS keys. Re-share affected encrypted folders so added members receive the current key and removed members stop receiving future epochs."
             </p>

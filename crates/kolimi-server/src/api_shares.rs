@@ -626,14 +626,14 @@ pub async fn public_meta(
     if share.kind == "link" && share.permission == "write" {
         // Never reveal what is already in the folder.
         body["entries"] = json!([]);
-        return Json(body).into_response();
+        return no_store(Json(body).into_response());
     }
     if node.is_dir()
         && let Ok(children) = state.vfs.list_node(share.owner_id, &node).await
     {
         body["entries"] = json!(entries_json(&children));
     }
-    Json(body).into_response()
+    no_store(Json(body).into_response())
 }
 
 /// `GET /public/{token}/list` and `/list/{*path}` — browse a link folder.
@@ -682,11 +682,13 @@ async fn public_list_inner(
         return api::bad_request("not a directory");
     }
     match state.vfs.list_node(share.owner_id, &node).await {
-        Ok(children) => Json(json!({
-            "path": format!("/{sub}"),
-            "entries": entries_json(&children),
-        }))
-        .into_response(),
+        Ok(children) => no_store(
+            Json(json!({
+                "path": format!("/{sub}"),
+                "entries": entries_json(&children),
+            }))
+            .into_response(),
+        ),
         Err(_) => api::internal_error(),
     }
 }
@@ -775,12 +777,12 @@ async fn public_download_inner(
     // Defense in depth: some clients ignore the attachment disposition.
     headers_out.insert(
         "content-security-policy",
-        HeaderValue::from_static("sandbox; default-src 'none'"),
+        HeaderValue::from_static("sandbox; default-src 'none'; form-action 'none'"),
     );
     if let Ok(value) = HeaderValue::from_str(&node.size.to_string()) {
         headers_out.insert(header::CONTENT_LENGTH, value);
     }
-    response
+    no_store(response)
 }
 
 /// `PUT /public/{token}/upload?name=` — one file into an upload-only link.
@@ -901,15 +903,17 @@ pub async fn public_upload(
                 json!({ "bytes": uploaded.size, "outcome": "ok" }),
             )
             .await;
-            (
-                StatusCode::CREATED,
-                Json(json!({
-                    "uploaded": true,
-                    "name": target_name,
-                    "size": uploaded.size,
-                })),
+            no_store(
+                (
+                    StatusCode::CREATED,
+                    Json(json!({
+                        "uploaded": true,
+                        "name": target_name,
+                        "size": uploaded.size,
+                    })),
+                )
+                    .into_response(),
             )
-                .into_response()
         }
         Err(error) => {
             let _ = state.db.release_upload(share.id, declared as i64).await;
@@ -1085,7 +1089,8 @@ async fn hash_password(password: &str) -> Result<String, Response> {
     let candidate = password.to_string();
     match tokio::task::spawn_blocking(move || password::hash_password(&candidate)).await {
         Ok(Ok(hash)) => Ok(hash),
-        _ => Err(api::internal_error()),
+        Ok(Err(error)) => Err(api::bad_request(&error.to_string())),
+        Err(_) => Err(api::internal_error()),
     }
 }
 
@@ -1143,6 +1148,15 @@ fn password_required() -> Response {
         Json(json!({ "error": "password required", "password_required": true })),
     )
         .into_response()
+}
+
+/// Anonymous link responses carry a capability in the URL; never let a
+/// browser or shared proxy cache the body.
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// Drops wrapped E2EE keys for members of a revoked group share, but only for

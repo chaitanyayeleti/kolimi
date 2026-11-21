@@ -1714,15 +1714,24 @@ async fn admin_api_creates_users_and_respects_permissions() {
     let server = setup().await;
     let auth = basic(USER, PASS);
 
-    let create = Request::builder()
-        .method("POST")
-        .uri("/api/users")
-        .header(header::AUTHORIZATION, &auth)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            r#"{"username":"bob","password":"bob password 1"}"#,
-        ))
-        .unwrap();
+    // A session/Basic proof alone cannot create an account.
+    let unproven = json_request(
+        "POST",
+        "/api/users",
+        Some(&auth),
+        r#"{"username":"dave","password":"dave password 1"}"#,
+    );
+    let (status, _, _) = send(&server.app, unproven).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let proof = reauth_token(&server.app, &auth, PASS).await;
+    let create = json_request_with_reauth(
+        "POST",
+        "/api/users",
+        &auth,
+        &proof,
+        r#"{"username":"bob","password":"bob password 1"}"#,
+    );
     let (status, _, _) = send(&server.app, create).await;
     assert_eq!(status, StatusCode::CREATED);
 
@@ -1746,12 +1755,9 @@ async fn admin_users_list_sorts_filters_and_warns_on_quota() {
     let auth = basic(USER, PASS);
 
     for name in ["bob", "carol"] {
-        let create = json_request(
-            "POST",
-            "/api/users",
-            Some(&auth),
-            &format!(r#"{{"username":"{name}","password":"{name} password 1"}}"#),
-        );
+        let proof = reauth_token(&server.app, &auth, PASS).await;
+        let body = format!(r#"{{"username":"{name}","password":"{name} password 1"}}"#);
+        let create = json_request_with_reauth("POST", "/api/users", &auth, &proof, &body);
         let (status, _, _) = send(&server.app, create).await;
         assert_eq!(status, StatusCode::CREATED);
         let user = server.state.db.find_user(name).await.unwrap().unwrap();
