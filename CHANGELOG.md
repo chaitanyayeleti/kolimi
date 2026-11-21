@@ -4,7 +4,7 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.1] - 2026-11-21
 
 ### Added
 - Audit checkpoint signing and anchoring (RFC 0014): `audit keygen`,
@@ -21,6 +21,7 @@ follow [Semantic Versioning](https://semver.org/).
   records contain no paths, users, actions, or audit details.
 
 ### Changed
+- Server-only patch release; the desktop app remains 0.7.0.
 - The audit janitor also seals when the oldest unsealed entry is older than
   `KOLIMI_AUDIT_SEAL_AGE_SECS` (default 24 hours), bounding the window that
   signatures and anchors do not cover.

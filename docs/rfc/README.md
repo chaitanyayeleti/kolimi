@@ -4,9 +4,9 @@ Design specs live here. An RFC explains the problem, protocol, data model
 and non-goals; implementation status is tracked separately so a design can
 be accepted before every client supports it.
 
-Last full verification: **0.7.0** (2026-11-20).
+Last full verification: **0.7.1** (2026-11-21).
 
-| RFC | Design | Implementation (0.7.0) | Notes |
+| RFC | Design | Implementation (0.7.1) | Notes |
 | --- | --- | --- | --- |
 | [0001 — Storage engine](0001-storage-engine.md) | implemented | shipped | FastCDC + BLAKE3 CAS, manifests, GC |
 | [0002 — Sync protocol](0002-sync-protocol.md) | implemented | shipped | Server + `kolimi-sync`/desktop; mobile uses the FFI core |
@@ -21,7 +21,7 @@ Last full verification: **0.7.0** (2026-11-20).
 | [0011 — Client unlock](0011-e2ee-client-unlock.md) | implemented | shipped (desktop) | `SyncError::Locked`, tray state, keychain unlock |
 | [0012 — MLS groups](0012-mls-groups.md) | implemented | shipped; **audit pending** | Node-scoped groups, epochs, keyring, write shares, device revoke |
 | [0013 — Sealed audit checkpoints](0013-audit-checkpoints.md) | implemented | shipped (0.7.0) | Merkle-rooted checkpoint blocks; prune by checkpoint; signing/external anchors later |
-| [0014 — Checkpoint signing and anchoring](0014-audit-checkpoint-signing.md) | implemented | shipped (unreleased) | Ed25519 checkpoint signatures; optional append-only journal and HTTPS anchor sink |
+| [0014 — Checkpoint signing and anchoring](0014-audit-checkpoint-signing.md) | implemented | shipped (0.7.1) | Ed25519 checkpoint signatures; optional append-only journal and HTTPS anchor sink |
 
 ## Status conventions
 

@@ -1,12 +1,13 @@
 # RFC 0014 — Audit checkpoint signing and external anchoring
 
-- **Status:** implemented (unreleased)
+- **Status:** implemented (0.7.1)
 - **Date:** 2026-11-21
 - **Depends on:** RFC 0013 (sealed audit checkpoints), the checkpoint header
   chain and Merkle roots from migration `0037`
 - **Implementation:** migration `0038_audit_checkpoint_signing.sql`; signer,
   signature verification, anchor outbox, journal/HTTP sinks, CLI, and
   janitor age/seal and drain
+- **Release:** server-only 0.7.1 (desktop remains 0.7.0)
 
 ## Summary
 
@@ -492,7 +493,7 @@ more than a day.
 - Old export bundles remain valid; old binaries ignore the optional
   `signatures` field.
 - No request-path cost: signing and anchoring run in the janitor or CLI.
-- A 0.7.0 database opened by a 0.8.0 binary gets the new tables; a 0.7.0
+- A 0.7.0 database opened by a 0.7.1 binary gets the new tables; a 0.7.0
   binary refuses the newer schema as usual. Back up before upgrading.
 
 ## Tests
