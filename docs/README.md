@@ -12,7 +12,7 @@ Current-facing guides are [install.md](install.md), [how-to.md](how-to.md),
 plans, and audit files are design or history: they may describe deferred
 work, a frozen review surface, or an earlier implementation.
 
-Last full verification: **0.7.1** (2026-11-21); desktop client verified
+Last full verification: **0.7.2** (2026-11-22); desktop client verified
 against **0.7.0**.
 
 ## Start here

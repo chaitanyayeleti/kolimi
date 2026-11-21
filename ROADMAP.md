@@ -1,6 +1,6 @@
 # Kolimi Roadmap
 
-Current release: **0.7.1** (2026-11-21). This file is the forward-looking
+Current release: **0.7.2** (2026-11-22). This file is the forward-looking
 backlog and the honest list of limitations. Shipped history lives in
 [CHANGELOG.md](CHANGELOG.md); design details live in [docs/rfc/](docs/rfc/).
 
@@ -17,7 +17,7 @@ backlog and the honest list of limitations. Shipped history lives in
 5. **No speculative platform work.** A plugin host or extra backend is
    added only with a concrete use case.
 
-## Current state (0.7.1)
+## Current state (0.7.2)
 
 | Area | Status |
 | --- | --- |
@@ -36,6 +36,13 @@ ship-blocker for calling group E2EE production-grade.
 
 ## Recently completed
 
+- **0.7.2 — security hardening**: a server-only patch. Admin user/invite/group
+  mutations require fresh re-authentication; TOTP accounts require both the
+  password and a current code for re-auth; enabling TOTP or adding a passkey
+  revokes other sessions; app passwords default to least privilege and a
+  90-day lifetime; passwords are checked against a common-password blocklist;
+  public-link responses are `no-store` and the app sends stricter frame/COOP/
+  CORP/CSP headers. Desktop remains 0.7.0. See the [CHANGELOG](CHANGELOG.md).
 - **0.7.1 — signed audit checkpoints and external anchoring**: a server-only
   patch release. Ed25519 checkpoint signatures with a key outside the data
   directory (`audit keygen`, `audit sign`, `audit verify --trusted-key`), an
@@ -97,7 +104,7 @@ ship-blocker for calling group E2EE production-grade.
 
 The review package is [`docs/audit/mls-delta.md`](docs/audit/mls-delta.md)
 and is intentionally frozen at the 0.4.3 surface even though the server is
-now 0.7.1. The 89 openmls `cargo-vet` exemptions (724 total) are temporary
+now 0.7.2. The 89 openmls `cargo-vet` exemptions (724 total) are temporary
 and are not audits. Engage an independent reviewer, land only fixes during
 the review, then replace the exemptions with real audit entries. Do not
 describe MLS as audited before this completes.
@@ -123,7 +130,7 @@ describe MLS as audited before this completes.
   pruning (7-day grace, 30-day report freshness); review the thresholds
   with the external auditor.
 - **Deployment validation**: upgrade from 0.4.7 (and older 0.3.x data) to
-  0.7.1 with real data, a restore drill in CI, and a post-upgrade `verify`
+  0.7.2 with real data, a restore drill in CI, and a post-upgrade `verify`
   run.
 
 ### 3. Clients
