@@ -7,6 +7,17 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `GET /api/sync/head` and `kind`/`encrypted` fields on the change feed let
+  `kolimi-sync` apply file content updates without a full remote tree walk.
+  Directory creation/deletion, moves, and other structural changes still
+  trigger a full reconciliation. The client also caches server paths so an
+  encrypted tree no longer needs a full path-map walk on every push.
+- `kolimi-server backup --incremental` skips blobs already present in the
+  destination and hard-links new ones on the same filesystem (falling back to
+  copy), keeping repeated backups cheap.
+- Manifest blobs now use the same two-level fanout as chunks
+  (`manifests/aa/bb/<content-id>`), with reads falling back to the old flat
+  layout.
 - `GET /api/browse` now supports `limit` (default 1,000, max 5,000) and a
   keyset `cursor`, returning `has_more` and `next_cursor`. The file list has
   a **Load more** action instead of rendering an unbounded directory in one

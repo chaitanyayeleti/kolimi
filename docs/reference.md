@@ -76,6 +76,8 @@ shares.
 
 ```sh
 kolimi-server backup --data DIR --to DIR   # online SQLite snapshot + blobs
+kolimi-server backup --data DIR --to DIR --incremental
+                                           # skip existing blobs; hard-link new ones
 kolimi-server verify --data DIR            # full BLAKE3/chunk verification
 kolimi-server audit list [--limit N] [--before ID]
 kolimi-server audit verify                 # exit 1 on a broken hash chain
@@ -85,6 +87,13 @@ kolimi-server audit prune --before ID --to audit.jsonl
 
 `backup` is safe while the server is running. `verify` is the full
 on-demand check; the janitor also scrubs incrementally in the background.
+
+`--incremental` keeps an existing backup current without copying unchanged
+blobs. New blobs are hard-linked when the destination is on the same
+filesystem (blob files are immutable after commit) and copied otherwise.
+The SQLite snapshot is still rewritten each run. The backup is cumulative:
+blobs deleted from the source are left in the destination for retention.
+Restore format is identical to a full backup.
 
 `audit prune` writes the selected prefix to a new JSONL file (it refuses to
 overwrite an existing path), fsyncs it, then deletes those rows and records
@@ -281,8 +290,19 @@ Notes:
 `limit` defaults to 1,000 and is capped at 5,000. `cursor` is the last name
 from the previous page; the response carries `has_more` and `next_cursor`.
 Names are unique within a parent, so pages do not duplicate entries; an
-insert before the cursor appears on a refresh. `/Shared with me` itself and the mounts on the account root are small
-fixed lists: mounts appear on the first root page only.
+insert before the cursor appears on a refresh. `/Shared with me` itself and
+the mounts on the account root are small fixed lists: mounts appear on the
+first root page only.
+
+### Incremental sync
+
+`GET /api/sync/changes?since=&limit=` returns file changes with `kind` and
+`encrypted` alongside the existing `op`, `content_id`, and path fields.
+`GET /api/sync/head` returns the current `change_seq`. Clients snapshot the
+tree, record the head, and replay changes from there so a write during the
+snapshot is not lost. File content updates are applied incrementally;
+structural changes (directories, moves, deletes) trigger a full tree
+reconciliation.
 
 ### WebDAV / CalDAV / CardDAV
 
@@ -308,7 +328,7 @@ fixed lists: mounts appear on the first root page only.
 | Passkeys / TOTP | `/api/passkeys*`, `/api/passkeys/login/*`, `/api/reauth/passkey/*`, `/api/totp*` |
 | Browse / files | `GET /api/browse`, `GET /api/files/info`, `POST /api/files/move`, `POST /api/files/encrypt`, `GET /api/search`, `GET /api/preview` |
 | Trash / versions | `/api/trash*`, `/api/versions*` |
-| Delta sync | `/api/sync/changes`, `/api/sync/tree`, `/api/sync/events`, `/api/sync/shared-tree`, `/api/files/manifest`, `/api/manifests/{id}`, `PUT /api/files`, `/api/chunks*` |
+| Delta sync | `/api/sync/changes`, `/api/sync/head`, `/api/sync/tree`, `/api/sync/events`, `/api/sync/shared-tree`, `/api/files/manifest`, `/api/manifests/{id}`, `PUT /api/files`, `/api/chunks*` |
 | Shares | `/api/shares`, `/api/shares/received`, `/api/shares/owned`, `/api/shares/{id}`, `/api/shareable`, `/api/groups/{name}/members` |
 | Groups / audit (admin) | `GET|POST /api/groups`, `DELETE /api/groups/{name}`, `POST|DELETE /api/groups/{name}/members/{username}`, `GET /api/audit`, `GET /api/audit/verify` |
 | Public links | `GET /public/{token}`, `/unlock`, `/list*`, `/download*`, `PUT /upload?name=` (upload-only links) |
@@ -344,7 +364,7 @@ and [MLS](rfc/0012-mls-groups.md) specs for wire details.
 $KOLIMI_DATA/
   kolimi.db                  SQLite (WAL) database
   blobs/users/<id>/chunks/   content-addressed ciphertext/plaintext chunks
-  blobs/users/<id>/manifests/ manifests
+  blobs/users/<id>/manifests/aa/bb/<content-id> manifests
   blobs/tmp/                 atomic-write scratch space
   search/                    tantivy index
   tmp/                       server scratch space

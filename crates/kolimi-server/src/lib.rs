@@ -262,6 +262,7 @@ pub fn build_app(state: AppState) -> Router {
             post(api_passkey::reauth_finish),
         )
         .route("/api/sync/changes", get(api_sync::changes))
+        .route("/api/sync/head", get(api_sync::head))
         .route("/api/sync/tree", get(api_sync::tree))
         .route("/api/sync/events", get(api_sync::events))
         .route("/api/manifests/{content_id}", get(api_sync::manifest_by_id))

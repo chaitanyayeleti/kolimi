@@ -48,6 +48,9 @@ enum Command {
         /// Destination directory (created if needed).
         #[arg(long)]
         to: PathBuf,
+        /// Skip blobs already present; hard-link new ones when possible.
+        #[arg(long)]
+        incremental: bool,
     },
     /// Verify the integrity of every stored file and version.
     Verify,
@@ -261,7 +264,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(Command::Serve(args)) => serve(args, data).await,
         Some(Command::User { command }) => user_command(command, data).await,
         Some(Command::Group { command }) => group_command(command, data).await,
-        Some(Command::Backup { to }) => backup(data, to).await,
+        Some(Command::Backup { to, incremental }) => backup(data, to, incremental).await,
         Some(Command::Verify) => verify(data).await,
         Some(Command::Audit { command }) => audit_command(command, data).await,
         Some(Command::PreviewWorker { kind, input, max }) => {
@@ -682,7 +685,7 @@ async fn group_command(command: GroupCommand, data: PathBuf) -> Result<(), Box<d
     Ok(())
 }
 
-async fn backup(data: PathBuf, to: PathBuf) -> Result<(), Box<dyn Error>> {
+async fn backup(data: PathBuf, to: PathBuf, incremental: bool) -> Result<(), Box<dyn Error>> {
     tokio::fs::create_dir_all(&to).await?;
     let db = kolimi_db::Db::connect(&data.join("kolimi.db")).await?;
     let db_target = to.join("kolimi.db");
@@ -692,11 +695,23 @@ async fn backup(data: PathBuf, to: PathBuf) -> Result<(), Box<dyn Error>> {
     db.backup_to(&db_target).await?;
 
     let store = kolimi_store::BlobStore::open(data.join("blobs")).await?;
-    let blobs = store.copy_tree_to(&to.join("blobs")).await?;
-    println!(
-        "backup complete: database snapshot + {blobs} blobs written to {}",
-        to.display()
-    );
+    if incremental {
+        let stats = store.copy_tree_incremental_to(&to.join("blobs")).await?;
+        println!(
+            "incremental backup complete: database snapshot, {} linked + {} copied blobs, {} already present, {} bytes copied, written to {}",
+            stats.linked,
+            stats.copied,
+            stats.skipped,
+            stats.bytes_copied,
+            to.display()
+        );
+    } else {
+        let blobs = store.copy_tree_to(&to.join("blobs")).await?;
+        println!(
+            "backup complete: database snapshot + {blobs} blobs written to {}",
+            to.display()
+        );
+    }
     Ok(())
 }
 

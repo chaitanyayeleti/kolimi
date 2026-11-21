@@ -280,10 +280,16 @@ async fn change_feed_reports_lifecycle() {
     let changes = feed["changes"].as_array().unwrap();
     let ops: Vec<&str> = changes.iter().map(|c| c["op"].as_str().unwrap()).collect();
     assert_eq!(ops, vec!["upsert", "move", "delete"]);
+    assert_eq!(changes[0]["kind"], "file");
+    assert_eq!(changes[0]["encrypted"], false);
     assert_eq!(changes[1]["from_path"].as_str().unwrap(), "/a.txt");
     assert_eq!(changes[1]["path"].as_str().unwrap(), "/b.txt");
+    assert!(changes[2]["kind"].is_null());
 
     let next_seq = feed["next_seq"].as_i64().unwrap();
+    let (status, _, body) = send(&server.app, request("GET", "/api/sync/head", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json(&body)["change_seq"], next_seq);
     let (_, _, body) = send(
         &server.app,
         request("GET", &format!("/api/sync/changes?since={next_seq}"), None),

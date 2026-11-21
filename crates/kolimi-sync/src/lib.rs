@@ -128,7 +128,7 @@ impl E2eeOptions {
 /// encrypted. `encrypted_roots` from the local config is only a fallback for
 /// servers that predate the flag (and for the CLI's `--e2ee-root`), so an
 /// account can mix encrypted and plaintext folders with no per-pair setting.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct EncryptPolicy {
     /// Relative folder prefixes reported by the server, e.g. `Vault`.
     prefixes: Vec<String>,
@@ -249,6 +249,9 @@ struct State {
     /// Local-only conflict copies we created (relative paths); never pushed.
     #[serde(default)]
     conflicts: BTreeSet<String>,
+    /// Last applied change-feed sequence for the owned tree.
+    #[serde(default)]
+    change_seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +268,10 @@ struct StateFile {
     /// push never uploads or deletes them).
     #[serde(default)]
     shared: bool,
+    /// Server path (including encrypted name components) last seen for this
+    /// file. Avoids a full tree walk on every push after the first sync.
+    #[serde(default)]
+    server_path: Option<String>,
 }
 
 impl State {
@@ -381,17 +388,82 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
             .unwrap_or_default(),
     };
     let mut report = SyncReport::default();
-    pull(
-        &http,
-        config,
-        &root,
-        e2ee.as_ref(),
-        mls.as_mut(),
-        &mut policy,
-        &mut state,
-        &mut report,
-    )
-    .await?;
+    // A server restored from an older backup can rewind the feed. A client
+    // whose sequence is ahead must fall back to a full snapshot.
+    let head = change_head(&http).await?;
+    let mut full = !matches!((state.change_seq, head), (Some(seq), Some(head)) if head >= seq);
+    if !full {
+        if !apply_incremental_changes(
+            &http,
+            config,
+            &root,
+            e2ee.as_ref(),
+            mls.as_mut(),
+            &policy,
+            &mut state,
+            &mut report,
+        )
+        .await?
+        {
+            full = true;
+        } else {
+            // Received shares are still reconciled from their snapshot:
+            // share membership changes do not appear in the owner's change
+            // feed.
+            let shared = shared_remote_files(&http, &root, e2ee.as_ref()).await?;
+            let failed_before = report.failed;
+            pull(
+                &http,
+                config,
+                &shared,
+                &[],
+                false,
+                false,
+                e2ee.as_ref(),
+                mls.as_mut(),
+                &mut policy,
+                &mut state,
+                &mut report,
+            )
+            .await?;
+            if report.failed == failed_before {
+                let stale: Vec<String> = state
+                    .files
+                    .iter()
+                    .filter(|(rel, file)| file.shared && !shared.contains_key(*rel))
+                    .map(|(rel, _)| rel.clone())
+                    .collect();
+                for rel in stale {
+                    remove_local_file(config, &mut state, &mut report, &rel)?;
+                }
+            }
+        }
+    }
+    if full {
+        // Capture the feed head before the snapshot. Any change committed
+        // while the tree is walked is replayed on the next incremental pass.
+        let (remote, encrypted_dirs) = remote_files(&http, &root, e2ee.as_ref()).await?;
+        let failed_before = report.failed;
+        pull(
+            &http,
+            config,
+            &remote,
+            &encrypted_dirs,
+            true,
+            true,
+            e2ee.as_ref(),
+            mls.as_mut(),
+            &mut policy,
+            &mut state,
+            &mut report,
+        )
+        .await?;
+        if report.failed == failed_before {
+            state.change_seq = head;
+        }
+        // A per-file failure leaves the old sequence in place so the next
+        // pass retries the change instead of silently skipping it.
+    }
     // Persist pull progress before push: a push failure must not lose the
     // pulled state and cause false conflicts on the next pass.
     let _ = state.save(&config.local_dir);
@@ -407,11 +479,16 @@ pub async fn sync_once_rooted(config: &SyncConfig, remote: &str) -> Result<SyncR
     )
     .await?;
     if report.conflicts > 0 {
-        // Fetch the winning server versions for the conflicted paths.
+        // Fetch the winning server versions for the conflicted paths. This
+        // is rare; a full pull is simpler than tracking individual paths.
+        let (remote, encrypted_dirs) = remote_files(&http, &root, e2ee.as_ref()).await?;
         pull(
             &http,
             config,
-            &root,
+            &remote,
+            &encrypted_dirs,
+            false,
+            false,
             e2ee.as_ref(),
             mls.as_mut(),
             &mut policy,
@@ -2828,6 +2905,18 @@ async fn remote_files(
     }
 
     // Files shared with the user (read-only mirror under `Shared with me/`).
+    let shared = shared_remote_files(http, root, e2ee).await?;
+    remote.extend(shared);
+    Ok((remote, encrypted_dirs))
+}
+
+/// Fetches the received-share mirror under `/Shared with me/`.
+async fn shared_remote_files(
+    http: &Http,
+    root: &str,
+    e2ee: Option<&E2ee>,
+) -> Result<BTreeMap<String, RemoteFile>, SyncError> {
+    let mut remote = BTreeMap::new();
     let (status, body) = http.get_json("/api/sync/shared-tree").await?;
     if status != 200 {
         return Err(SyncError::Server {
@@ -2862,26 +2951,28 @@ async fn remote_files(
             },
         );
     }
-    Ok((remote, encrypted_dirs))
+    Ok(remote)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn pull(
     http: &Http,
     config: &SyncConfig,
-    root: &str,
+    remote: &BTreeMap<String, RemoteFile>,
+    encrypted_dirs: &[String],
+    replace_policy: bool,
+    prune_stale: bool,
     e2ee: Option<&E2ee>,
     mut mls: Option<&mut crate::mls::MlsClient>,
     policy: &mut EncryptPolicy,
     state: &mut State,
     report: &mut SyncReport,
 ) -> Result<(), SyncError> {
-    let (remote, encrypted_dirs) = remote_files(http, root, e2ee).await?;
-    if !encrypted_dirs.is_empty() {
-        policy.prefixes = encrypted_dirs;
+    if replace_policy {
+        policy.prefixes = encrypted_dirs.to_vec();
     }
 
-    for (rel, file) in &remote {
+    for (rel, file) in remote {
         // One bad file must not abort the whole pass: capture a per-file error
         // and keep going. State is only mutated on success.
         let outcome: Result<(), SyncError> = async {
@@ -3074,6 +3165,7 @@ async fn pull(
                     mtime_ns: mtime_ns(&local)?,
                     deleted: false,
                     shared: file.shared,
+                    server_path: Some(file.path.clone()),
                 },
             );
             report.pulled += 1;
@@ -3086,40 +3178,166 @@ async fn pull(
         }
     }
 
-    // Remote deletions.
-    let stale: Vec<String> = state
-        .files
-        .keys()
-        .filter(|rel| !remote.contains_key(*rel))
-        .cloned()
-        .collect();
-    for rel in stale {
-        let local = config.local_dir.join(&rel);
-        if local.exists() || local.symlink_metadata().is_ok() {
-            let locally_modified = if let Some(known) = state.files.get(&rel) {
-                match std::fs::metadata(&local) {
-                    Ok(metadata) => {
-                        metadata.len() != known.size
-                            || mtime_ns(&local).unwrap_or(0) != known.mtime_ns
-                    }
-                    Err(_) => false,
-                }
-            } else {
-                false
-            };
-            if locally_modified {
-                let conflict = conflict_path(&local);
-                std::fs::rename(&local, &conflict)?;
-                record_conflict(state, &config.local_dir, &conflict);
-            } else {
-                std::fs::remove_file(&local)?;
-            }
+    // Remote deletions (full reconciliation only).
+    if prune_stale {
+        let stale: Vec<String> = state
+            .files
+            .keys()
+            .filter(|rel| !remote.contains_key(*rel))
+            .cloned()
+            .collect();
+        for rel in stale {
+            remove_local_file(config, state, report, &rel)?;
         }
-        state.files.remove(&rel);
-        state.keys.remove(&rel);
-        report.removed_local += 1;
     }
     Ok(())
+}
+
+/// Removes one locally synced file after the server deleted it. A local edit
+/// is preserved as a conflict copy instead.
+fn remove_local_file(
+    config: &SyncConfig,
+    state: &mut State,
+    report: &mut SyncReport,
+    rel: &str,
+) -> Result<(), SyncError> {
+    let local = config.local_dir.join(rel);
+    if local.exists() || local.symlink_metadata().is_ok() {
+        let locally_modified = if let Some(known) = state.files.get(rel) {
+            match std::fs::metadata(&local) {
+                Ok(metadata) => {
+                    metadata.len() != known.size || mtime_ns(&local).unwrap_or(0) != known.mtime_ns
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        if locally_modified {
+            let conflict = conflict_path(&local);
+            std::fs::rename(&local, &conflict)?;
+            record_conflict(state, &config.local_dir, &conflict);
+        } else {
+            std::fs::remove_file(&local)?;
+        }
+    }
+    state.files.remove(rel);
+    state.keys.remove(rel);
+    report.removed_local += 1;
+    Ok(())
+}
+
+/// Applies file upserts from the change feed. Returns `false` when a change
+/// type outside this fast path (directory change, move, delete, old server)
+/// requires a full tree reconciliation.
+#[allow(clippy::too_many_arguments)]
+async fn apply_incremental_changes(
+    http: &Http,
+    config: &SyncConfig,
+    root: &str,
+    e2ee: Option<&E2ee>,
+    mls: Option<&mut crate::mls::MlsClient>,
+    policy: &EncryptPolicy,
+    state: &mut State,
+    report: &mut SyncReport,
+) -> Result<bool, SyncError> {
+    let Some(since) = state.change_seq else {
+        return Ok(false);
+    };
+    let mut after = since;
+    let mut changed = BTreeMap::new();
+    loop {
+        let path = format!("/api/sync/changes?since={after}&limit=1000");
+        let (status, body) = http.get_json(&path).await?;
+        if status == 404 {
+            return Ok(false);
+        }
+        if status != 200 {
+            return Err(SyncError::Server { status, path });
+        }
+        let Some(rows) = body["changes"].as_array() else {
+            return Ok(false);
+        };
+        for change in rows {
+            // Only file content upserts are safe to apply without rebuilding
+            // the full namespace. Structural changes fall back to a full
+            // reconciliation.
+            if change["op"].as_str() != Some("upsert") || change["kind"].as_str() != Some("file") {
+                return Ok(false);
+            }
+            let (Some(server_path), Some(content_id)) =
+                (change["path"].as_str(), change["content_id"].as_str())
+            else {
+                return Ok(false);
+            };
+            let Some(rel) = local_rel_from_server(server_path, root, e2ee) else {
+                continue;
+            };
+            changed.insert(
+                rel,
+                RemoteFile {
+                    path: server_path.to_string(),
+                    content_id: content_id.to_string(),
+                    encrypted: change["encrypted"].as_bool().unwrap_or(true),
+                    shared: false,
+                },
+            );
+        }
+        let next = body["next_seq"].as_i64().unwrap_or(after);
+        let has_more = body["has_more"].as_bool().unwrap_or(false);
+        if has_more && next <= after {
+            return Ok(false);
+        }
+        after = next;
+        if !has_more {
+            break;
+        }
+    }
+
+    if !changed.is_empty() {
+        let failed_before = report.failed;
+        pull(
+            http,
+            config,
+            &changed,
+            &[],
+            false,
+            false,
+            e2ee,
+            mls,
+            &mut EncryptPolicy {
+                prefixes: policy.prefixes.clone(),
+                fallback: policy.fallback.clone(),
+            },
+            state,
+            report,
+        )
+        .await?;
+        if report.failed > failed_before {
+            // Keep the old sequence so the failed file (and anything after
+            // it) is retried next pass. Successful files are idempotent.
+            state.change_seq = Some(since);
+            return Ok(true);
+        }
+    }
+    state.change_seq = Some(after);
+    Ok(true)
+}
+
+/// The change-feed head, or `None` on a server predating `/api/sync/head`.
+async fn change_head(http: &Http) -> Result<Option<i64>, SyncError> {
+    let path = "/api/sync/head";
+    let (status, body) = http.get_json(path).await?;
+    if status == 404 {
+        return Ok(None);
+    }
+    if status != 200 {
+        return Err(SyncError::Server {
+            status,
+            path: path.to_string(),
+        });
+    }
+    Ok(body["change_seq"].as_i64())
 }
 
 async fn load_file_key(
@@ -3332,11 +3550,34 @@ async fn push(
 ) -> Result<(), SyncError> {
     // Existing server paths keyed by local relative path. This keeps a
     // legacy plaintext-named file (created before names were encrypted) in
-    // place instead of creating a second, encoded copy beside it.
-    let stored_paths = match e2ee {
-        Some(e2ee) => server_path_map(http, root, Some(e2ee)).await?,
-        None => std::collections::HashMap::new(),
-    };
+    // place instead of creating a second, encoded copy beside it. State
+    // records the path after the first sync; only an old state file needs
+    // the one-time full tree map.
+    let mut stored_paths: std::collections::HashMap<String, String> = state
+        .files
+        .iter()
+        .filter_map(|(rel, file)| {
+            file.server_path
+                .as_ref()
+                .map(|path| (rel.clone(), path.clone()))
+        })
+        .collect();
+    if e2ee.is_some()
+        && state
+            .files
+            .values()
+            .any(|file| !file.shared && file.server_path.is_none())
+    {
+        stored_paths.extend(server_path_map(http, root, e2ee).await?);
+        // Backfill the cache for unchanged files so this is a one-time walk.
+        for (rel, file) in &mut state.files {
+            if file.server_path.is_none()
+                && let Some(path) = stored_paths.get(rel)
+            {
+                file.server_path = Some(path.clone());
+            }
+        }
+    }
     let mut locals: Vec<String> = Vec::new();
     // Drop conflict-copy records whose file no longer exists, then collect.
     state
@@ -3612,6 +3853,7 @@ async fn push(
                         mtime_ns: mtime,
                         deleted: false,
                         shared: shared.is_some(),
+                        server_path: Some(remote_path.clone()),
                     },
                 );
                 report.pushed += 1;

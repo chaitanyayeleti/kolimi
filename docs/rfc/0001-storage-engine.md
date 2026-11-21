@@ -74,8 +74,8 @@ JSON on the wire, versioned by a `version` byte:
 
 ```
 data/
-  chunks/aa/bb/<hash>        # content-addressed blobs, one file per chunk
-  manifests/<content-id>     # manifest blobs
+  chunks/aa/bb/<hash>        # content-addressed chunk blobs
+  manifests/aa/bb/<content-id> # manifest blobs
   index.db                   # SQLite: paths -> manifest ids, refs, metadata
 ```
 

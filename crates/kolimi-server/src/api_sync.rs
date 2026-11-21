@@ -98,24 +98,53 @@ pub async fn changes(
     rows.truncate(limit as usize);
     let next_seq = rows.last().map(|row| row.seq).unwrap_or(since);
 
-    let changes: Vec<Value> = rows
-        .iter()
-        .map(|row| {
-            json!({
-                "seq": row.seq,
-                "path": row.path,
-                "from_path": row.from_path,
-                "op": row.op,
-                "content_id": row.content_id.as_deref().and_then(bytes_to_hash_hex),
-                "size": row.size,
-                "modified_at": row.modified_at,
-            })
-        })
-        .collect();
+    let encrypted_ids: std::collections::HashSet<i64> =
+        match state.db.encrypted_node_ids(user.user_id).await {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(_) => return internal_error(),
+        };
+    let mut changes = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let node = state.vfs.resolve(user.user_id, &row.path).await.ok();
+        let kind = node
+            .as_ref()
+            .map(|node| if node.is_dir() { "dir" } else { "file" })
+            .or_else(|| row.content_id.as_ref().map(|_| "file"));
+        let encrypted = node
+            .as_ref()
+            .map(|node| encrypted_ids.contains(&node.id) || node.encrypted)
+            .unwrap_or(false);
+        changes.push(json!({
+            "seq": row.seq,
+            "path": row.path,
+            "from_path": row.from_path,
+            "op": row.op,
+            "kind": kind,
+            "encrypted": encrypted,
+            "content_id": row.content_id.as_deref().and_then(bytes_to_hash_hex),
+            "size": row.size,
+            "modified_at": row.modified_at,
+        }));
+    }
     json_response(
         StatusCode::OK,
         json!({ "changes": changes, "next_seq": next_seq, "has_more": has_more }),
     )
+}
+
+/// `GET /api/sync/head` — current change-feed sequence for the caller.
+///
+/// A sync client snapshots the tree, records this value, then applies
+/// `/api/sync/changes?since=` from it, so a change during the snapshot is
+/// not lost.
+pub async fn head(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    match state.db.latest_change_seq(user.user_id).await {
+        Ok(seq) => Json(json!({ "change_seq": seq })).into_response(),
+        Err(_) => internal_error(),
+    }
 }
 
 fn bytes_to_hash_hex(bytes: &[u8]) -> Option<String> {

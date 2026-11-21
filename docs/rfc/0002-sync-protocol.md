@@ -39,8 +39,14 @@ WebDAV compatibility is defined by the litmus test suite plus real clients
   monotonic `seq`, `path`, `op` (upsert/delete/move), `content_id`, `size`,
   `mtime`, and `etag`.
 - `GET /api/sync/changes?since={seq}&limit=N` returns a page of events plus
-  `next_seq`. Clients resume from their stored `seq` forever; they never
-  enumerate the whole tree again after the first scan.
+  `next_seq`, including the current `kind` and `encrypted` flags. Clients
+  resume from their stored `seq` forever; they never enumerate the whole tree
+  again after the first scan. File content upserts are applied from the feed.
+  Structural changes (directories, moves, deletes) fall back to a full tree
+  reconciliation in the first implementation; the fast path can expand later.
+- `GET /api/sync/head` returns the current `change_seq`. A client records it
+  before a tree snapshot, then replays changes from that point, so a write
+  during the snapshot is not lost.
 - Tombstones are kept until all known devices have acknowledged them past the
   retention horizon (device table tracks last-seen seq), then compacted.
 - Moves and renames are first-class events; clients apply them without

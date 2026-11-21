@@ -8,9 +8,12 @@
 //! Layout:
 //! ```text
 //! users/<id>/chunks/aa/bb/<hash>     chunk blobs
-//! users/<id>/manifests/<content-id>  manifest JSON
+//! users/<id>/manifests/aa/bb/<hash>  manifest JSON
 //! tmp/                               in-flight uploads
 //! ```
+//!
+//! Manifests written before the fanout stay readable at
+//! `manifests/<hash>`; new writes use the fanout path.
 
 use std::{
     collections::HashSet,
@@ -63,6 +66,19 @@ pub enum StoreError {
     /// An internal worker failed.
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+/// Result of a backup copy.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BlobCopyStats {
+    /// Files hard-linked into the destination.
+    pub linked: u64,
+    /// Files copied because hard-linking was unavailable.
+    pub copied: u64,
+    /// Files already present in the destination.
+    pub skipped: u64,
+    /// Bytes copied (hard links do not count).
+    pub bytes_copied: u64,
 }
 
 /// Result of a garbage collection sweep.
@@ -179,6 +195,18 @@ impl BlobStore {
     }
 
     fn manifest_path(&self, user_id: i64, content_id: &Hash) -> PathBuf {
+        let hex = content_id.to_hex();
+        self.root
+            .join("users")
+            .join(user_id.to_string())
+            .join("manifests")
+            .join(&hex[..2])
+            .join(&hex[2..4])
+            .join(hex)
+    }
+
+    /// Pre-fanout layout, kept readable for existing stores.
+    fn legacy_manifest_path(&self, user_id: i64, content_id: &Hash) -> PathBuf {
         self.root
             .join("users")
             .join(user_id.to_string())
@@ -358,7 +386,13 @@ impl BlobStore {
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(StoreError::NotFound(*content_id));
+                match tokio::fs::read(self.legacy_manifest_path(user_id, content_id)).await {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        return Err(StoreError::NotFound(*content_id));
+                    }
+                    Err(e) => return Err(StoreError::Io(e)),
+                }
             }
             Err(e) => return Err(StoreError::Io(e)),
         };
@@ -612,6 +646,16 @@ impl BlobStore {
     pub async fn copy_tree_to(&self, dest: &Path) -> Result<u64, StoreError> {
         copy_tree(&self.root.join("users"), &dest.join("users")).await
     }
+
+    /// Copies the blob tree incrementally.
+    ///
+    /// Files already present in the destination are skipped. New files are
+    /// hard-linked when the destination is on the same filesystem (blob files
+    /// are immutable after commit), otherwise copied. This makes repeated
+    /// backups cheap without changing the restore format.
+    pub async fn copy_tree_incremental_to(&self, dest: &Path) -> Result<BlobCopyStats, StoreError> {
+        copy_tree_incremental(&self.root.join("users"), &dest.join("users")).await
+    }
 }
 
 /// Byte segments of the window `[start, end_exclusive)` of a manifest, as
@@ -855,6 +899,48 @@ async fn copy_tree(src: &Path, dest: &Path) -> Result<u64, StoreError> {
     Ok(count)
 }
 
+async fn copy_tree_incremental(src: &Path, dest: &Path) -> Result<BlobCopyStats, StoreError> {
+    let mut stats = BlobCopyStats::default();
+    let mut stack = vec![(src.to_path_buf(), dest.to_path_buf())];
+    while let Some((from, to)) = stack.pop() {
+        let mut entries = match tokio::fs::read_dir(&from).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(StoreError::Io(e)),
+        };
+        tokio::fs::create_dir_all(&to).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let from_path = entry.path();
+            let to_path = to.join(entry.file_name());
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
+                stack.push((from_path, to_path));
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            if tokio::fs::try_exists(&to_path).await? {
+                stats.skipped += 1;
+                continue;
+            }
+            if let Some(parent) = to_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            match tokio::fs::hard_link(&from_path, &to_path).await {
+                Ok(()) => stats.linked += 1,
+                Err(_) => {
+                    // Different filesystem, or a platform without hard links.
+                    let bytes = tokio::fs::copy(&from_path, &to_path).await?;
+                    stats.copied += 1;
+                    stats.bytes_copied = stats.bytes_copied.saturating_add(bytes);
+                }
+            }
+        }
+    }
+    Ok(stats)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -877,6 +963,47 @@ mod tests {
                 (state >> 24) as u8
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn manifests_use_the_fanout_layout_and_read_legacy_paths() {
+        let (dir, store) = store().await;
+        let data = b"fanout manifests".to_vec();
+        let (manifest, _) = store.ingest_bytes(1, &data).await.unwrap();
+        let content_id = manifest.content_id();
+        let path = store.manifest_path(1, &content_id);
+        let hex = content_id.to_hex();
+        assert!(path.ends_with(format!("manifests/{}/{}/{}", &hex[..2], &hex[2..4], hex)));
+
+        // Move it back to the pre-fanout location and verify the fallback.
+        let legacy = store.legacy_manifest_path(1, &content_id);
+        tokio::fs::create_dir_all(legacy.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::rename(&path, &legacy).await.unwrap();
+        assert_eq!(
+            store
+                .get_manifest(1, &content_id)
+                .await
+                .unwrap()
+                .content_id(),
+            content_id
+        );
+        assert!(!path.exists());
+
+        // A new write goes back to the fanout path.
+        store.put_manifest(1, &manifest).await.unwrap();
+        assert!(path.exists());
+        assert!(legacy.exists());
+        assert_eq!(
+            store
+                .get_manifest(1, &content_id)
+                .await
+                .unwrap()
+                .content_id(),
+            content_id
+        );
+        drop(dir);
     }
 
     #[tokio::test]
@@ -1094,6 +1221,32 @@ mod tests {
         let restored = BlobStore::open(dest.path()).await.unwrap();
         let bytes = restored.read_content(1, &manifest).await.unwrap();
         assert_eq!(bytes, b"backup me");
+    }
+
+    #[tokio::test]
+    async fn incremental_copy_skips_existing_and_adds_new_blobs() {
+        let (_dir, store) = store().await;
+        let first = store.ingest_bytes(1, b"first backup").await.unwrap().0;
+        let dest = tempfile::tempdir().unwrap();
+
+        let stats = store.copy_tree_incremental_to(dest.path()).await.unwrap();
+        assert!(stats.linked + stats.copied >= 2);
+        assert_eq!(stats.skipped, 0);
+
+        let second = store.ingest_bytes(1, b"second backup").await.unwrap().0;
+        let stats = store.copy_tree_incremental_to(dest.path()).await.unwrap();
+        assert!(stats.skipped >= 2, "{stats:?}");
+        assert!(stats.linked + stats.copied >= 2, "{stats:?}");
+
+        let restored = BlobStore::open(dest.path()).await.unwrap();
+        assert_eq!(
+            restored.read_content(1, &first).await.unwrap(),
+            b"first backup"
+        );
+        assert_eq!(
+            restored.read_content(1, &second).await.unwrap(),
+            b"second backup"
+        );
     }
 
     #[cfg(unix)]

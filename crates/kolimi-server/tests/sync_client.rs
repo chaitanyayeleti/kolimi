@@ -24,6 +24,8 @@ struct Server {
     handle: tokio::task::JoinHandle<()>,
     /// Number of `PUT /api/chunks/*` requests seen (delta-push assertions).
     chunk_puts: Arc<AtomicUsize>,
+    /// Number of full `/api/sync/tree` walks.
+    tree_gets: Arc<AtomicUsize>,
 }
 
 /// Counts chunk uploads so a test can prove a delta push skips chunks the
@@ -39,6 +41,18 @@ async fn count_chunk_puts(
     next.run(request).await
 }
 
+/// Counts full tree walks so an incremental pull can prove it skipped one.
+async fn count_tree_gets(
+    State(counter): State<Arc<AtomicUsize>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() == Method::GET && request.uri().path() == "/api/sync/tree" {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+    next.run(request).await
+}
+
 async fn start_server() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
@@ -48,10 +62,16 @@ async fn start_server() -> Server {
         .await
         .unwrap();
     let chunk_puts = Arc::new(AtomicUsize::new(0));
-    let app = build_app(state).layer(axum::middleware::from_fn_with_state(
-        chunk_puts.clone(),
-        count_chunk_puts,
-    ));
+    let tree_gets = Arc::new(AtomicUsize::new(0));
+    let app = build_app(state)
+        .layer(axum::middleware::from_fn_with_state(
+            chunk_puts.clone(),
+            count_chunk_puts,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            tree_gets.clone(),
+            count_tree_gets,
+        ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -62,6 +82,7 @@ async fn start_server() -> Server {
         _dir: dir,
         handle,
         chunk_puts,
+        tree_gets,
     }
 }
 
@@ -180,6 +201,54 @@ async fn bidirectional_sync_roundtrip_with_conflicts() {
     let report = sync_once(&config(&server.url, &seed)).await.unwrap();
     assert_eq!(report.removed_local, 1, "{report:?}");
     assert!(!seed.join("new.txt").exists());
+
+    server.handle.abort();
+}
+
+#[tokio::test]
+async fn incremental_pull_skips_full_tree_for_file_edits() {
+    let server = start_server().await;
+    let root = tempfile::tempdir().unwrap();
+    let seed = root.path().join("seed");
+    let mirror = root.path().join("mirror");
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::create_dir_all(&mirror).unwrap();
+    std::fs::write(seed.join("a.txt"), b"version one").unwrap();
+
+    sync_once(&config(&server.url, &seed)).await.unwrap();
+    let _ = sync_once(&config(&server.url, &mirror)).await.unwrap();
+    assert!(
+        server.tree_gets.load(Ordering::SeqCst) > 0,
+        "first sync is full"
+    );
+
+    server.tree_gets.store(0, Ordering::SeqCst);
+    std::fs::write(seed.join("a.txt"), b"version two").unwrap();
+    sync_once(&config(&server.url, &seed)).await.unwrap();
+    let report = sync_once(&config(&server.url, &mirror)).await.unwrap();
+    assert_eq!(report.pulled, 1, "{report:?}");
+    assert_eq!(
+        server.tree_gets.load(Ordering::SeqCst),
+        0,
+        "a file edit must use the change feed, not a full tree walk"
+    );
+    assert_eq!(std::fs::read(mirror.join("a.txt")).unwrap(), b"version two");
+
+    // Structural changes deliberately fall back to a full reconciliation.
+    std::fs::create_dir_all(seed.join("newdir")).unwrap();
+    std::fs::write(seed.join("newdir/b.txt"), b"new branch").unwrap();
+    sync_once(&config(&server.url, &seed)).await.unwrap();
+    server.tree_gets.store(0, Ordering::SeqCst);
+    let report = sync_once(&config(&server.url, &mirror)).await.unwrap();
+    assert_eq!(report.pulled, 1, "{report:?}");
+    assert!(
+        server.tree_gets.load(Ordering::SeqCst) > 0,
+        "a new directory must trigger a full tree reconciliation"
+    );
+    assert_eq!(
+        std::fs::read(mirror.join("newdir/b.txt")).unwrap(),
+        b"new branch"
+    );
 
     server.handle.abort();
 }

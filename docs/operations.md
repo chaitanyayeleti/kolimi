@@ -236,9 +236,19 @@ The CLI details are in [reference.md](reference.md#kolimi-sync).
 # Online backup: consistent SQLite snapshot + blob store copy.
 kolimi-server backup --data /var/lib/kolimi --to /backups/kolimi-2026-10-11
 
+# Refresh an existing backup without copying unchanged blobs.
+kolimi-server backup --data /var/lib/kolimi --to /backups/kolimi-current --incremental
+
 # Integrity: verifies every manifest and chunk hash.
 kolimi-server verify --data /var/lib/kolimi
 ```
+
+`--incremental` skips files already in the destination and hard-links new
+ones when the backup is on the same filesystem; otherwise it copies them.
+Blob files are immutable after commit, so hard links are safe. The SQLite
+snapshot is still a fresh consistent snapshot on every run. The backup is
+cumulative: blobs deleted from the source are not removed from the
+destination. Restore is the same as a full backup.
 
 Restore: stop the server, replace the data directory with the backup,
 start the server (migrations run at startup), then `verify`.
@@ -424,14 +434,17 @@ once per minute. The session or token row is still read on every request, so
 revocation and account disable take effect immediately; only the timestamp
 write is throttled.
 
-Directory reads are paginated, but `kolimi-sync` still builds a full remote
-tree snapshot per sync pass. Large trees therefore scale as
-`clients × files` per interval. The 10k-file delta/tree gates are in CI;
-treat 100k-file trees with many sync clients as a workload to measure, not a
-guaranteed profile.
+Directory reads are paginated. `kolimi-sync` now uses the change feed for
+file content updates and skips the full remote tree walk on those passes.
+Directory creation/deletion, moves, and other structural changes deliberately
+fall back to a full reconciliation. The local filesystem is still scanned by
+push, so very large local trees remain CPU-bound on the client; the server no
+longer serves a full snapshot for every file edit.
 
-Backups are a full SQLite snapshot plus a full blob copy. At terabyte scale,
-plan the backup window, temporary space, and restore time explicitly.
+Backups are a full SQLite snapshot plus a blob copy. `--incremental` skips
+blobs already present and hard-links new ones on the same filesystem
+(otherwise copies them), which keeps repeated backups cheap. At terabyte
+scale, plan the backup window, temporary space, and restore time explicitly.
 `verify` is a full re-hash; the janitor scrubs bounded batches in the
 background.
 
@@ -445,7 +458,8 @@ A practical profile:
 
 Read-heavy downloads, WebDAV/CalDAV, and small-directory browsing scale best.
 The first pressure points are concurrent SQLite writes, very large single
-directories, full-tree sync passes, and unbounded audit growth.
+directories, structural full-tree sync reconciliations, and unpruned audit
+growth.
 
 ## E2EE and MLS operations
 
