@@ -1071,7 +1071,9 @@ async fn audit_command(command: AuditCommand, data: PathBuf) -> Result<(), Box<d
                         )?);
                         trust_source = "configured-key".to_string();
                     }
-                    Err(error) => eprintln!("configured signing key unavailable: {error}"),
+                    Err(error) => {
+                        return Err(format!("configured signing key unavailable: {error}").into());
+                    }
                 }
             }
             let verify = db
