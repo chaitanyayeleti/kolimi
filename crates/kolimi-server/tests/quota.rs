@@ -259,7 +259,9 @@ async fn purging_trash_updates_usage_immediately() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, trash) = admin_req(&app, "GET", "/api/trash", None).await;
     assert_eq!(status, StatusCode::OK);
-    let id = trash.as_array().unwrap()[0]["id"].as_i64().unwrap();
+    let id = trash["entries"].as_array().unwrap()[0]["id"]
+        .as_i64()
+        .unwrap();
     let (status, _) = admin_req(&app, "DELETE", &format!("/api/trash/{id}"), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 

@@ -691,13 +691,38 @@ pub async fn commit_file(
     }
 }
 
-/// `GET /api/trash` — list recoverable deletions.
+/// Query parameters for `/api/trash`.
+#[derive(Deserialize)]
+pub struct TrashQuery {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+fn parse_trash_cursor(value: &str) -> Option<(i64, i64)> {
+    let (at, id) = value.split_once(':')?;
+    Some((at.parse().ok()?, id.parse().ok()?))
+}
+
+/// `GET /api/trash` — list recoverable deletions, newest first.
 pub async fn list_trash(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    Query(query): Query<TrashQuery>,
 ) -> Response {
-    match state.vfs.trash(user.user_id).await {
-        Ok(nodes) => {
+    let limit = query.limit.unwrap_or(1000).clamp(1, 5000);
+    let cursor = match query.cursor.as_deref() {
+        Some("") => return bad_request("cursor must not be empty"),
+        Some(value) if value.chars().count() > 64 || value.chars().any(char::is_control) => {
+            return bad_request("cursor is invalid");
+        }
+        Some(value) => match parse_trash_cursor(value) {
+            Some(cursor) => Some(cursor),
+            None => return bad_request("cursor is invalid"),
+        },
+        None => None,
+    };
+    match state.vfs.trash_page(user.user_id, cursor, limit).await {
+        Ok((nodes, next)) => {
             let entries: Vec<Value> = nodes
                 .iter()
                 .map(|node| {
@@ -710,7 +735,14 @@ pub async fn list_trash(
                     })
                 })
                 .collect();
-            json_response(StatusCode::OK, json!(entries))
+            json_response(
+                StatusCode::OK,
+                json!({
+                    "entries": entries,
+                    "has_more": next.is_some(),
+                    "next_cursor": next.map(|(at, id)| format!("{at}:{id}")),
+                }),
+            )
         }
         Err(e) => vfs_error_response(e),
     }

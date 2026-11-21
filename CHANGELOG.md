@@ -7,6 +7,16 @@ follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Scaling metrics: session/app-password timestamp writes split into
+  `written`/`skipped`, SQLite write transactions, audit rows, change-feed
+  rows, `/api/browse` page sizes, and search-indexer results.
+- The search indexer now visits only accounts with unindexed changes, and the
+  janitor processes bounded per-account batches (expired retention first, then
+  pending deletes, then rotating GC/scrub) instead of every account each pass.
+- `GET /api/trash` is paginated (`limit`, `cursor`, `has_more`,
+  `next_cursor`), and the trash tab has a **Load more** action.
+- `/api/shares/owned` preloads recipients, paths, and encryption in two
+  queries instead of several lookups per share.
 - `GET /api/sync/head` and `kind`/`encrypted` fields on the change feed let
   `kolimi-sync` apply file content updates without a full remote tree walk.
   Directory creation/deletion, moves, and other structural changes still

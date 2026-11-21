@@ -149,6 +149,22 @@ async fn user_share_lifecycle_over_http() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json_body(&body)["shares"].as_array().unwrap().len(), 1);
 
+    // The owned list preloads path, recipient, and kind.
+    let (status, _, body) = send(
+        &server.app,
+        request("GET", "/api/shares/owned", ALICE, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let owned = json_body(&body);
+    let entry = &owned["shares"].as_array().unwrap()[0];
+    assert_eq!(entry["path"], "/docs");
+    assert_eq!(entry["name"], "docs");
+    assert_eq!(entry["recipient"], BOB);
+    assert_eq!(entry["is_dir"], true);
+    assert_eq!(entry["missing"], false);
+    assert_eq!(entry["encrypted"], false);
+
     // Bob sees the mount.
     let (status, _, body) = send(
         &server.app,

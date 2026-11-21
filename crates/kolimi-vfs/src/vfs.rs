@@ -940,6 +940,24 @@ impl Vfs {
         rows.into_iter().map(Node::from_db).collect()
     }
 
+    /// One keyset page of trashed nodes, newest first.
+    ///
+    /// `before` is the `(trashed_at, id)` cursor from the previous page; the
+    /// returned cursor is `Some` when another page exists.
+    pub async fn trash_page(
+        &self,
+        user_id: i64,
+        before: Option<(i64, i64)>,
+        limit: i64,
+    ) -> Result<(Vec<Node>, Option<(i64, i64)>), VfsError> {
+        let (rows, next) = self.db.list_trash_page(user_id, before, limit).await?;
+        let nodes = rows
+            .into_iter()
+            .map(Node::from_db)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((nodes, next))
+    }
+
     /// Restores a trashed node to its original location (or the root when
     /// that location is gone), renaming on name conflicts.
     pub async fn restore_from_trash(&self, user_id: i64, node_id: i64) -> Result<Node, VfsError> {

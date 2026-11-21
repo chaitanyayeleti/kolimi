@@ -64,6 +64,7 @@ pub async fn browse(
             Ok(entries) => entries,
             Err(_) => return api::internal_error(),
         };
+        state.metrics.browse_page(entries.len(), false);
         return Json(json!({
             "path": format!("/{SHARED_MOUNT}"),
             "encrypted": false,
@@ -111,6 +112,7 @@ pub async fn browse(
                 Err(_) => return api::internal_error(),
             }
         }
+        state.metrics.browse_page(entries.len(), has_more);
         return Json(json!({
             "path": "/",
             "encrypted": false,
@@ -169,6 +171,7 @@ pub async fn browse(
                     )
                 })
                 .collect();
+            state.metrics.browse_page(entries.len(), has_more);
             Json(json!({
                 "path": normalized_path(&segments),
                 "encrypted": inherited,

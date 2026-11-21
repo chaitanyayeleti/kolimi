@@ -1,6 +1,9 @@
 //! Groups, shares, and public-link sessions (M3).
 
+use std::collections::{BTreeSet, HashMap};
+
 use serde::Serialize;
+use sqlx::{FromRow, Row};
 
 use crate::{Db, DbError, User, map_sqlx, now_millis};
 
@@ -48,6 +51,25 @@ pub struct ShareRow {
     pub uploaded_bytes: i64,
     /// Creation time in Unix milliseconds.
     pub created_at: i64,
+}
+
+/// A share plus the display fields `/api/shares/owned` needs.
+///
+/// Loading these in two queries (shares joined with recipients and node
+/// metadata, then one ancestor walk for every distinct shared node) avoids the
+/// per-share `node_path` / recipient / encryption lookups.
+#[derive(Debug, Clone)]
+pub struct OwnedShareDetail {
+    /// The underlying share row.
+    pub share: ShareRow,
+    /// Recipient username or group name.
+    pub recipient: Option<String>,
+    /// `"dir"` or `"file"`; `None` when the node no longer exists.
+    pub node_kind: Option<String>,
+    /// Full path in the owner's tree; `None` for a missing node.
+    pub path: Option<String>,
+    /// Whether the node sits inside an encrypted folder.
+    pub encrypted: bool,
 }
 
 /// A share received by a user, joined with node and owner details.
@@ -157,7 +179,7 @@ impl Db {
                 .bind(group_id)
                 .fetch_all(&self.pool)
                 .await?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         for (node_id,) in &node_ids {
             for (member_id,) in &member_ids {
                 sqlx::query("DELETE FROM e2ee_share_keys WHERE node_id = ? AND recipient_id = ?")
@@ -196,7 +218,7 @@ impl Db {
 
     /// Removes a member from a group. Returns whether the row existed.
     pub async fn remove_group_member(&self, group_id: i64, user_id: i64) -> Result<bool, DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let result = sqlx::query("DELETE FROM group_members WHERE group_id = ? AND user_id = ?")
             .bind(group_id)
             .bind(user_id)
@@ -487,6 +509,106 @@ impl Db {
         )
     }
 
+    /// Lists all shares created by an owner with recipient and node display
+    /// fields preloaded. Two queries regardless of the number of shares.
+    pub async fn shares_owned_detailed(
+        &self,
+        owner_id: i64,
+    ) -> Result<Vec<OwnedShareDetail>, DbError> {
+        let rows = sqlx::query(
+            "SELECT s.*,
+                    n.kind AS node_kind,
+                    ru.username AS recipient_username,
+                    g.name AS recipient_group_name
+             FROM shares s
+             LEFT JOIN nodes n ON n.id = s.node_id
+             LEFT JOIN users ru ON ru.id = s.recipient_user_id
+             LEFT JOIN groups g ON g.id = s.recipient_group_id
+             WHERE s.owner_id = ?
+             ORDER BY s.id",
+        )
+        .bind(owner_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut shares = Vec::with_capacity(rows.len());
+        let mut node_ids = BTreeSet::new();
+        for row in &rows {
+            let share = ShareRow::from_row(row)?;
+            node_ids.insert(share.node_id);
+            let recipient = row
+                .try_get::<Option<String>, _>("recipient_username")?
+                .or_else(|| {
+                    row.try_get::<Option<String>, _>("recipient_group_name")
+                        .ok()
+                        .flatten()
+                });
+            shares.push((share, recipient));
+        }
+
+        let ids: Vec<i64> = node_ids.into_iter().collect();
+        let nodes = self.node_paths_with_encryption(owner_id, &ids).await?;
+        Ok(shares
+            .into_iter()
+            .map(|(share, recipient)| {
+                let node = nodes.get(&share.node_id);
+                OwnedShareDetail {
+                    node_kind: node.and_then(|(_, kind, _)| kind.clone()),
+                    path: node.map(|(path, _, _)| path.clone()),
+                    encrypted: node.is_some_and(|(_, _, encrypted)| *encrypted),
+                    share,
+                    recipient,
+                }
+            })
+            .collect())
+    }
+
+    /// Full paths and inherited encryption for a set of nodes in one walk.
+    ///
+    /// `encrypted` follows `Vfs::path_is_encrypted`: the node's own flag
+    /// counts only for directories, and any encrypted directory ancestor
+    /// makes the whole path encrypted.
+    pub async fn node_paths_with_encryption(
+        &self,
+        user_id: i64,
+        node_ids: &[i64],
+    ) -> Result<HashMap<i64, (String, Option<String>, bool)>, DbError> {
+        let mut out = HashMap::new();
+        // Keep the placeholder count well below SQLite's variable limit.
+        for chunk in node_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "WITH RECURSIVE up(node_id, parent_id, name, path, enc) AS (
+                     SELECT id, parent_id, name, name,
+                            CASE WHEN kind = 'dir' AND encrypted != 0 THEN 1 ELSE 0 END
+                     FROM nodes WHERE user_id = ? AND id IN ({placeholders})
+                     UNION ALL
+                     SELECT up.node_id, n.parent_id, n.name, n.name || '/' || up.path,
+                            CASE WHEN up.enc = 1
+                                      OR (n.kind = 'dir' AND n.encrypted != 0)
+                                 THEN 1 ELSE 0 END
+                     FROM nodes n JOIN up ON n.id = up.parent_id
+                     WHERE n.user_id = ?
+                 )
+                 SELECT up.node_id, up.path, up.enc, n.kind
+                 FROM up JOIN nodes n ON n.id = up.node_id
+                 WHERE up.parent_id IS NULL"
+            );
+            let mut query =
+                sqlx::query_as::<_, (i64, String, i64, String)>(sqlx::AssertSqlSafe(sql))
+                    .bind(user_id);
+            for id in chunk {
+                query = query.bind(id);
+            }
+            for (node_id, path, encrypted, kind) in
+                query.bind(user_id).fetch_all(&self.pool).await?
+            {
+                out.insert(node_id, (path, Some(kind), encrypted != 0));
+            }
+        }
+        Ok(out)
+    }
+
     /// Lists shares received by a user (directly or through a group).
     pub async fn received_shares(&self, user_id: i64) -> Result<Vec<ReceivedShare>, DbError> {
         Ok(sqlx::query_as::<_, ReceivedShare>(
@@ -692,6 +814,69 @@ mod tests {
         assert!(db.delete_group(group.id).await.unwrap());
         assert!(!db.delete_group(group.id).await.unwrap());
         let _ = alice;
+    }
+
+    #[tokio::test]
+    async fn detailed_owned_shares_batch_paths_recipients_and_encryption() {
+        let (_dir, db, alice, bob) = db().await;
+        let root = db.root_node(alice.id).await.unwrap();
+        let now = now_millis();
+        let vault = db
+            .insert_node(alice.id, Some(root.id), "Secret", "dir", None, 0, now)
+            .await
+            .unwrap();
+        db.set_folder_encrypted(alice.id, vault.id, true)
+            .await
+            .unwrap();
+        let node = db
+            .insert_node(
+                alice.id,
+                Some(vault.id),
+                "doc.txt",
+                "file",
+                Some(&[7u8; 32]),
+                1,
+                now,
+            )
+            .await
+            .unwrap();
+        db.create_share(
+            alice.id,
+            node.id,
+            "user",
+            Some(bob.id),
+            None,
+            "read",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let group = db.create_group("Team").await.unwrap();
+        db.create_share(
+            alice.id,
+            node.id,
+            "group",
+            None,
+            Some(group.id),
+            "write",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let details = db.shares_owned_detailed(alice.id).await.unwrap();
+        assert_eq!(details.len(), 2);
+        for detail in &details {
+            assert_eq!(detail.path.as_deref(), Some("/Secret/doc.txt"));
+            assert_eq!(detail.node_kind.as_deref(), Some("file"));
+            assert!(detail.encrypted);
+        }
+        assert_eq!(details[0].recipient.as_deref(), Some("bob"));
+        assert_eq!(details[1].recipient.as_deref(), Some("Team"));
     }
 
     #[tokio::test]

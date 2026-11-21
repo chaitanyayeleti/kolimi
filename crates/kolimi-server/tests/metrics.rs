@@ -220,6 +220,67 @@ async fn unmatched_paths_share_one_metric_label() {
 }
 
 #[tokio::test]
+async fn metrics_expose_scaling_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();
+    let alice = state
+        .db
+        .create_user("alice", &hash_password(PASS).unwrap())
+        .await
+        .unwrap();
+    let token = "kolimi-scaling-metrics-token";
+    state
+        .db
+        .create_app_password(
+            alice.id,
+            "test",
+            &kolimi_auth::token::hash_token(token),
+            "*",
+            None,
+        )
+        .await
+        .unwrap();
+    let app = build_app(state);
+
+    // First app-password request writes the timestamp, the second is skipped.
+    let auth = basic("alice", token);
+    for _ in 0..2 {
+        let (status, _, _) = get(&app, "/api/browse?path=/", Some(&auth)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, _, body) = get(&app, "/metrics", Some(&basic("alice", PASS))).await;
+    assert_eq!(status, StatusCode::OK);
+    for family in [
+        "kolimi_db_write_transactions_total",
+        "kolimi_audit_entries_appended_total",
+        "kolimi_change_events_appended_total",
+        "kolimi_browse_page_entries",
+        "kolimi_browse_pages_total",
+        "kolimi_indexer_runs_total",
+        "kolimi_indexer_documents_total",
+    ] {
+        assert!(body.contains(family), "missing {family}: {body}");
+    }
+    assert!(
+        body.contains(
+            r#"kolimi_auth_timestamp_writes_total{credential="app_password",result="written"} 1"#
+        ),
+        "written touch: {body}"
+    );
+    assert!(
+        body.contains(
+            r#"kolimi_auth_timestamp_writes_total{credential="app_password",result="skipped"} 1"#
+        ),
+        "skipped touch: {body}"
+    );
+    assert!(
+        body.contains(r#"kolimi_browse_pages_total{has_more="false"}"#),
+        "browse page: {body}"
+    );
+}
+
+#[tokio::test]
 async fn metrics_require_an_admin() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::init(dir.path(), false, ORIGIN).await.unwrap();

@@ -152,6 +152,8 @@ paths collapse to `path="unmatched"`.
 | `kolimi_files` | gauge | Live files outside trash |
 | `kolimi_trash_nodes` | gauge | Nodes currently in trash |
 | `kolimi_file_versions` | gauge | Stored file versions |
+| `kolimi_browse_page_entries` | histogram | Entries returned per `/api/browse` response |
+| `kolimi_browse_pages_total` | counter | Directory pages by `has_more` (`true` / `false`) |
 
 ### Previews and auth
 
@@ -161,6 +163,7 @@ paths collapse to `path="unmatched"`.
 | `kolimi_preview_duration_seconds` | histogram | `outcome` | Preview worker duration |
 | `kolimi_login_failures_total` | counter | — | Rejected password/passkey/TOTP attempts |
 | `kolimi_logins_total` | counter | `outcome` | Login outcomes (`password`, `totp`, `recovery`, `passkey`, `totp_required`, `failure`) |
+| `kolimi_auth_timestamp_writes_total` | counter | `credential`, `result` | Session/app-password timestamp refreshes: `written`, `skipped`, `error` |
 | `kolimi_sessions_active` | gauge | — | Live, unexpired sessions |
 | `kolimi_app_passwords_active` | gauge | — | Stored per-device app passwords |
 
@@ -200,6 +203,12 @@ are rebuilt at most every 30 seconds, not on every scrape.
 | `kolimi_db_pool_connections` | gauge | `state` | SQLite pool `in_use` / `idle` |
 | `kolimi_db_errors_total` | counter | — | Cumulative SQLite query errors |
 | `kolimi_db_busy_errors_total` | counter | — | Cumulative `SQLITE_BUSY` / `SQLITE_LOCKED` errors |
+| `kolimi_db_write_transactions_total` | counter | — | Cumulative SQLite write transactions begun |
+| `kolimi_audit_entries_appended_total` | counter | — | Cumulative audit rows appended |
+| `kolimi_change_events_appended_total` | counter | — | Cumulative change-feed rows appended |
+| `kolimi_indexer_runs_total` | counter | `result` | Search-indexer passes (`success` / `error`) |
+| `kolimi_indexer_duration_seconds` | histogram | `result` | Search-indexer pass duration |
+| `kolimi_indexer_documents_total` | counter | `outcome` | Documents `indexed` / `removed` |
 | `kolimi_janitor_runs_total` | counter | `result` | `success` / `error` |
 | `kolimi_janitor_duration_seconds` | histogram | `result` | Pass duration |
 | `kolimi_janitor_events_total` | counter | `kind` | Objects processed |
@@ -211,11 +220,16 @@ are rebuilt at most every 30 seconds, not on every scrape.
 | `kolimi_build_info` | gauge | `version` | Build version (value `1`) |
 | `kolimi_start_time_seconds` | gauge | — | Process start time |
 
-Janitor event kinds include `trash_purged`, `versions_pruned`,
-`chunks_deleted`, `manifests_deleted`, `link_sessions_expired`,
-`enrollments_expired`, `mls_key_packages_pruned`, `mls_devices_pruned`,
-`mls_messages_pruned`, `mls_keyrings_pruned`, `scrub_checked`,
-`scrub_corrupt`, and `reconciled`.
+Janitor event kinds include `retention_users`, `trash_purged`,
+`versions_pruned`, `gc_users`, `chunks_deleted`, `manifests_deleted`,
+`scrub_users`, `link_sessions_expired`, `enrollments_expired`,
+`mls_key_packages_pruned`, `mls_devices_pruned`, `mls_messages_pruned`,
+`mls_keyrings_pruned`, `scrub_checked`, `scrub_corrupt`, and `reconciled`.
+
+The janitor and indexer now schedule bounded per-account batches: accounts
+with expired trash/versions or an uncollected delete go first, then the
+least-recently-swept and least-recently-scrubbed accounts. `gc_users` and
+`scrub_users` show how many accounts each pass touched.
 
 ## Useful PromQL
 
@@ -283,6 +297,25 @@ kolimi_db_pool_connections{state="in_use"}
 sum(rate(kolimi_db_errors_total[5m]))
 sum(rate(kolimi_db_busy_errors_total[5m]))
 ```
+
+**Write and audit pressure**
+
+```promql
+sum(rate(kolimi_db_write_transactions_total[5m]))
+sum(rate(kolimi_change_events_appended_total[5m]))
+sum(rate(kolimi_audit_entries_appended_total[5m]))
+histogram_quantile(0.95, sum(rate(kolimi_browse_page_entries_bucket[5m])) by (le))
+```
+
+**Auth timestamp throttle**
+
+```promql
+sum by (result) (rate(kolimi_auth_timestamp_writes_total[5m]))
+```
+
+The `skipped` share should dominate once clients poll repeatedly inside the
+one-minute window; a rising `written` share means the refresh is happening
+more often than intended.
 
 **Version**
 

@@ -9,7 +9,7 @@ use std::{
 
 use serde::Serialize;
 use sqlx::{
-    FromRow, Row, SqliteConnection, SqlitePool,
+    FromRow, Row, Sqlite, SqliteConnection, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
@@ -30,7 +30,7 @@ pub use devices::{Device, Enrollment, MAX_DEVICE_KEY_BYTES};
 pub use e2ee::{MAX_KEYRING_BYTES, MAX_WRAPPED_KEY_BYTES};
 pub use invites::{Invite, NewInvite};
 pub use mls::{MlsGroup, MlsKeyPackage, MlsKeyring, MlsMessage};
-pub use sharing::{Group, LinkSession, ReceivedShare, ShareRow};
+pub use sharing::{Group, LinkSession, OwnedShareDetail, ReceivedShare, ShareRow};
 
 /// Current wall-clock time in Unix milliseconds.
 pub fn now_millis() -> i64 {
@@ -69,6 +69,9 @@ pub enum DbError {
 
 static SQLITE_ERRORS: AtomicU64 = AtomicU64::new(0);
 static SQLITE_BUSY_ERRORS: AtomicU64 = AtomicU64::new(0);
+static WRITE_TRANSACTIONS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static AUDIT_ENTRIES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static CHANGE_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 impl From<sqlx::Error> for DbError {
     fn from(error: sqlx::Error) -> Self {
@@ -92,6 +95,21 @@ pub fn sqlite_errors() -> u64 {
 /// Cumulative SQLite `SQLITE_BUSY` / `SQLITE_LOCKED` errors.
 pub fn sqlite_busy_errors() -> u64 {
     SQLITE_BUSY_ERRORS.load(Ordering::Relaxed)
+}
+
+/// Cumulative write transactions begun by this process.
+pub fn write_transactions() -> u64 {
+    WRITE_TRANSACTIONS.load(Ordering::Relaxed)
+}
+
+/// Cumulative audit rows appended by this process.
+pub fn audit_entries_appended() -> u64 {
+    AUDIT_ENTRIES.load(Ordering::Relaxed)
+}
+
+/// Cumulative change-feed rows appended by this process.
+pub fn change_events_appended() -> u64 {
+    CHANGE_EVENTS.load(Ordering::Relaxed)
 }
 
 /// Folders every new account starts with: `(name, encrypted)`.
@@ -496,6 +514,20 @@ impl Db {
         &self.pool
     }
 
+    /// Begins a deferred write transaction and counts it for `/metrics`.
+    pub(crate) async fn begin_write(&self) -> Result<Transaction<'_, Sqlite>, DbError> {
+        let tx = self.pool.begin().await?;
+        WRITE_TRANSACTIONS.fetch_add(1, Ordering::Relaxed);
+        Ok(tx)
+    }
+
+    /// Begins an immediate write transaction (multi-writer ordering).
+    pub(crate) async fn begin_immediate_write(&self) -> Result<Transaction<'_, Sqlite>, DbError> {
+        let tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        WRITE_TRANSACTIONS.fetch_add(1, Ordering::Relaxed);
+        Ok(tx)
+    }
+
     /// Stores (or replaces) a user's TOTP secret, resetting replay state.
     pub async fn set_totp_secret(&self, user_id: i64, secret: &str) -> Result<(), DbError> {
         sqlx::query(
@@ -541,7 +573,7 @@ impl Db {
 
     /// Disables TOTP: removes the secret and all recovery codes.
     pub async fn clear_totp(&self, user_id: i64) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM totp_secrets WHERE user_id = ?")
             .bind(user_id)
             .execute(&mut *tx)
@@ -560,7 +592,7 @@ impl Db {
         user_id: i64,
         hashes: &[Vec<u8>],
     ) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
             .bind(user_id)
             .execute(&mut *tx)
@@ -631,7 +663,7 @@ impl Db {
 
     /// Creates a user plus their root directory. The first user becomes admin.
     pub async fn create_user(&self, username: &str, password_hash: &str) -> Result<User, DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let user = create_user_on(&mut tx, username, password_hash).await?;
         tx.commit().await?;
         Ok(user)
@@ -868,7 +900,7 @@ impl Db {
     /// Revoking the last enabled administrator is refused so the server
     /// cannot be locked out of administration.
     pub async fn set_admin(&self, user_id: i64, is_admin: bool) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let Some(target) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
             .bind(user_id)
             .fetch_optional(&mut *tx)
@@ -903,7 +935,7 @@ impl Db {
     /// Disabling drops the account's sessions immediately and is refused
     /// for the last enabled administrator.
     pub async fn set_disabled(&self, username: &str, disabled: bool) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let Some(target) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
             .bind(username)
             .fetch_optional(&mut *tx)
@@ -948,7 +980,7 @@ impl Db {
     /// collection cannot reclaim it later because the janitor only visits
     /// users that still exist. Refused for the last enabled admin.
     pub async fn delete_user(&self, username: &str) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let Some(target) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
             .bind(username)
             .fetch_optional(&mut *tx)
@@ -1025,6 +1057,88 @@ impl Db {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// Users with trash or versions past their retention cutoffs.
+    ///
+    /// This is a cross-account query so the janitor does not have to ask each
+    /// account whether it has expired rows.
+    pub async fn users_with_expired_retention(
+        &self,
+        trash_cutoff: i64,
+        version_cutoff: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>, DbError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT user_id FROM (
+                 SELECT user_id FROM nodes
+                 WHERE trashed_at IS NOT NULL AND trashed_at < ?1
+                 UNION
+                 SELECT user_id FROM versions WHERE created_at < ?2
+             )
+             ORDER BY user_id
+             LIMIT ?3",
+        )
+        .bind(trash_cutoff)
+        .bind(version_cutoff)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Users with a delete waiting to be swept, oldest request first.
+    pub async fn users_with_pending_gc(&self, limit: i64) -> Result<Vec<i64>, DbError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT user_id FROM maintenance_state
+             WHERE dirty != 0
+             ORDER BY updated_at
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Users whose blobs are least recently swept (never-swept first).
+    pub async fn users_due_for_gc(&self, limit: i64) -> Result<Vec<i64>, DbError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT u.id FROM users u
+             LEFT JOIN maintenance_state m ON m.user_id = u.id
+             ORDER BY m.last_gc_at IS NOT NULL, m.last_gc_at ASC
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Users whose blobs are least recently scrubbed (never-scrubbed first).
+    pub async fn users_due_for_scrub(&self, limit: i64) -> Result<Vec<i64>, DbError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT u.id FROM users u
+             LEFT JOIN scrub_state s ON s.user_id = u.id
+             ORDER BY s.updated_at IS NOT NULL, s.updated_at ASC
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Records a successful blob sweep, clearing the pending-delete flag.
+    pub async fn set_last_gc(&self, user_id: i64, at: i64) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO maintenance_state (user_id, last_gc_at, dirty, updated_at)
+             VALUES (?, ?, 0, ?)
+             ON CONFLICT(user_id) DO UPDATE SET last_gc_at = excluded.last_gc_at,
+                 dirty = 0, updated_at = excluded.updated_at",
+        )
+        .bind(user_id)
+        .bind(at)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Records a successful login time for the admin user list.
@@ -1307,7 +1421,7 @@ impl Db {
         node_id: i64,
         ops: &[DeadPropOp],
     ) -> Result<bool, DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let (exists,): (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM nodes WHERE id = ? AND user_id = ?")
                 .bind(node_id)
@@ -1455,7 +1569,7 @@ impl Db {
         size: i64,
         now: i64,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let changed = node.content_id.as_deref() != Some(content_id);
         if changed {
             if let Some(old) = &node.content_id {
@@ -1613,6 +1727,41 @@ impl Db {
         .await?)
     }
 
+    /// One keyset page of trashed nodes, newest first.
+    ///
+    /// `before` is the `(trashed_at, id)` of the last row from the previous
+    /// page. Returns the page plus the cursor for the next page.
+    pub async fn list_trash_page(
+        &self,
+        user_id: i64,
+        before: Option<(i64, i64)>,
+        limit: i64,
+    ) -> Result<(Vec<Node>, Option<(i64, i64)>), DbError> {
+        let limit = limit.clamp(1, 5000);
+        let (trashed_at, id) = before.unwrap_or((i64::MAX, i64::MAX));
+        let mut rows = sqlx::query_as::<_, Node>(
+            "SELECT * FROM nodes
+             WHERE user_id = ? AND trashed_at IS NOT NULL
+               AND (trashed_at < ? OR (trashed_at = ? AND id < ?))
+             ORDER BY trashed_at DESC, id DESC
+             LIMIT ?",
+        )
+        .bind(user_id)
+        .bind(trashed_at)
+        .bind(trashed_at)
+        .bind(id)
+        .bind(limit + 1)
+        .fetch_all(&self.pool)
+        .await?;
+        let has_more = rows.len() as i64 > limit;
+        rows.truncate(limit as usize);
+        let next = has_more
+            .then(|| rows.last())
+            .flatten()
+            .and_then(|node| node.trashed_at.map(|at| (at, node.id)));
+        Ok((rows, next))
+    }
+
     /// Clears the trash flag on a node (caller resolves name conflicts first).
     pub async fn restore_node(&self, user_id: i64, node_id: i64) -> Result<(), DbError> {
         let result = sqlx::query(
@@ -1678,7 +1827,7 @@ impl Db {
         // row together with its audit entry in one transaction, so a crash
         // can never leave the change feed and the audit log inconsistent.
         let _guard = self.audit_lock.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO changes (user_id, path, from_path, op, content_id, size, modified_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1692,6 +1841,20 @@ impl Db {
         .bind(modified_at)
         .execute(&mut *tx)
         .await?;
+        // A delete may have left unreferenced blobs; ask the janitor to sweep
+        // this account on its next pass instead of waiting for the rotation.
+        if op == "delete" {
+            sqlx::query(
+                "INSERT INTO maintenance_state (user_id, last_gc_at, dirty, updated_at)
+                 VALUES (?, NULL, 1, ?)
+                 ON CONFLICT(user_id) DO UPDATE SET dirty = 1,
+                     updated_at = excluded.updated_at",
+            )
+            .bind(user_id)
+            .bind(now_millis())
+            .execute(&mut *tx)
+            .await?;
+        }
         let mut details = serde_json::Map::new();
         details.insert("size".to_string(), serde_json::json!(size));
         if let Some(from) = from_path {
@@ -1713,6 +1876,7 @@ impl Db {
         )
         .await?;
         tx.commit().await?;
+        CHANGE_EVENTS.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -1949,7 +2113,7 @@ impl Db {
         dst_name: &str,
         now: i64,
     ) -> Result<Node, DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let root = insert_copy(&mut tx, user_id, src, dst_parent_id, dst_name, now)
             .await
             .map_err(|e| map_sqlx(e, "a node with that name already exists"))?;
@@ -2122,6 +2286,80 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(db.delete_expired_sessions(now_millis()).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn trash_pages_newest_first_with_keyset_cursors() {
+        let (_dir, db) = db().await;
+        let user = db.create_user("alice", "hash").await.unwrap();
+        let root = db.root_node(user.id).await.unwrap();
+        let now = now_millis();
+        for (index, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
+            let node = db
+                .insert_node(
+                    user.id,
+                    Some(root.id),
+                    name,
+                    "file",
+                    Some(&[index as u8; 32]),
+                    1,
+                    now + index as i64,
+                )
+                .await
+                .unwrap();
+            db.trash_node(
+                user.id,
+                node.id,
+                &format!("/{name}"),
+                now + index as i64 + 1,
+            )
+            .await
+            .unwrap();
+        }
+
+        let (first, next) = db.list_trash_page(user.id, None, 2).await.unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].name, "c.txt");
+        assert_eq!(first[1].name, "b.txt");
+        let next = next.expect("another page");
+        let (second, done) = db.list_trash_page(user.id, Some(next), 2).await.unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].name, "a.txt");
+        assert!(done.is_none());
+    }
+
+    #[tokio::test]
+    async fn maintenance_scheduling_prefers_work_and_rotates_users() {
+        let (_dir, db) = db().await;
+        let alice = db.create_user("alice", "hash-a").await.unwrap();
+        let bob = db.create_user("bob", "hash-b").await.unwrap();
+        let root = db.root_node(alice.id).await.unwrap();
+        let now = now_millis();
+        let node = db
+            .insert_node(alice.id, Some(root.id), "gone.txt", "file", None, 0, now)
+            .await
+            .unwrap();
+        db.trash_node(alice.id, node.id, "/gone.txt", now)
+            .await
+            .unwrap();
+
+        let expired = db
+            .users_with_expired_retention(now + 1, now + 1, 10)
+            .await
+            .unwrap();
+        assert_eq!(expired, vec![alice.id]);
+
+        // A delete marks the account for an immediate sweep.
+        db.record_change(alice.id, "/gone.txt", "delete", None, 0, now, None)
+            .await
+            .unwrap();
+        assert_eq!(db.users_with_pending_gc(10).await.unwrap(), vec![alice.id]);
+        db.set_last_gc(alice.id, now).await.unwrap();
+        assert!(db.users_with_pending_gc(10).await.unwrap().is_empty());
+
+        // The rotating sweep visits the never-swept account next.
+        let due = db.users_due_for_gc(1).await.unwrap();
+        assert_eq!(due, vec![bob.id]);
     }
 
     #[tokio::test]

@@ -85,7 +85,11 @@ pub(super) fn actions(ctx: FilesContext) -> FileActions {
                     // Find the trashed node so the move can be undone.
                     if let Ok(tr) = api::get("/api/trash").await
                         && tr.status == 200
-                        && let Some(items) = tr.body.as_array()
+                        && let Some(items) = tr
+                            .body
+                            .get("entries")
+                            .and_then(serde_json::Value::as_array)
+                            .or_else(|| tr.body.as_array())
                         && let Some(id) = items
                             .iter()
                             .find(|item| {

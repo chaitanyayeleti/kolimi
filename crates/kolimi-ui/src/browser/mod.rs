@@ -160,6 +160,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
     let notice = RwSignal::new(String::new());
     let tab = RwSignal::new(initial_tab);
     let trash = RwSignal::new(Vec::<TrashItem>::new());
+    let trash_has_more = RwSignal::new(false);
+    let trash_next_cursor = RwSignal::new(Option::<String>::None);
+    let trash_loading_more = RwSignal::new(false);
     let share_target = RwSignal::new(Option::<Entry>::None);
     let versions_for = RwSignal::new(Option::<Entry>::None);
     let vault_setup = RwSignal::new(false);
@@ -484,18 +487,53 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
         });
     });
 
-    let load_trash = move || {
+    let fetch_trash = move |append: bool, cursor: Option<String>| {
+        if append {
+            trash_loading_more.set(true);
+        }
         spawn_local(async move {
-            match api::get("/api/trash").await {
-                Ok(r) if r.status == 200 => trash.set(parse_trash(
-                    &r.body,
-                    e2ee_master.get_untracked().as_ref(),
-                    &shared_names.get_untracked(),
-                )),
+            let url = match cursor {
+                Some(cursor) => format!("/api/trash?limit=500&cursor={}", encode(&cursor)),
+                None => "/api/trash?limit=500".to_string(),
+            };
+            match api::get(&url).await {
+                Ok(r) if r.status == 200 => {
+                    let page = parse_trash(
+                        &r.body,
+                        e2ee_master.get_untracked().as_ref(),
+                        &shared_names.get_untracked(),
+                    );
+                    if append {
+                        trash.update(|list| {
+                            let mut seen: std::collections::HashSet<i64> =
+                                list.iter().map(|item| item.id).collect();
+                            for item in page {
+                                if seen.insert(item.id) {
+                                    list.push(item);
+                                }
+                            }
+                        });
+                    } else {
+                        trash.set(page);
+                    }
+                    trash_has_more.set(r.body["has_more"].as_bool().unwrap_or(false));
+                    trash_next_cursor.set(r.body["next_cursor"].as_str().map(str::to_string));
+                    error.set(String::new());
+                }
                 Ok(r) => error.set(r.error().unwrap_or("Could not load trash").to_string()),
                 Err(e) => error.set(e),
             }
+            if append {
+                trash_loading_more.set(false);
+            }
         });
+    };
+
+    let load_trash = move || fetch_trash(false, None);
+    let load_more_trash = move || {
+        if let Some(cursor) = trash_next_cursor.get_untracked() {
+            fetch_trash(true, Some(cursor));
+        }
     };
     Effect::new(move |_| {
         if tab.get() == Tab::Trash {
@@ -1052,6 +1090,9 @@ pub(crate) fn Browser(view: RwSignal<AppView>) -> impl IntoView {
                     view! {
                         <TrashArea
                             trash=trash
+                            has_more=trash_has_more
+                            loading_more=trash_loading_more
+                            on_load_more=Callback::new(move |_: ()| load_more_trash())
                             on_restore=trash_restore
                             on_purge=trash_purge
                         />

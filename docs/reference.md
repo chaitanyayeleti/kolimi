@@ -294,6 +294,14 @@ insert before the cursor appears on a refresh. `/Shared with me` itself and
 the mounts on the account root are small fixed lists: mounts appear on the
 first root page only.
 
+### Trash
+
+`GET /api/trash?limit=&cursor=` returns `{entries, has_more, next_cursor}`,
+newest first. `limit` defaults to 1,000 and is capped at 5,000. The cursor
+encodes the last `(trashed_at, id)`, so a page boundary is stable even when
+several nodes share the same deletion millisecond. `POST /api/trash/{id}/restore`
+and `DELETE /api/trash/{id}` are unchanged.
+
 ### Incremental sync
 
 `GET /api/sync/changes?since=&limit=` returns file changes with `kind` and

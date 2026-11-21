@@ -8,6 +8,7 @@
 //! whether an append failure aborts the audited operation.
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -16,7 +17,7 @@ use tokio::io::AsyncWriteExt;
 
 use futures_util::StreamExt;
 
-use crate::{Db, DbError, now_millis};
+use crate::{AUDIT_ENTRIES, Db, DbError, now_millis};
 
 /// One audit entry.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -192,6 +193,7 @@ async fn append_chained(
     .bind(&hash)
     .execute(&mut *conn)
     .await?;
+    AUDIT_ENTRIES.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
@@ -285,7 +287,7 @@ impl Db {
         to: &Path,
         temp: &Path,
     ) -> Result<AuditPruneReport, DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let anchor = sqlx::query_as::<_, AuditAnchor>(
             "SELECT pruned_through, hash, pruned_entries, updated_at
              FROM audit_anchor WHERE id = 1",

@@ -50,7 +50,7 @@ impl Db {
         if keyring.is_empty() || keyring.len() > MAX_KEYRING_BYTES {
             return Err(DbError::Conflict("keyring size".to_string()));
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let current: Option<i64> =
             sqlx::query_scalar("SELECT epoch FROM e2ee_keyrings WHERE user_id = ?")
                 .bind(user_id)

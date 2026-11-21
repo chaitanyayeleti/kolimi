@@ -60,7 +60,7 @@ impl Db {
                 "invite expiry is in the past".to_string(),
             ));
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         sqlx::query("DELETE FROM invites WHERE used_at IS NULL AND expires_at <= ?")
             .bind(now)
             .execute(&mut *tx)
@@ -143,7 +143,7 @@ impl Db {
         password_hash: &str,
     ) -> Result<User, DbError> {
         let now = now_millis();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let Some(invite) = sqlx::query_as::<_, Invite>(
             "SELECT * FROM invites
              WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?",

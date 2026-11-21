@@ -352,7 +352,7 @@ async fn trash_restore_and_purge_via_api() {
     let (status, _, body) = send(&server.app, request("GET", "/api/trash", None)).await;
     assert_eq!(status, StatusCode::OK);
     let entries = json(&body);
-    let entry = &entries.as_array().unwrap()[0];
+    let entry = &entries["entries"].as_array().unwrap()[0];
     assert_eq!(entry["name"], "trash-me.txt");
     assert_eq!(entry["original_path"], "/trash-me.txt");
     let id = entry["id"].as_i64().unwrap();
@@ -369,13 +369,10 @@ async fn trash_restore_and_purge_via_api() {
 
     // Trash it again and purge it permanently.
     send(&server.app, request("DELETE", "/dav/trash-me.txt", None)).await;
-    let id = json(
-        &send(&server.app, request("GET", "/api/trash", None))
-            .await
-            .2,
-    )
-    .as_array()
-    .unwrap()[0]["id"]
+    let body = send(&server.app, request("GET", "/api/trash", None))
+        .await
+        .2;
+    let id = json(&body)["entries"].as_array().unwrap()[0]["id"]
         .as_i64()
         .unwrap();
     let (status, _, _) = send(
@@ -385,7 +382,55 @@ async fn trash_restore_and_purge_via_api() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, _, body) = send(&server.app, request("GET", "/api/trash", None)).await;
-    assert!(json(&body).as_array().unwrap().is_empty());
+    assert!(json(&body)["entries"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn trash_pages_with_a_stable_cursor() {
+    let server = setup().await;
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        send(
+            &server.app,
+            request("PUT", &format!("/dav/{name}"), Some(b"x")),
+        )
+        .await;
+        send(
+            &server.app,
+            request("DELETE", &format!("/dav/{name}"), None),
+        )
+        .await;
+    }
+
+    let mut cursor: Option<String> = None;
+    let mut ids = Vec::new();
+    loop {
+        let uri = match &cursor {
+            Some(cursor) => format!("/api/trash?limit=1&cursor={cursor}"),
+            None => "/api/trash?limit=1".to_string(),
+        };
+        let (status, _, body) = send(&server.app, request("GET", &uri, None)).await;
+        assert_eq!(status, StatusCode::OK);
+        let page = json(&body);
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "one entry per page: {page}");
+        ids.push(entries[0]["id"].as_i64().unwrap());
+        if page["has_more"].as_bool().unwrap() {
+            cursor = Some(page["next_cursor"].as_str().unwrap().to_string());
+        } else {
+            assert!(page["next_cursor"].is_null());
+            break;
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 3, "every trashed node appears exactly once");
+
+    let (status, _, _) = send(
+        &server.app,
+        request("GET", "/api/trash?cursor=not-a-cursor", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

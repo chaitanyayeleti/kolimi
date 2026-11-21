@@ -4,7 +4,7 @@
 //! commit, so a crash at any point replays idempotent upserts from the
 //! last committed sequence.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kolimi_search::SearchDoc;
 
@@ -14,12 +14,17 @@ use crate::AppState;
 pub const INTERVAL: Duration = Duration::from_secs(30);
 /// Maximum change-feed entries consumed per user per pass.
 pub const MAX_BATCH: i64 = 2000;
+/// Maximum users indexed per pass; the least recently indexed go first, so a
+/// large instance is covered over several passes instead of one long scan.
+pub const MAX_USERS_PER_PASS: i64 = 100;
 /// Maximum bytes of a file indexed as text.
 pub const MAX_CONTENT_BYTES: usize = 1024 * 1024;
 
 /// What one indexing pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct IndexReport {
+    /// Users with pending changes processed.
+    pub users: u64,
     /// Documents added or refreshed.
     pub indexed: u64,
     /// Documents removed.
@@ -37,12 +42,17 @@ pub enum IndexerError {
     Search(#[from] kolimi_search::SearchError),
 }
 
-/// Runs one indexing pass for every user.
+/// Runs one indexing pass for users with pending changes.
 pub async fn run_once(state: &AppState) -> Result<IndexReport, IndexerError> {
     let mut report = IndexReport::default();
-    for user in state.db.list_users().await? {
-        let last = state.db.search_last_seq(user.id).await?;
-        let changes = state.db.changes_since(user.id, last, MAX_BATCH).await?;
+    for user_id in state
+        .db
+        .users_with_pending_changes(MAX_USERS_PER_PASS)
+        .await?
+    {
+        report.users += 1;
+        let last = state.db.search_last_seq(user_id).await?;
+        let changes = state.db.changes_since(user_id, last, MAX_BATCH).await?;
         if changes.is_empty() {
             continue;
         }
@@ -51,21 +61,21 @@ pub async fn run_once(state: &AppState) -> Result<IndexReport, IndexerError> {
             latest = latest.max(change.seq);
             match change.op.as_str() {
                 "delete" => {
-                    state.search.remove(user.id, &change.path)?;
+                    state.search.remove(user_id, &change.path)?;
                     report.removed += 1;
                 }
                 "move" => {
                     if let Some(from) = change.from_path.as_deref() {
-                        state.search.remove(user.id, from)?;
+                        state.search.remove(user_id, from)?;
                         report.removed += 1;
                     }
-                    index_path(state, user.id, &change.path, &mut report).await?;
+                    index_path(state, user_id, &change.path, &mut report).await?;
                 }
-                _ => index_path(state, user.id, &change.path, &mut report).await?,
+                _ => index_path(state, user_id, &change.path, &mut report).await?,
             }
         }
         state.search.commit()?;
-        state.db.set_search_last_seq(user.id, latest).await?;
+        state.db.set_search_last_seq(user_id, latest).await?;
     }
     Ok(report)
 }
@@ -126,16 +136,30 @@ pub async fn run(state: AppState) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
+        let started = Instant::now();
         match run_once(&state).await {
-            Ok(report) if report != IndexReport::default() => {
-                tracing::info!(
-                    indexed = report.indexed,
-                    removed = report.removed,
-                    "search indexer pass complete"
+            Ok(report) => {
+                state.metrics.indexer_pass(
+                    "success",
+                    started.elapsed().as_secs_f64(),
+                    report.indexed,
+                    report.removed,
                 );
+                if report != IndexReport::default() {
+                    tracing::info!(
+                        users = report.users,
+                        indexed = report.indexed,
+                        removed = report.removed,
+                        "search indexer pass complete"
+                    );
+                }
             }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(error = %error, "search indexer pass failed"),
+            Err(error) => {
+                state
+                    .metrics
+                    .indexer_pass("error", started.elapsed().as_secs_f64(), 0, 0);
+                tracing::warn!(error = %error, "search indexer pass failed");
+            }
         }
     }
 }

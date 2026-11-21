@@ -225,7 +225,7 @@ impl Db {
         size: i64,
         now: i64,
     ) -> Result<DavObject, DbError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let object = sqlx::query_as::<_, DavObject>(
             "INSERT INTO dav_objects
                  (collection_id, name, uid, content_type, data, etag, size, created_at, modified_at)
@@ -278,7 +278,7 @@ impl Db {
     /// Deletes an object, recording a change. Returns whether it existed.
     pub async fn delete_dav_object(&self, collection_id: i64, name: &str) -> Result<bool, DbError> {
         let now = now_millis();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let result = sqlx::query("DELETE FROM dav_objects WHERE collection_id = ? AND name = ?")
             .bind(collection_id)
             .bind(name)

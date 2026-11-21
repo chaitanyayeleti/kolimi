@@ -100,7 +100,7 @@ impl Db {
         max_devices: i64,
         max_packages: i64,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.begin_immediate_write().await?;
         let existing: Option<(i64,)> =
             sqlx::query_as("SELECT 1 FROM mls_devices WHERE user_id = ? AND device_id = ?")
                 .bind(user_id)
@@ -357,7 +357,7 @@ impl Db {
     /// device's packages from being added to a future group. Stale epoch
     /// reports are dropped so they cannot block message pruning.
     pub async fn delete_mls_device(&self, user_id: i64, device_id: &str) -> Result<bool, DbError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.begin_immediate_write().await?;
         sqlx::query("DELETE FROM mls_key_packages WHERE user_id = ? AND device_id = ?")
             .bind(user_id)
             .bind(device_id)
@@ -528,7 +528,7 @@ impl Db {
         // Serialize writers before reading the epoch. A deferred transaction
         // could read epoch N, lose the write race, and then commit against a
         // snapshot that has already advanced.
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.begin_immediate_write().await?;
         let current: Option<(i64,)> =
             sqlx::query_as("SELECT epoch FROM mls_node_groups WHERE node_id = ?")
                 .bind(node_id)
@@ -623,7 +623,7 @@ impl Db {
         welcome: Option<&[u8]>,
         sender_id: i64,
     ) -> Result<(i64, Option<i64>), DbError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.begin_immediate_write().await?;
         let current: Option<(i64,)> =
             sqlx::query_as("SELECT epoch FROM mls_node_groups WHERE node_id = ?")
                 .bind(node_id)

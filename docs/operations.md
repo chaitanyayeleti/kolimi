@@ -307,12 +307,17 @@ tokens, and file bytes are never logged.
   by route template and status
 - file and chunk upload/download bytes
 - preview outcomes and duration
-- login outcomes and failures, live sessions, and app passwords
-- accounts, quota buckets, storage used, files, trash, and versions
+- login outcomes and failures, live sessions, app passwords, and
+  session/app-password timestamp writes (`written` / `skipped`)
+- accounts, quota buckets, storage used, files, trash, versions, and
+  `/api/browse` page sizes
 - SSE connections and rejections, rate-limit rejections
 - MLS commit results
-- SQLite pool usage plus busy/error counters, janitor passes/events,
-  process RSS/CPU/threads/FDs on Linux, build version, and start time
+- SQLite pool usage, busy/error counters, write transactions begun, audit
+  rows and change-feed rows appended
+- search-indexer passes, duration, and documents indexed/removed
+- janitor passes/events, process RSS/CPU/threads/FDs on Linux, build
+  version, and start time
 
 Labels never contain raw request paths, file names, or user identifiers.
 User/quota and database-snapshot gauges are rebuilt at most every 30 seconds;
@@ -439,7 +444,17 @@ file content updates and skips the full remote tree walk on those passes.
 Directory creation/deletion, moves, and other structural changes deliberately
 fall back to a full reconciliation. The local filesystem is still scanned by
 push, so very large local trees remain CPU-bound on the client; the server no
-longer serves a full snapshot for every file edit.
+longer serves a full snapshot for every file edit. Trash listings are
+paginated with the same `limit`/`cursor` pattern as directory browsing.
+
+The search indexer only visits accounts with unindexed change-feed rows. The
+janitor processes bounded per-account batches: expired trash/versions first,
+then accounts whose delete has not been swept, then the least-recently-swept
+and least-recently-scrubbed accounts. A pass no longer grows with the total
+account count; with the defaults, each pass handles up to 100 retention
+accounts, 50 GC accounts, 50 scrub accounts, and 50 usage reconciliations.
+`kolimi_janitor_events_total{kind="gc_users"|"scrub_users"|"retention_users"}`
+shows the actual work done.
 
 Backups are a full SQLite snapshot plus a blob copy. `--incremental` skips
 blobs already present and hard-links new ones on the same filesystem

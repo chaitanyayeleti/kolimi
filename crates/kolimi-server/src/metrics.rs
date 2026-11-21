@@ -17,7 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use prometheus::{
-    Counter, Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    Counter, Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
     IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use serde::Deserialize;
@@ -45,6 +45,15 @@ pub struct Metrics {
     preview_duration: HistogramVec,
     login_failures: IntCounter,
     logins: IntCounterVec,
+    auth_touches: IntCounterVec,
+    browse_page_entries: Histogram,
+    browse_pages: IntCounterVec,
+    db_write_transactions: IntCounter,
+    db_audit_entries: IntCounter,
+    db_change_events: IntCounter,
+    indexer_runs: IntCounterVec,
+    indexer_documents: IntCounterVec,
+    indexer_duration: HistogramVec,
     usage_bucket: IntGaugeVec,
     users_total: IntGaugeVec,
     users_mfa_pending: IntGauge,
@@ -74,6 +83,9 @@ pub struct Metrics {
     db_busy_errors: IntCounter,
     last_db_errors: Arc<Mutex<u64>>,
     last_db_busy_errors: Arc<Mutex<u64>>,
+    last_db_write_transactions: Arc<Mutex<u64>>,
+    last_db_audit_entries: Arc<Mutex<u64>>,
+    last_db_change_events: Arc<Mutex<u64>>,
     last_process_cpu: Arc<Mutex<f64>>,
     per_user_usage: bool,
     last_usage_refresh: Arc<Mutex<Option<Instant>>>,
@@ -164,6 +176,60 @@ impl Metrics {
                 "Successful and challenged login outcomes (no user labels)",
             ),
             &["outcome"],
+        )?;
+        let auth_touches = IntCounterVec::new(
+            Opts::new(
+                "kolimi_auth_timestamp_writes_total",
+                "Credential timestamp refreshes, written or skipped by the minute throttle",
+            ),
+            &["credential", "result"],
+        )?;
+        let browse_page_entries = Histogram::with_opts(
+            HistogramOpts::new(
+                "kolimi_browse_page_entries",
+                "Entries returned per /api/browse response",
+            )
+            .buckets(vec![
+                0.0, 1.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+            ]),
+        )?;
+        let browse_pages = IntCounterVec::new(
+            Opts::new(
+                "kolimi_browse_pages_total",
+                "Directory pages served, split by whether another page exists",
+            ),
+            &["has_more"],
+        )?;
+        let db_write_transactions = IntCounter::new(
+            "kolimi_db_write_transactions_total",
+            "Cumulative SQLite write transactions begun by this process",
+        )?;
+        let db_audit_entries = IntCounter::new(
+            "kolimi_audit_entries_appended_total",
+            "Cumulative audit rows appended by this process",
+        )?;
+        let db_change_events = IntCounter::new(
+            "kolimi_change_events_appended_total",
+            "Cumulative change-feed rows appended by this process",
+        )?;
+        let indexer_runs = IntCounterVec::new(
+            Opts::new("kolimi_indexer_runs_total", "Search indexer pass results"),
+            &["result"],
+        )?;
+        let indexer_documents = IntCounterVec::new(
+            Opts::new(
+                "kolimi_indexer_documents_total",
+                "Documents indexed or removed by the search indexer",
+            ),
+            &["outcome"],
+        )?;
+        let indexer_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "kolimi_indexer_duration_seconds",
+                "Search indexer pass duration by result",
+            )
+            .buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 15.0, 60.0]),
+            &["result"],
         )?;
         let usage_bucket = IntGaugeVec::new(
             Opts::new(
@@ -300,6 +366,15 @@ impl Metrics {
         registry.register(Box::new(preview_duration.clone()))?;
         registry.register(Box::new(login_failures.clone()))?;
         registry.register(Box::new(logins.clone()))?;
+        registry.register(Box::new(auth_touches.clone()))?;
+        registry.register(Box::new(browse_page_entries.clone()))?;
+        registry.register(Box::new(browse_pages.clone()))?;
+        registry.register(Box::new(db_write_transactions.clone()))?;
+        registry.register(Box::new(db_audit_entries.clone()))?;
+        registry.register(Box::new(db_change_events.clone()))?;
+        registry.register(Box::new(indexer_runs.clone()))?;
+        registry.register(Box::new(indexer_documents.clone()))?;
+        registry.register(Box::new(indexer_duration.clone()))?;
         registry.register(Box::new(usage_bucket.clone()))?;
         registry.register(Box::new(users_total.clone()))?;
         registry.register(Box::new(users_mfa_pending.clone()))?;
@@ -333,6 +408,22 @@ impl Metrics {
             .with_label_values(&[env!("CARGO_PKG_VERSION")])
             .set(1);
         start_time.set(unix_seconds());
+        // Create zero-valued children for low-cardinality vectors so
+        // dashboards see a stable family before the first event.
+        for result in ["success", "error"] {
+            indexer_runs.with_label_values(&[result]);
+        }
+        for outcome in ["indexed", "removed"] {
+            indexer_documents.with_label_values(&[outcome]);
+        }
+        for credential in ["session", "app_password"] {
+            for result in ["written", "skipped", "error"] {
+                auth_touches.with_label_values(&[credential, result]);
+            }
+        }
+        for has_more in ["true", "false"] {
+            browse_pages.with_label_values(&[has_more]);
+        }
         Ok(Self {
             registry,
             requests,
@@ -349,6 +440,15 @@ impl Metrics {
             preview_duration,
             login_failures,
             logins,
+            auth_touches,
+            browse_page_entries,
+            browse_pages,
+            db_write_transactions,
+            db_audit_entries,
+            db_change_events,
+            indexer_runs,
+            indexer_documents,
+            indexer_duration,
             usage_bucket,
             users_total,
             users_mfa_pending,
@@ -378,6 +478,9 @@ impl Metrics {
             db_busy_errors,
             last_db_errors: Arc::new(Mutex::new(0)),
             last_db_busy_errors: Arc::new(Mutex::new(0)),
+            last_db_write_transactions: Arc::new(Mutex::new(0)),
+            last_db_audit_entries: Arc::new(Mutex::new(0)),
+            last_db_change_events: Arc::new(Mutex::new(0)),
             last_process_cpu: Arc::new(Mutex::new(0.0)),
             per_user_usage: std::env::var("KOLIMI_METRICS_PER_USER")
                 .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
@@ -510,8 +613,9 @@ impl Metrics {
         self.db_pool.with_label_values(&["idle"]).set(idle);
     }
 
-    /// Updates cumulative SQLite error counters from the database layer.
-    pub fn set_db_counters(&self, errors: u64, busy: u64) {
+    /// Updates cumulative SQLite error and write-volume counters from the
+    /// database layer.
+    pub fn set_db_counters(&self, errors: u64, busy: u64, write_tx: u64, audit: u64, changes: u64) {
         fn bump(counter: &IntCounter, last: &Mutex<u64>, value: u64) {
             let mut last = last
                 .lock()
@@ -524,6 +628,13 @@ impl Metrics {
         }
         bump(&self.db_errors, &self.last_db_errors, errors);
         bump(&self.db_busy_errors, &self.last_db_busy_errors, busy);
+        bump(
+            &self.db_write_transactions,
+            &self.last_db_write_transactions,
+            write_tx,
+        );
+        bump(&self.db_audit_entries, &self.last_db_audit_entries, audit);
+        bump(&self.db_change_events, &self.last_db_change_events, changes);
     }
 
     fn set_process_cpu(&self, seconds: f64) {
@@ -560,6 +671,40 @@ impl Metrics {
     /// Counts an MLS commit result (`ok`, `conflict`, `error`).
     pub fn mls_commit(&self, result: &str) {
         self.mls_commits.with_label_values(&[result]).inc();
+    }
+
+    /// Counts a credential timestamp refresh (`written`, `skipped`, or
+    /// `error`) by the once-per-minute throttle.
+    pub fn auth_touch(&self, credential: &str, result: &str) {
+        self.auth_touches
+            .with_label_values(&[credential, result])
+            .inc();
+    }
+
+    /// Records one `/api/browse` page and its size.
+    pub fn browse_page(&self, entries: usize, has_more: bool) {
+        self.browse_page_entries.observe(entries as f64);
+        self.browse_pages
+            .with_label_values(&[if has_more { "true" } else { "false" }])
+            .inc();
+    }
+
+    /// Records one search-indexer pass.
+    pub fn indexer_pass(&self, result: &str, seconds: f64, indexed: u64, removed: u64) {
+        self.indexer_runs.with_label_values(&[result]).inc();
+        self.indexer_duration
+            .with_label_values(&[result])
+            .observe(seconds);
+        if indexed > 0 {
+            self.indexer_documents
+                .with_label_values(&["indexed"])
+                .inc_by(indexed);
+        }
+        if removed > 0 {
+            self.indexer_documents
+                .with_label_values(&["removed"])
+                .inc_by(removed);
+        }
     }
 
     /// Records one janitor pass.
@@ -943,9 +1088,13 @@ pub async fn handler(
     );
     let (size, idle) = state.db.pool_stats();
     state.metrics.set_pool_stats(size, idle);
-    state
-        .metrics
-        .set_db_counters(kolimi_db::sqlite_errors(), kolimi_db::sqlite_busy_errors());
+    state.metrics.set_db_counters(
+        kolimi_db::sqlite_errors(),
+        kolimi_db::sqlite_busy_errors(),
+        kolimi_db::write_transactions(),
+        kolimi_db::audit_entries_appended(),
+        kolimi_db::change_events_appended(),
+    );
     if state.metrics.try_begin_usage_refresh() {
         match state.db.list_users().await {
             Ok(users) => {

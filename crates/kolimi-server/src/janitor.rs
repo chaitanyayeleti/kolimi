@@ -23,6 +23,12 @@ pub const GC_GRACE: Duration = Duration::from_secs(60 * 60);
 pub const INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Blobs re-verified per user per pass.
 pub const SCRUB_BATCH: usize = 200;
+/// Users with expired trash/versions handled per pass.
+pub const RETENTION_BATCH: i64 = 100;
+/// Accounts swept for garbage per pass.
+pub const GC_BATCH: i64 = 50;
+/// Accounts scrubbed per pass (each checks `SCRUB_BATCH` blobs).
+pub const SCRUB_USERS: i64 = 50;
 /// Usage counters recomputed from disk per pass (bounded; least-recently
 /// reconciled users first).
 pub const RECONCILE_BATCH: i64 = 50;
@@ -40,14 +46,20 @@ pub const MLS_MESSAGE_RETENTION_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// What one janitor pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
+    /// Accounts with expired trash or versions processed.
+    pub retention_users: u64,
     /// Trashed nodes permanently deleted.
     pub purged_trash: u64,
     /// Old versions pruned.
     pub pruned_versions: u64,
+    /// Accounts swept for unreferenced blobs.
+    pub gc_users: u64,
     /// Chunk blobs reclaimed.
     pub chunks_deleted: u64,
     /// Manifest blobs reclaimed.
     pub manifests_deleted: u64,
+    /// Accounts scrubbed.
+    pub scrub_users: u64,
     /// Expired public-link unlock sessions removed.
     pub expired_link_sessions: u64,
     /// Expired device enrollments removed.
@@ -82,24 +94,53 @@ pub enum JanitorError {
     Store(#[from] kolimi_store::StoreError),
 }
 
-/// Runs one maintenance pass for every user.
+/// Runs one maintenance pass.
+///
+/// Work is scheduled per account instead of scanning every account:
+/// expired-retention accounts first, then accounts with uncollected deletes,
+/// then the least-recently-swept and least-recently-scrubbed batches. Every
+/// batch is bounded, so pass time does not grow with the total user count.
 pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError> {
     let mut report = Report::default();
-    let users = state.db.list_users().await?;
-    for user in users {
-        report.purged_trash += state
-            .db
-            .purge_trash(user.id, now - TRASH_RETENTION_MILLIS)
-            .await?;
-        report.pruned_versions += state
-            .db
-            .prune_versions(user.id, now - VERSION_RETENTION_MILLIS)
-            .await?;
-        let swept = state.vfs.collect_garbage(user.id, GC_GRACE).await?;
-        report.chunks_deleted += swept.chunks_deleted;
-        report.manifests_deleted += swept.manifests_deleted;
-        scrub_user(state, user.id, &mut report).await?;
+    let trash_cutoff = now - TRASH_RETENTION_MILLIS;
+    let version_cutoff = now - VERSION_RETENTION_MILLIS;
+
+    let mut swept = std::collections::HashSet::new();
+
+    // Accounts with expired retention get priority and a sweep immediately:
+    // purging rows is what makes their blobs unreferenced.
+    for user_id in state
+        .db
+        .users_with_expired_retention(trash_cutoff, version_cutoff, RETENTION_BATCH)
+        .await?
+    {
+        report.retention_users += 1;
+        report.purged_trash += state.db.purge_trash(user_id, trash_cutoff).await?;
+        report.pruned_versions += state.db.prune_versions(user_id, version_cutoff).await?;
+        sweep_user(state, user_id, now, &mut report).await?;
+        swept.insert(user_id);
     }
+
+    // Accounts with a delete or emptied trash since their last sweep.
+    for user_id in state.db.users_with_pending_gc(GC_BATCH).await? {
+        if swept.insert(user_id) {
+            sweep_user(state, user_id, now, &mut report).await?;
+        }
+    }
+
+    // Rotating sweep: never-swept and then least-recently-swept accounts.
+    for user_id in state.db.users_due_for_gc(GC_BATCH).await? {
+        if swept.insert(user_id) {
+            sweep_user(state, user_id, now, &mut report).await?;
+        }
+    }
+
+    // Rotating scrub: `SCRUB_BATCH` blobs per account.
+    for user_id in state.db.users_due_for_scrub(SCRUB_USERS).await? {
+        report.scrub_users += 1;
+        scrub_user(state, user_id, &mut report).await?;
+    }
+
     report.expired_link_sessions = state.db.delete_expired_link_sessions(now).await?;
     report.expired_enrollments = state.db.purge_expired_enrollments().await?;
     report.pruned_mls_key_packages = state
@@ -125,6 +166,21 @@ pub async fn run_once(state: &AppState, now: i64) -> Result<Report, JanitorError
         report.reconciled += 1;
     }
     Ok(report)
+}
+
+/// Sweeps one account's unreferenced blobs and records the sweep cursor.
+async fn sweep_user(
+    state: &AppState,
+    user_id: i64,
+    now: i64,
+    report: &mut Report,
+) -> Result<(), JanitorError> {
+    let swept = state.vfs.collect_garbage(user_id, GC_GRACE).await?;
+    report.gc_users += 1;
+    report.chunks_deleted += swept.chunks_deleted;
+    report.manifests_deleted += swept.manifests_deleted;
+    state.db.set_last_gc(user_id, now).await?;
+    Ok(())
 }
 
 /// Re-verifies one batch of a user's blobs and advances the cursor.
@@ -179,16 +235,23 @@ pub async fn run(state: AppState) {
                     .janitor_pass("success", started.elapsed().as_secs_f64());
                 state
                     .metrics
+                    .janitor_event("retention_users", report.retention_users);
+                state
+                    .metrics
                     .janitor_event("trash_purged", report.purged_trash);
                 state
                     .metrics
                     .janitor_event("versions_pruned", report.pruned_versions);
+                state.metrics.janitor_event("gc_users", report.gc_users);
                 state
                     .metrics
                     .janitor_event("chunks_deleted", report.chunks_deleted);
                 state
                     .metrics
                     .janitor_event("manifests_deleted", report.manifests_deleted);
+                state
+                    .metrics
+                    .janitor_event("scrub_users", report.scrub_users);
                 state
                     .metrics
                     .janitor_event("link_sessions_expired", report.expired_link_sessions);
@@ -214,10 +277,13 @@ pub async fn run(state: AppState) {
                 state.metrics.janitor_event("reconciled", report.reconciled);
                 if report != Report::default() {
                     tracing::info!(
+                        retention_users = report.retention_users,
                         purged_trash = report.purged_trash,
                         pruned_versions = report.pruned_versions,
+                        gc_users = report.gc_users,
                         chunks_deleted = report.chunks_deleted,
                         manifests_deleted = report.manifests_deleted,
+                        scrub_users = report.scrub_users,
                         expired_link_sessions = report.expired_link_sessions,
                         expired_enrollments = report.expired_enrollments,
                         pruned_mls_key_packages = report.pruned_mls_key_packages,

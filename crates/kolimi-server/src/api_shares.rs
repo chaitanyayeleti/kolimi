@@ -297,14 +297,24 @@ pub async fn owned(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
-    let shares = match state.db.shares_owned(user.user_id).await {
-        Ok(shares) => shares,
+    let details = match state.db.shares_owned_detailed(user.user_id).await {
+        Ok(details) => details,
         Err(_) => return api::internal_error(),
     };
-    let mut items = Vec::with_capacity(shares.len());
-    for share in &shares {
-        items.push(share_json(&state, share, None).await);
-    }
+    let items: Vec<Value> = details
+        .iter()
+        .map(|detail| {
+            let share = &detail.share;
+            share_json_from(
+                share,
+                None,
+                detail.recipient.clone(),
+                detail.path.clone(),
+                detail.node_kind.as_deref() == Some("dir"),
+                detail.encrypted,
+            )
+        })
+        .collect();
     Json(json!({ "shares": items })).into_response()
 }
 
@@ -1187,9 +1197,6 @@ async fn share_json(state: &AppState, share: &ShareRow, generated_password: Opti
         .await
         .ok()
         .flatten();
-    let missing = path.is_none();
-    let path = path.unwrap_or_default();
-    let name = path.rsplit('/').next().unwrap_or_default().to_string();
     let recipient = if let Some(user_id) = share.recipient_user_id {
         state
             .db
@@ -1216,15 +1223,36 @@ async fn share_json(state: &AppState, share: &ShareRow, generated_password: Opti
         .ok()
         .flatten();
     let is_dir = node.as_ref().is_some_and(|node| node.kind == "dir");
-    let encrypted = if path.is_empty() {
+    let encrypted = if path.is_none() {
         false
     } else {
         state
             .vfs
-            .path_is_encrypted(share.owner_id, &path)
+            .path_is_encrypted(share.owner_id, path.as_deref().unwrap_or_default())
             .await
             .unwrap_or(false)
     };
+    share_json_from(
+        share,
+        generated_password,
+        recipient,
+        path,
+        is_dir,
+        encrypted,
+    )
+}
+
+fn share_json_from(
+    share: &ShareRow,
+    generated_password: Option<&str>,
+    recipient: Option<String>,
+    path: Option<String>,
+    is_dir: bool,
+    encrypted: bool,
+) -> Value {
+    let missing = path.is_none();
+    let path = path.unwrap_or_default();
+    let name = path.rsplit('/').next().unwrap_or_default().to_string();
     let upload_only = share.kind == "link" && share.permission == "write";
     json!({
         "id": share.id,

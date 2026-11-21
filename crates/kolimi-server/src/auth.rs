@@ -304,7 +304,14 @@ async fn authenticate_basic(
             .last_used_at
             .is_none_or(|last| now.saturating_sub(last) >= AUTH_TOUCH_INTERVAL_MILLIS)
         {
-            let _ = state.db.touch_app_password(app.id, now).await;
+            let result = if state.db.touch_app_password(app.id, now).await.is_ok() {
+                "written"
+            } else {
+                "error"
+            };
+            state.metrics.auth_touch("app_password", result);
+        } else {
+            state.metrics.auth_touch("app_password", "skipped");
         }
         return Ok((
             CurrentUser {
@@ -414,7 +421,14 @@ async fn authenticate_token(state: &AppState, raw_token: &str) -> Result<Current
         return Err(unauthorized());
     }
     if now.saturating_sub(session.last_seen_at) >= AUTH_TOUCH_INTERVAL_MILLIS {
-        let _ = state.db.touch_session(session.id, now).await;
+        let result = if state.db.touch_session(session.id, now).await.is_ok() {
+            "written"
+        } else {
+            "error"
+        };
+        state.metrics.auth_touch("session", result);
+    } else {
+        state.metrics.auth_touch("session", "skipped");
     }
 
     Ok(CurrentUser {

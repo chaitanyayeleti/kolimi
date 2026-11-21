@@ -238,7 +238,11 @@ pub(super) fn parse_trash(
     master: Option<&MasterKey>,
     shares: &[crate::e2ee::ShareDisplay],
 ) -> Vec<TrashItem> {
-    body.as_array()
+    let items = body
+        .get("entries")
+        .and_then(Value::as_array)
+        .or_else(|| body.as_array());
+    items
         .map(|items| {
             items
                 .iter()

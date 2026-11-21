@@ -482,6 +482,9 @@ pub(crate) fn FileArea(
 #[component]
 pub(crate) fn TrashArea(
     trash: RwSignal<Vec<TrashItem>>,
+    has_more: RwSignal<bool>,
+    loading_more: RwSignal<bool>,
+    on_load_more: Callback<()>,
     on_restore: Callback<TrashItem>,
     on_purge: Callback<TrashItem>,
 ) -> impl IntoView {
@@ -509,6 +512,23 @@ pub(crate) fn TrashArea(
                         }
                     />
                 </ul>
+                <Show when=move || has_more.get()>
+                    <div class="load-more">
+                        <button
+                            class="ghost"
+                            disabled=move || loading_more.get()
+                            on:click=move |_| on_load_more.run(())
+                        >
+                            {move || {
+                                if loading_more.get() {
+                                    "Loading…"
+                                } else {
+                                    "Load more"
+                                }
+                            }}
+                        </button>
+                    </div>
+                </Show>
             }
                 .into_any()
         }}
