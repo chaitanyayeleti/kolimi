@@ -347,6 +347,30 @@ unsigned checkpoints. A journal on the server's own disk adds no protection;
 use WORM/object-lock storage or a second host. Details and rotation:
 [operations.md](operations.md#signing-checkpoints).
 
+With the Traefik/Docker stack in `packaging/docker/compose.traefik.yaml`, the
+container runs as UID `65532` (distroless nonroot). Mount the key read-only and
+set the path in the `kolimi` service:
+
+```yaml
+    environment:
+      KOLIMI_AUDIT_SIGNING_KEY: /run/secrets/audit-signing.key
+    volumes:
+      - kolimi-data:/data
+      - /etc/kolimi/audit-signing.key:/run/secrets/audit-signing.key:ro
+```
+
+The host file must be owned by `65532` with mode `0600`:
+
+```sh
+sudo install -m 600 -o 65532 -g 65532 audit-signing.key \
+  /etc/kolimi/audit-signing.key
+```
+
+Generate the key on the host or another machine, not inside the container's
+`/data` volume. This compose file lists environment variables explicitly, so
+putting `KOLIMI_AUDIT_SIGNING_KEY` only in `.env` is not enough unless the
+service references it as `${KOLIMI_AUDIT_SIGNING_KEY}`.
+
 ### Scrape metrics
 
 On 0.5.1+, set `KOLIMI_METRICS_TOKEN` in the server environment (systemd
