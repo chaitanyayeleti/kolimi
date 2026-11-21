@@ -528,6 +528,7 @@ test("web admin creates and deletes a user", async ({ page }) => {
   await create.getByLabel("Username", { exact: true }).fill(username);
   await create.getByLabel("Initial password", { exact: true }).fill("e2e-password-123");
   await create.getByLabel("Confirm password", { exact: true }).fill("e2e-password-123");
+  await create.getByLabel("Your password", { exact: true }).fill(PASS);
   await create.getByRole("button", { name: "Create user", exact: true }).click();
 
   const row = page.locator("main.content tbody tr", { hasText: username }).first();
@@ -557,6 +558,7 @@ test("web invite onboarding creates an account", async ({ page }) => {
   await create.getByLabel("Username", { exact: true }).fill(username);
   await create.getByLabel("Display name", { exact: true }).fill("Invite Person");
   await create.getByLabel("Email", { exact: true }).fill("invite@example.test");
+  await create.getByLabel("Your password", { exact: true }).fill(PASS);
   await create.getByRole("button", { name: "Create invite", exact: true }).click();
 
   await expect(
@@ -605,6 +607,7 @@ test("web forces a temporary password change", async ({ page }) => {
   await create
     .getByLabel("Require password change at next sign-in", { exact: true })
     .check();
+  await create.getByLabel("Your password", { exact: true }).fill(PASS);
   await create.getByRole("button", { name: "Create user", exact: true }).click();
   await expect(
     page.locator("main.content tbody tr", { hasText: username }).first(),
@@ -644,6 +647,7 @@ test("web admin manages groups and members", async ({ page }) => {
   await page.getByRole("button", { name: "Create group", exact: true }).click();
   const create = page.locator(".modal");
   await create.getByLabel("Name", { exact: true }).fill(name);
+  await create.getByLabel("Your password", { exact: true }).fill(PASS);
   await create.getByRole("button", { name: "Create group", exact: true }).click();
 
   const group = page.locator("main.content li.row", { hasText: name }).first();
@@ -660,6 +664,7 @@ test("web admin manages groups and members", async ({ page }) => {
     }),
   ).toBeVisible();
 
+  await detail.getByLabel("Your password", { exact: true }).fill(PASS);
   await detail.getByLabel("Add member", { exact: true }).fill("bob");
   await detail.getByRole("button", { name: "Add", exact: true }).click();
   await expect(detail.getByText("Added bob.", { exact: true })).toBeVisible();
