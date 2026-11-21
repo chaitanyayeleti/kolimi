@@ -69,7 +69,8 @@ cargo vet --locked
 - `scripts/litmus.sh` is the WebDAV compliance suite; it downloads and builds
   neon (network + C deps), so run it only for DAV changes. Port 18099.
 - Perf gates are `#[ignore]`d:
-  `cargo test --release -p kolimi-server --test load -- --ignored`.
+  `cargo test --release -p kolimi-server --test load -- --ignored`. The perf
+  job also runs the 100k-file/multi-client soak and the `< 50 MB` binary gate.
 - Docs: `scripts/check-docs.sh` checks relative links, the RFC index and
   known stale claims (also a CI job).
 - Browser: `./scripts/build-ui.sh && cargo build -p kolimi-server -p kolimi-sync`,
@@ -132,10 +133,51 @@ cargo vet --locked
   `audit` are the maintenance commands.
 - Integration tests build the axum app in-process with temp dirs; no Docker,
   Postgres or external service is needed.
+- Release images use distroless `nonroot` (UID 65532). A bind-mounted audit
+  signing key must be owned by `65532` and mode `0600`. The Docker compose
+  files set environment variables explicitly, so a variable only in `.env`
+  does not reach the container unless the service references it.
+
+## Audit log and signing
+
+- `crates/kolimi-db/src/audit.rs` owns the hash chain, sealed checkpoints,
+  Ed25519 signatures and the anchor outbox;
+  `crates/kolimi-server/src/anchor.rs` owns journal/HTTP delivery. Do not move
+  signing into `kolimi-crypto` — the server's use of that crate is limited to
+  public-key validation.
+- The signing-key format is `kolimi-audit-signing-key-v1` plus one line of 64
+  hex chars (the 32-byte Ed25519 seed). There is no PEM/OpenSSH import; use
+  `audit keygen`. The key must be a regular file, mode `0600`/`0400`, outside
+  the data directory.
+- When anchoring is enabled, the checkpoint, signature and anchor-outbox row
+  commit in one transaction. If `KOLIMI_AUDIT_SIGNING_KEY` is set but
+  unreadable, sealing must be refused; never reintroduce a fallback that
+  writes silently unsigned checkpoints.
+- Verify signatures against operator-pinned keys (`--trusted-key`), never the
+  public key stored in `audit_signing_keys` — a DB writer can replace that
+  row. `audit verify --anchor-log` also detects truncation/rollback.
+- `audit prune` only accepts a sealed checkpoint boundary and always keeps the
+  newest entry; checkpoint headers are never pruned. Anchoring is optional and
+  signing needs no external service. The janitor seals at 1,024 unsealed
+  entries or 24h (`KOLIMI_AUDIT_SEAL_AGE_SECS`).
+
+## Sync client invariants
+
+- `crates/kolimi-sync/src/lib.rs` keeps `.kolimi/state.json`. Directory mtimes
+  skip `read_dir` for unchanged directories, but tracked files are still
+  stat'ed. Keep the structural change-feed fast path; a full tree walk is
+  only the fallback for unknown ops/kinds or an old server.
+- `missing` and `deleted` are different states: pull marks a locally absent
+  file `missing` so push can still detect a local rename, while `deleted` is a
+  user tombstone. Collapsing them breaks MOVE detection.
+- A local rename with unchanged content becomes one WebDAV MOVE; deleting a
+  local directory becomes one DELETE for the subtree. The test server in
+  `crates/kolimi-server/tests/sync_client.rs` counts tree walks and DAV
+  DELETEs; add assertions there when changing this behavior.
 
 ## Cost / disk
 
-- 739 locked packages, 15 crates and 32 integration test files. Full debug
+- 682 locked packages, 15 crates and 40 integration test files. Full debug
   test/clippy matrices are heavy (multi-GB, historically hundreds of GB with
   full debuginfo/incremental). Batch edits, use `cargo check --tests`, run the
   full matrix once, and clean target dirs after release-verification passes.
@@ -148,26 +190,35 @@ cargo vet --locked
 
 - Read `docs/README.md`, `docs/architecture.md`, `docs/reference.md`,
   `docs/rfc/README.md`, `docs/audit/README.md` and `docs/plans/releases.md`.
+- Audit work: read RFC 0013/0014 and the "Audit log", "Signing checkpoints"
+  and "External anchoring" sections in `docs/operations.md`; the task recipe
+  is `docs/how-to.md`.
 - `docs/rfc/README.md` is the design/implementation status table; update it
   when an RFC ships. Keep the `Last verified` dates in `docs/README.md` and
   the RFC index in sync with a release. `scripts/check-docs.sh` guards links
   and stale claims.
 - Releases: `vX.Y.Z` triggers the server/CLI/container/Helm/AUR release;
-  `desktop-vX.Y.Z` triggers the desktop bundles. Push both tags for a paired
-  release. Server containers are built from the release binaries (no second
-  Rust compile in Docker); the gnu build is pinned to Ubuntu 24.04 and the
-  runtime image to `distroless/cc-debian13`, so keep that glibc pair aligned.
-  CI smoke-tests the built image's `/healthz` before pushing. Desktop
-  platform builds run in parallel and publish once.
+  `desktop-vX.Y.Z` triggers the desktop bundles. Paired releases push both
+  tags at the same commit. A **server-only patch** (for example 0.7.1) pushes
+  only `vX.Y.Z`: leave the desktop app version in
+  `apps/kolimi-desktop/Cargo.toml` and `tauri.conf.json` at its last release,
+  bump only its `kolimi-sync` pin and desktop lockfile. Server containers are
+  built from the release binaries (no second Rust compile in Docker); the gnu
+  build is pinned to Ubuntu 24.04 and the runtime image to
+  `distroless/cc-debian13`, so keep that glibc pair aligned. CI smoke-tests the
+  built image's `/healthz` before pushing. Desktop platform builds run in
+  parallel and publish once.
 - Before tagging: `main` green (dispatch any expensive gates the path filters
   skipped), `CHANGELOG.md` entry, version bumped in `[workspace.package]`,
   every `version =` in `[workspace.dependencies]` (including
-  `crates/kolimi-store`'s `kolimi-chunk`), the desktop manifests
-  (`Cargo.toml`, `tauri.conf.json`) and `packaging/`; regenerate the root,
-  desktop and fuzz lockfiles. Test backup/restore for any new migration.
-- After tagging, verify both workflows, release assets, GHCR multi-arch
-  images, Helm `appVersion`, AUR checksums, the installer and a desktop
-  launch; the full checklist is in `docs/plans/releases.md`.
+  `crates/kolimi-store`'s `kolimi-chunk`) and server packaging
+  (`packaging/docker`, `packaging/helm`); regenerate the root, desktop and
+  fuzz lockfiles. For a paired release also bump the desktop manifests. Test
+  backup/restore for any new migration.
+- After tagging, verify the triggered workflow(s), release assets, GHCR
+  multi-arch images, Helm `appVersion`, AUR checksums, the installer and a
+  desktop launch when one was released; the full checklist is in
+  `docs/plans/releases.md`.
 - Accepted RustSec warnings live in `.cargo/audit.toml`, `deny.toml` and
   `docs/known-advisories.md` with revisit conditions; keep them in sync and
   don't add new ignores silently.
