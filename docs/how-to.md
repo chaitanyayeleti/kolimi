@@ -291,7 +291,61 @@ kolimi-server audit verify
 ```
 
 The same views are under **Admin → Audit**; **Verify chain** recomputes the
-hash chain.
+hash chain. See [operations.md](operations.md#audit-log) for checkpoints,
+signing, and anchoring.
+
+### Sign and anchor audit checkpoints
+
+Signing is local — no external service is required. Anchoring is optional and
+is the part that publishes the signed head somewhere the server cannot
+rewrite.
+
+1. Generate a key outside the data directory:
+
+   ```sh
+   sudo -u kolimi kolimi-server audit keygen \
+     --out /etc/kolimi/audit-signing.key --label main
+   sudo chmod 600 /etc/kolimi/audit-signing.key
+   ```
+
+2. Add `KOLIMI_AUDIT_SIGNING_KEY=/etc/kolimi/audit-signing.key` to the
+   server environment and restart. Sealing now signs every new checkpoint.
+   Backfill old ones with:
+
+   ```sh
+   kolimi-server audit sign --key /etc/kolimi/audit-signing.key --all
+   ```
+
+3. Verify against the public key you keep somewhere outside the server:
+
+   ```sh
+   kolimi-server audit verify --trusted-key <hex-public-key> --require-signatures
+   ```
+
+4. Optionally publish heads. A mounted journal:
+
+   ```sh
+   KOLIMI_AUDIT_ANCHOR_LOG=/mnt/audit-anchors/kolimi.jsonl
+   ```
+
+   or an HTTPS sink:
+
+   ```sh
+   KOLIMI_AUDIT_ANCHOR_URL=https://anchors.example.net/kolimi
+   KOLIMI_AUDIT_ANCHOR_TOKEN=...
+   ```
+
+   Then verify against a copy of that log:
+
+   ```sh
+   kolimi-server audit verify --trusted-keys FILE \
+     --anchor-log /mnt/audit-anchors/kolimi.jsonl
+   ```
+
+If a configured key cannot be loaded, sealing is refused rather than writing
+unsigned checkpoints. A journal on the server's own disk adds no protection;
+use WORM/object-lock storage or a second host. Details and rotation:
+[operations.md](operations.md#signing-checkpoints).
 
 ### Scrape metrics
 
